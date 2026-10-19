@@ -1,0 +1,225 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createRedactedRunMetric } from "../subagent-bridge/src/metrics.js";
+import { resolveReliabilityBudget } from "../subagent-bridge/src/services/reliability-budget.js";
+import { calculateRetryDelayMs, classifyProcessFailure, isRetryableFailure } from "../subagent-bridge/src/retry.js";
+import { shouldRetry } from "../subagent-bridge/src/services/retry-service.js";
+import { parseDeepSeekEnvelope, validateDeepSeekResult } from "../subagent-bridge/src/result.js";
+import { createDeepSeekCheckpoint, DEEPSEEK_FLASH_MODEL_DOCUMENTED_VERSION, DEEPSEEK_FLASH_MODEL_VERSION_REVIEW_AFTER, DEEPSEEK_FLASH_MODEL_VERSION_SOURCE_URL, DEEPSEEK_FLASH_MODEL_VERSION_VERIFIED_AT, hasExactModelId, isCalendarDate, normalizeOpenCodeDeepSeekResult, resolveDeepSeekModel } from "../subagent-bridge/src/deepseek.js";
+
+function createStructuredResult(overrides = {}) {
+  return {
+    status: "completed",
+    summary: "Doğrulanmış sonuç",
+    findings: [{
+      title: "Bulgu",
+      evidence: "Kanıt",
+      impact: "Etki",
+      recommendation: "Öneri",
+      confidence: "high"
+    }],
+    proposed_steps: ["Adım"],
+    risks: [],
+    questions: [],
+    requires_human_approval: false,
+    ...overrides
+  };
+}
+
+test("DeepSeek structured output çalışma zamanında sıkı doğrulanır", () => {
+  assert.equal(validateDeepSeekResult(createStructuredResult()).success, true);
+  assert.equal(validateDeepSeekResult(createStructuredResult({ requires_human_approval: "false" })).success, false);
+  assert.equal(validateDeepSeekResult(createStructuredResult({ unexpected: true })).success, false);
+  const parsed = parseDeepSeekEnvelope(JSON.stringify({ structured_output: createStructuredResult() }));
+  assert.equal(parsed.ok, true);
+  const malformed = parseDeepSeekEnvelope("{");
+  assert.equal(malformed.errorClass, "output_parse_invalid");
+  const fenced = parseDeepSeekEnvelope("```json\n" + JSON.stringify(createStructuredResult()) + "\n```");
+  assert.equal(fenced.ok, true);
+  const wrapped = parseDeepSeekEnvelope("Sonuç:\n" + JSON.stringify(createStructuredResult()) + "\nTamamlandı.");
+  assert.equal(wrapped.ok, true);
+  const invalidSchema = parseDeepSeekEnvelope(JSON.stringify({ structured_output: { status: "completed" } }));
+  assert.equal(invalidSchema.errorClass, "schema_invalid");
+});
+
+test("reliability-budget eksik config'te sonlu maxAttempts üretir", () => {
+  const budget = resolveReliabilityBudget({}, "codex", 30000);
+  assert.ok(Number.isFinite(budget.maxAttempts));
+  assert.ok(budget.maxAttempts <= 10);
+  assert.ok(Number.isFinite(budget.maxTotalDurationMs));
+});
+
+test("model_access_denied kalıcı hata sınıfıdır ve retry edilmez", () => {
+  const decision = shouldRetry("model_access_denied", "read_only", 1, 3, {});
+  assert.equal(decision.retryable, false);
+  assert.equal(decision.reason, "non_retryable_failure_class");
+});
+
+test("yalnızca geçici hata sınıfları retry için uygundur", () => {
+  assert.equal(classifyProcessFailure({ code: 1, stdout: "", stderr: JSON.stringify({ type: "error", error: { code: "rate_limited" } }) }), "rate_limited");
+  assert.equal(classifyProcessFailure({ code: 1, stdout: "documentation: HTTP 429 quota example", stderr: "" }), "process_exit");
+  assert.equal(classifyProcessFailure({ code: 1, stdout: "", stderr: "Tool execution aborted; log quoted rate limit" }), "process_exit");
+  assert.equal(classifyProcessFailure({ code: 1, stdout: "", stderr: "HTTP 503 service unavailable" }), "server");
+  assert.equal(classifyProcessFailure({ code: 1, stdout: "", stderr: "network connection reset" }), "network");
+  assert.equal(classifyProcessFailure({ error: Object.assign(new Error("process command-line budget exceeded"), { code: "ENAMETOOLONG", failureClass: "prompt_transport_limit" }) }), "prompt_transport_limit");
+  assert.equal(classifyProcessFailure({ error: Object.assign(new Error("spawn codex ENOENT"), { code: "ENOENT" }) }), "executable_missing");
+  assert.equal(isRetryableFailure("rate_limited"), true);
+  assert.equal(isRetryableFailure("provider_temporary_error"), true);
+  assert.equal(isRetryableFailure("schema_invalid"), false);
+  assert.equal(isRetryableFailure("output_parse_invalid"), false);
+  assert.equal(isRetryableFailure("empty_output"), true);
+  assert.equal(isRetryableFailure("process_exit"), false);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 0), 0);
+  assert.equal(calculateRetryDelayMs(4, 1000, 8000, 1), 8000);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 1, "rate_limited"), 4000);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 0, "rate_limited"), 0);
+  assert.equal(calculateRetryDelayMs(2, 1000, 8000, 1, "rate_limited"), 8000);
+});
+
+test("salt-okunur empty_output tek bounded retry alır; edit empty_output için mutation state unknown kalır", () => {
+  const noDelay = { baseDelayMs: 0, maxDelayMs: 0 };
+  assert.deepEqual(shouldRetry("empty_output", "read_only", 1, 5, noDelay), { retryable: true, delayMs: 0 });
+  assert.deepEqual(shouldRetry("empty_output", "read_only", 2, 5, noDelay), { retryable: false, reason: "max_attempts_reached" });
+  assert.deepEqual(shouldRetry("empty_output", "edit", 1, 5), { retryable: false, reason: "mutation_state_unknown" });
+});
+
+test("retry full jitter deterministik aralıkta ilerler", () => {
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 0, "rate_limited"), 0);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 0.5, "rate_limited"), 2000);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 1, "rate_limited"), 4000);
+  assert.equal(calculateRetryDelayMs(2, 1000, 8000, 0.5, "rate_limited"), 4000);
+  assert.equal(calculateRetryDelayMs(3, 1000, 8000, 1, "rate_limited"), 8000);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 0.5), 500);
+  assert.equal(calculateRetryDelayMs(2, 1000, 8000, 0.5), 1000);
+  assert.equal(calculateRetryDelayMs(5, 1000, 8000, 1), 8000);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, -3, "rate_limited"), 0);
+  assert.equal(calculateRetryDelayMs(1, 1000, 8000, 4, "rate_limited"), 4000);
+});
+
+test("retry maliyet rezervi kalan bütçe rezervden küçük olduğunda retry engeller", () => {
+  const result = shouldRetry("rate_limited", "read_only", 1, 3, {
+    maxRetryCostUsd: 1,
+    maxRetryCostReserveUsd: 0.1,
+    currentCost: 0.91
+  });
+  assert.equal(result.retryable, false);
+  assert.equal(result.reason, "budget_reserved");
+});
+
+test("yerel metrik görev kimliği ve çalışma alanı yolunu saklamaz", () => {
+  const metric = createRedactedRunMetric({
+    runId: "private-task-123-run",
+    taskId: "private-task-123",
+    agent: "deepseek",
+    role: "researcher",
+    model: "deepseek-v4-pro[1m]",
+    failureClass: null,
+    usage: { durationMs: 1000, apiDurationMs: 900, turns: 2, totalCostUsd: 0.1 },
+    result: createStructuredResult(),
+    attempts: [{
+      number: 1,
+      failureClass: null,
+      exitCode: 0,
+      durationMs: 1000,
+      apiDurationMs: 900,
+      turns: 2,
+      totalCostUsd: 0.1,
+      retryDelayMs: null
+    }]
+  });
+  const serializedMetric = JSON.stringify(metric);
+  assert.equal(serializedMetric.includes("private-task-123"), false);
+  assert.equal(metric.attempts.length, 1);
+});
+
+test("DeepSeek Flash seçimi canonical modele resolve edilir ve uydurma sürüm kimliği reddedilir", () => {
+  const configuration = { deepseek: { openCodeModel: "deepseek/deepseek-v4-pro", openCodeFlashModel: "deepseek/deepseek-flash" } };
+  assert.equal(resolveDeepSeekModel(configuration, "deepseek_pro"), "deepseek/deepseek-v4-pro");
+  assert.equal(resolveDeepSeekModel(configuration, "deepseek_flash"), "deepseek/deepseek-flash");
+  assert.throws(() => resolveDeepSeekModel(configuration, "deepseek_v4_1_flash"), /Desteklenmeyen/);
+  assert.throws(() => resolveDeepSeekModel(configuration, "deepseek/deepseek-v4.1-flash"), /Desteklenmeyen/);
+  assert.throws(() => resolveDeepSeekModel(configuration, "unknown"), /Desteklenmeyen/);
+});
+
+test("Legacy flash kimliğiyle yapılandırılmış köprü deepseek_flash aliasını legacy kimliğe çözer", () => {
+  const configuration = { deepseek: { openCodeModel: "deepseek/deepseek-v4-pro", openCodeFlashModel: "deepseek/deepseek-v4-flash" } };
+  assert.equal(resolveDeepSeekModel(configuration, "deepseek_flash"), "deepseek/deepseek-v4-flash");
+  assert.equal(resolveDeepSeekModel(configuration, "deepseek_pro"), "deepseek/deepseek-v4-pro");
+});
+
+test("DeepSeek Flash sürüm bildirimi gerçek takvim tarihleri ve gözden geçirme tarihiyle sınırlıdır", () => {
+  assert.equal(DEEPSEEK_FLASH_MODEL_DOCUMENTED_VERSION, "DeepSeek-V4.1-Flash");
+  assert.equal(isCalendarDate(DEEPSEEK_FLASH_MODEL_VERSION_VERIFIED_AT), true);
+  assert.equal(isCalendarDate(DEEPSEEK_FLASH_MODEL_VERSION_REVIEW_AFTER), true);
+  assert.equal(isCalendarDate("2026-02-30"), false);
+  assert.equal(isCalendarDate("2026-9-6"), false);
+  assert.match(DEEPSEEK_FLASH_MODEL_VERSION_SOURCE_URL, /^https:\/\//);
+  assert.ok(DEEPSEEK_FLASH_MODEL_VERSION_REVIEW_AFTER > DEEPSEEK_FLASH_MODEL_VERSION_VERIFIED_AT);
+});
+
+test("DeepSeek model health kontrolü yalnız tam model kimliğini kabul eder", () => {
+  const models = "deepseek/deepseek-v4-pro\ndeepseek/deepseek-v4-flash-lite";
+  assert.equal(hasExactModelId(models, "deepseek/deepseek-v4-pro"), true);
+  assert.equal(hasExactModelId(models, "deepseek/deepseek-v4-flash"), false);
+});
+
+test("DeepSeek checkpoint gerçek deneme ve model kimliği ayrıntılarını korur", () => {
+  const checkpoint = createDeepSeekCheckpoint({ taskId: "test", role: "analyst", model: "deepseek_pro" }, {
+    ok: false,
+    model: "deepseek/deepseek-v4-pro",
+    resolvedModel: "deepseek/deepseek-v4-pro",
+    exitCode: 1,
+    durationMs: 200,
+    reason: "timeout",
+    metrics: {
+      totalCostUsd: 0.2,
+      attempts: [
+        { number: 1, failureClass: "rate_limited", exitCode: 1, durationMs: 50, totalCostUsd: 0.1 },
+        { number: 2, failureClass: "timeout", exitCode: null, durationMs: 150, totalCostUsd: 0.1 }
+      ]
+    }
+  });
+  assert.deepEqual(checkpoint.attempts.map((attempt) => attempt.failureClass), ["rate_limited", "timeout"]);
+  assert.deepEqual(checkpoint.attempts.map((attempt) => attempt.durationMs), [50, 150]);
+  assert.equal(checkpoint.failureClass, "timeout");
+  assert.match(checkpoint.result.summary, /Subagent execution failed \(timeout\)/u);
+  assert.doesNotMatch(checkpoint.result.summary, /structured output validation failed/u);
+  assert.equal(checkpoint.requestedModel, "deepseek_pro");
+  assert.equal(checkpoint.resolvedModel, "deepseek/deepseek-v4-pro");
+  assert.equal(checkpoint.accessMode, "read_only");
+});
+
+test("DeepSeek checkpoint separates operational failures from structured-output validation failures", () => {
+  const input = { taskId: "checkpoint-classification", role: "analyst", model: "deepseek_pro" };
+  const operationalFailure = createDeepSeekCheckpoint(input, {
+    ok: false,
+    model: "deepseek/deepseek-v4-pro",
+    resolvedModel: "deepseek/deepseek-v4-pro",
+    exitCode: 1,
+    durationMs: 10,
+    reason: "process_exit",
+    metrics: { retries: 0, totalCostUsd: null }
+  });
+  const schemaFailure = createDeepSeekCheckpoint(input, {
+    ok: true,
+    model: "deepseek/deepseek-v4-pro",
+    resolvedModel: "deepseek/deepseek-v4-pro",
+    result: "not valid structured output",
+    exitCode: 0,
+    durationMs: 10,
+    reason: undefined,
+    metrics: { retries: 0, totalCostUsd: 0 }
+  });
+
+  assert.equal(operationalFailure.failureClass, "process_exit");
+  assert.match(operationalFailure.result.summary, /Subagent execution failed \(process_exit\)/u);
+  assert.doesNotMatch(operationalFailure.result.summary, /structured output validation failed/u);
+  assert.equal(schemaFailure.failureClass, "output_parse_invalid");
+  assert.match(schemaFailure.result.summary, /Structured output validation failed \(output_parse_invalid\)/u);
+});
+
+test("OpenCode DeepSeek yalnız geçerli yapılandırılmış sonucu kabul eder", () => {
+  const result = normalizeOpenCodeDeepSeekResult("Kısa danışmanlık özeti");
+  assert.equal(result.ok, false);
+  assert.equal(result.errorClass, "output_parse_invalid");
+});

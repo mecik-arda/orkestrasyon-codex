@@ -1,0 +1,1268 @@
+import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import test from "node:test";
+import { createReadOnlyResultCache } from "../subagent-bridge/src/services/read-only-cache.js";
+import { createProviderCircuitBreaker } from "../subagent-bridge/src/services/provider-circuit-breaker.js";
+import { resolveReliabilityBudget } from "../subagent-bridge/src/services/reliability-budget.js";
+import { createWorkspaceCoordinator, withGuard } from "../subagent-bridge/src/services/workspace-coordinator.js";
+import { resolveRuntimeRoute } from "../subagent-bridge/src/runtime/router.js";
+import { createMcpToolHandlers } from "../subagent-bridge/src/frontends/mcp/tools.js";
+import { readMetricsDirectory, summarizeMetrics } from "../scripts/report-metrics.js";
+import { appendRedactedRunMetric, getCostBudgetSnapshot, listPendingDirectEditFeedback, listPendingRoutingFeedback, listRoutingCandidates, pruneMetricFiles, recordDirectEditFeedback, recordRoutingDisposition, recordRoutingFeedback, reserveCostBudget, settleCostBudget, withMetricLock } from "../subagent-bridge/src/metrics.js";
+
+test("OPT-01: processler arası coordinator paralel okumayı korur ve yazmayı sıraya alır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const first = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  const second = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  const readOne = await first.acquire(root, "read_only", "read-one");
+  const readTwo = await second.acquire(root, "read_only", "read-two");
+  let editResolved = false;
+  const edit = second.acquire(root, "edit", "edit-one").then((value) => {
+    editResolved = true;
+    return value;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(readOne);
+  assert.ok(readTwo);
+  assert.equal(editResolved, false);
+  first.release("read-one");
+  second.release("read-two");
+  assert.ok(await edit);
+  second.release("edit-one");
+  assert.ok(await first.acquire(root, "edit", "external-holder"));
+  const externalWaiter = second.acquire(root, "read_only", "external-waiter");
+  first.release("external-holder");
+  const externalGrant = await Promise.race([
+    externalWaiter,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("external release was not observed")), 1000))
+  ]);
+  assert.ok(externalGrant);
+  second.release("external-waiter");
+  assert.ok(await first.acquire(root, "read_only", "reader-before-writer"));
+  const originalNow = Date.now;
+  const enqueueTime = originalNow();
+  let waitingWriter;
+  let laterReader;
+  try {
+    Date.now = () => enqueueTime;
+    waitingWriter = second.acquire(root, "edit", "waiting-writer", 10);
+    laterReader = second.acquire(root, "read_only", "later-reader", 30);
+  } finally {
+    Date.now = originalNow;
+  }
+  first.release("reader-before-writer");
+  assert.ok(await waitingWriter);
+  let laterReaderResolved = false;
+  laterReader.then(() => { laterReaderResolved = true; });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(laterReaderResolved, false);
+  second.release("waiting-writer");
+  assert.ok(await laterReader);
+  second.release("later-reader");
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const guardPath = path.join(root, "locks", workspaceHash, "guard.lock");
+  fs.writeFileSync(guardPath, "stale", "utf8");
+  const staleAt = new Date(Date.now() - 1000);
+  fs.utimesSync(guardPath, staleAt, staleAt);
+  const staleCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks"), staleLockMs: 10 });
+  assert.ok(await staleCoordinator.acquire(root, "read_only", "stale-guard-reader"));
+  staleCoordinator.release("stale-guard-reader");
+});
+
+test("OPT-01a: eski guard sahibi yeni guard dosyasını silemez", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-guard-owner-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const guardPath = path.join(root, "guard.lock");
+  assert.equal(withGuard(root, 1000, () => {
+    fs.writeFileSync(guardPath, "replacement", "utf8");
+    return true;
+  }), true);
+  assert.equal(fs.readFileSync(guardPath, "utf8"), "replacement");
+});
+
+test("OPT-PROVIDER-TRY-01: non-blocking lease aynı host süreçleri arasında slot sınırını uygular", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-provider-slot-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const first = createWorkspaceCoordinator({ lockDirectory });
+  const second = createWorkspaceCoordinator({ lockDirectory });
+  const profileSlot = "provider-admission:opencode:deepseek:slot:0";
+
+  assert.ok(first.tryAcquire(profileSlot, "provider-slot-owner"));
+  assert.equal(second.tryAcquire(profileSlot, "provider-slot-waiter"), null);
+  first.release("provider-slot-owner");
+  assert.ok(second.tryAcquire(profileSlot, "provider-slot-waiter"));
+  second.release("provider-slot-waiter");
+});
+
+test("OPT-PROVIDER-TRY-02: bağımsız Node processleri aynı provider slotunu paylaşır", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-provider-slot-process-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const moduleUrl = pathToFileURL(path.resolve("subagent-bridge/src/services/workspace-coordinator.js")).href;
+  const profileSlot = "provider-admission:opencode:deepseek:slot:0";
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const probe = (executionId) => {
+    const source = `import { createWorkspaceCoordinator } from ${JSON.stringify(moduleUrl)}; const coordinator = createWorkspaceCoordinator({ lockDirectory: ${JSON.stringify(lockDirectory)} }); const grant = coordinator.tryAcquire(${JSON.stringify(profileSlot)}, ${JSON.stringify(executionId)}); if (!grant) { process.stdout.write("busy"); } else { process.stdout.write("acquired"); coordinator.release(${JSON.stringify(executionId)}); }`;
+    return childProcess.spawnSync(process.execPath, ["--input-type=module", "--eval", source], { encoding: "utf8", timeout: 5000 });
+  };
+
+  assert.ok(coordinator.tryAcquire(profileSlot, "provider-slot-parent"));
+  const busy = probe("provider-slot-child-busy");
+  assert.equal(busy.status, 0, busy.stderr);
+  assert.equal(busy.stdout, "busy");
+  coordinator.release("provider-slot-parent");
+  const available = probe("provider-slot-child-available");
+  assert.equal(available.status, 0, available.stderr);
+  assert.equal(available.stdout, "acquired");
+});
+
+test("OPT-01aa: etkin lease staleLockMs aşılırken silinmez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-lease-heartbeat-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const options = { lockDirectory: path.join(root, "locks"), staleLockMs: 3000, leaseHeartbeatMs: 20 };
+  const first = createWorkspaceCoordinator(options);
+  const second = createWorkspaceCoordinator(options);
+  assert.ok(await first.acquire(root, "edit", "lease-holder"));
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const writeLockPath = path.join(root, "locks", workspaceHash, "write.lock");
+  const staleAt = new Date(Date.now() - 2000);
+  fs.utimesSync(writeLockPath, staleAt, staleAt);
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.ok(Date.now() - fs.statSync(writeLockPath).mtimeMs < options.staleLockMs);
+  let secondAcquired = false;
+  const waiting = second.acquire(root, "edit", "lease-waiter").then((grant) => {
+    secondAcquired = Boolean(grant);
+    return grant;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(secondAcquired, false);
+  first.release("lease-holder");
+  assert.ok(await waiting);
+  second.release("lease-waiter");
+});
+
+test("OPT-01aa1: stale mtime cannot steal a lock from a live process", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-live-owner-lock-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const options = { lockDirectory: path.join(root, "locks"), staleLockMs: 1000, leaseHeartbeatMs: 60000, maxWaitAttempts: 0 };
+  const first = createWorkspaceCoordinator(options);
+  const second = createWorkspaceCoordinator(options);
+  assert.ok(await first.acquire(root, "edit", "live-owner"));
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const writeLockPath = path.join(root, "locks", workspaceHash, "write.lock");
+  const staleAt = new Date(Date.now() - 2000);
+  fs.utimesSync(writeLockPath, staleAt, staleAt);
+  assert.equal(await second.acquire(root, "edit", "live-waiter"), null);
+  assert.equal(fs.existsSync(writeLockPath), true);
+  first.release("live-owner");
+});
+
+test("OPT-01aa2: lock ownership assertion fences a replaced lease", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-lock-fencing-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  assert.ok(await coordinator.acquire(root, "edit", "owner-one"));
+  assert.equal(coordinator.assertOwner(root, "owner-one"), true);
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const writeLockPath = path.join(root, "locks", workspaceHash, "write.lock");
+  fs.writeFileSync(writeLockPath, JSON.stringify({ ownerId: "owner-two", pid: process.pid, createdAt: new Date().toISOString() }), "utf8");
+  assert.equal(coordinator.assertOwner(root, "owner-one"), false);
+  coordinator.release("owner-one");
+  assert.equal(fs.existsSync(writeLockPath), true);
+});
+
+test("OPT-01aaa: coordinator sınırlı bekleme sonrası isteği fail-closed reddeder", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-wait-limit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const holder = createWorkspaceCoordinator({ lockDirectory });
+  const waiter = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
+  assert.ok(await holder.acquire(root, "edit", "wait-limit-holder"));
+  assert.equal(await waiter.acquire(root, "read_only", "wait-limit-reader"), null);
+  assert.equal(waiter.snapshot().localQueued, 0);
+  holder.release("wait-limit-holder");
+});
+
+test("OPT-01ab: metric lock canlı sahibi silmez ve ölü sahibi temizler", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-metric-lock-owner-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockPath = path.join(root, "metric.lock");
+  fs.writeFileSync(lockPath, JSON.stringify({ token: crypto.randomUUID(), pid: process.pid, createdAt: new Date().toISOString() }), "utf8");
+  await assert.rejects(() => withMetricLock(lockPath, async () => {}, { timeoutMs: 80 }), /metric lock unavailable/);
+  assert.equal(fs.existsSync(lockPath), true);
+  const exitedProcess = childProcess.spawn(process.execPath, ["--eval", "process.exit(0)"], { stdio: "ignore" });
+  await new Promise((resolve, reject) => {
+    exitedProcess.once("error", reject);
+    exitedProcess.once("exit", resolve);
+  });
+  const deadOwner = { token: crypto.randomUUID(), pid: exitedProcess.pid, createdAt: new Date().toISOString() };
+  fs.writeFileSync(lockPath, JSON.stringify(deadOwner), "utf8");
+  assert.equal(await withMetricLock(lockPath, async () => "acquired", { timeoutMs: 3000 }), "acquired");
+  assert.equal(fs.existsSync(lockPath), false);
+});
+
+test("OPT-01b: bağımsız Node processleri aynı workspace yazma kilidini paylaşır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-process-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const moduleUrl = pathToFileURL(path.resolve("subagent-bridge/src/services/workspace-coordinator.js")).href;
+  const launch = (executionId, holdMs) => {
+    const source = `import { createWorkspaceCoordinator } from ${JSON.stringify(moduleUrl)}; const coordinator = createWorkspaceCoordinator({ lockDirectory: ${JSON.stringify(path.join(root, "locks"))} }); const grant = await coordinator.acquire(${JSON.stringify(root)}, "edit", ${JSON.stringify(executionId)}); if (!grant) process.exit(1); process.stdout.write("acquired\\n"); setTimeout(() => { coordinator.release(${JSON.stringify(executionId)}); }, ${holdMs});`;
+    return childProcess.spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["ignore", "pipe", "ignore"] });
+  };
+  const waitForAcquire = (child) => new Promise((resolve, reject) => {
+    let output = "";
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error("coordinator process did not acquire the lock"));
+    }, 5000);
+    child.stdout.on("data", (chunk) => {
+      output += chunk.toString("utf8");
+      if (output.includes("acquired")) {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      if (!output.includes("acquired")) {
+        clearTimeout(timeout);
+        reject(new Error(`coordinator process exited with ${code}`));
+      }
+    });
+  });
+  const waitForExit = (child) => new Promise((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`coordinator process exited with ${code}`))));
+  const first = launch("first-writer", 200);
+  const firstExit = waitForExit(first);
+  await waitForAcquire(first);
+  const startedAt = Date.now();
+  const second = launch("second-writer", 0);
+  const secondExit = waitForExit(second);
+  await waitForAcquire(second);
+  assert.ok(Date.now() - startedAt >= 150);
+  await Promise.all([firstExit, secondExit]);
+});
+
+test("OPT-01c: coordinator snapshot owner ve workspace kimliği göstermeden kuyruk durumunu raporlar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-snapshot-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  assert.ok(await coordinator.acquire(root, "edit", "private-owner"));
+  const waiting = coordinator.acquire(root, "read_only", "private-waiter");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const snapshot = coordinator.snapshot();
+  assert.equal(snapshot.localActive, 1);
+  assert.equal(snapshot.localQueued, 1);
+  assert.equal(snapshot.lockCount, 1);
+  assert.deepEqual(snapshot.externalDiskLocks, ["lock-1"]);
+  assert.equal(JSON.stringify(snapshot).includes("private-owner"), false);
+  assert.equal(JSON.stringify(snapshot).includes(root), false);
+  coordinator.release("private-owner");
+  assert.ok(await waiting);
+  coordinator.release("private-waiter");
+});
+
+test("OPT-01d: kuyruktaki yazarlar öncelik sırasına göre edinir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-priority-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  t.after(() => {
+    coordinator.cancel("priority-holder");
+    coordinator.cancel("priority-low");
+    coordinator.cancel("priority-high");
+    coordinator.release("priority-holder");
+    coordinator.release("priority-low");
+    coordinator.release("priority-high");
+  });
+  assert.ok(await coordinator.acquire(root, "edit", "priority-holder"));
+  let lowResolved = false;
+  let highResolved = false;
+  const low = coordinator.acquire(root, "edit", "priority-low", 0).then((grant) => {
+    lowResolved = Boolean(grant);
+    return grant;
+  });
+  const high = coordinator.acquire(root, "edit", "priority-high", 10).then((grant) => {
+    highResolved = Boolean(grant);
+    return grant;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(lowResolved, false);
+  assert.equal(highResolved, false);
+  coordinator.release("priority-holder");
+  assert.ok(await high);
+  assert.equal(lowResolved, false);
+  coordinator.release("priority-high");
+  assert.ok(await low);
+  coordinator.release("priority-low");
+});
+
+test("OPT-01e: kuyruk yazarının iptali intent dosyasını temizler ve bekleyen okuyucuyu açar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-cancel-intent-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  t.after(() => {
+    coordinator.cancel("cancel-active-reader");
+    coordinator.cancel("cancel-writer");
+    coordinator.cancel("cancel-blocked-reader");
+    coordinator.release("cancel-active-reader");
+    coordinator.release("cancel-writer");
+    coordinator.release("cancel-blocked-reader");
+  });
+  assert.ok(await coordinator.acquire(root, "read_only", "cancel-active-reader"));
+  const cancelledWriter = coordinator.acquire(root, "edit", "cancel-writer");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const intentPath = path.join(root, "locks", crypto.createHash("sha256").update(root).digest("hex"), `writer-${crypto.createHash("sha256").update("cancel-writer").digest("hex")}.intent`);
+  assert.equal(fs.existsSync(intentPath), true);
+  let blockedReaderResolved = false;
+  const blockedReader = coordinator.acquire(root, "read_only", "cancel-blocked-reader").then((grant) => {
+    blockedReaderResolved = Boolean(grant);
+    return grant;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(blockedReaderResolved, false);
+  assert.equal(coordinator.cancel("cancel-writer"), true);
+  assert.equal(fs.existsSync(intentPath), false);
+  assert.equal(await cancelledWriter, null);
+  assert.ok(await blockedReader);
+  coordinator.release("cancel-blocked-reader");
+  coordinator.release("cancel-active-reader");
+});
+
+test("OPT-01f: workspace kuyruk kapasitesi aşımında istek hemen reddedilir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-capacity-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks"), maxQueuedPerWorkspace: 2 });
+  t.after(() => {
+    coordinator.cancel("capacity-holder");
+    coordinator.cancel("capacity-queued-1");
+    coordinator.cancel("capacity-queued-2");
+    coordinator.cancel("capacity-overflow");
+    coordinator.release("capacity-holder");
+    coordinator.release("capacity-queued-1");
+    coordinator.release("capacity-queued-2");
+    coordinator.release("capacity-overflow");
+  });
+  assert.ok(await coordinator.acquire(root, "edit", "capacity-holder"));
+  const first = coordinator.acquire(root, "edit", "capacity-queued-1");
+  const second = coordinator.acquire(root, "read_only", "capacity-queued-2");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(await coordinator.acquire(root, "edit", "capacity-overflow"), null);
+  assert.equal(coordinator.snapshot().localQueued, 2);
+  coordinator.cancel("capacity-queued-1");
+  coordinator.cancel("capacity-queued-2");
+  assert.equal(await first, null);
+  assert.equal(await second, null);
+  coordinator.release("capacity-holder");
+});
+
+test("OPT-01g: ölü okuyucunun bayat kilidi yazma edinimi sırasında temizlenir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-stale-read-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const staleReadPath = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"), `read-${crypto.createHash("sha256").update("dead-reader").digest("hex")}.lock`);
+  fs.mkdirSync(path.dirname(staleReadPath), { recursive: true });
+  fs.writeFileSync(staleReadPath, "dead-owner", "utf8");
+  const staleAt = new Date(Date.now() - 2000);
+  fs.utimesSync(staleReadPath, staleAt, staleAt);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 100 });
+  t.after(() => {
+    coordinator.cancel("stale-read-writer");
+    coordinator.release("stale-read-writer");
+  });
+  assert.ok(await coordinator.acquire(root, "edit", "stale-read-writer"));
+  assert.equal(fs.existsSync(staleReadPath), false);
+  coordinator.release("stale-read-writer");
+});
+
+test("OPT-01h: farklı workspace'ler aynı kilit dizininde birbirini engellemez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-isolation-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspaceA = path.join(root, "workspace-a");
+  const workspaceB = path.join(root, "workspace-b");
+  fs.mkdirSync(workspaceA);
+  fs.mkdirSync(workspaceB);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  t.after(() => {
+    coordinator.cancel("isolation-a");
+    coordinator.cancel("isolation-b");
+    coordinator.release("isolation-a");
+    coordinator.release("isolation-b");
+  });
+  assert.ok(await coordinator.acquire(workspaceA, "edit", "isolation-a"));
+  assert.ok(await coordinator.acquire(workspaceB, "edit", "isolation-b"));
+  assert.equal(coordinator.snapshot().localActive, 2);
+  coordinator.release("isolation-a");
+  assert.equal(coordinator.snapshot().localActive, 1);
+  const workspaceBLockPath = path.join(root, "locks", crypto.createHash("sha256").update(workspaceB).digest("hex"), "write.lock");
+  assert.equal(fs.existsSync(workspaceBLockPath), true);
+  coordinator.release("isolation-b");
+});
+
+test("OPT-02: read-only cache içerik parmak iziyle anahtar üretir ve belirsiz kapsamı reddeder", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cache-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  childProcess.execFileSync("git", ["init", root], { stdio: "ignore" });
+  childProcess.execFileSync("git", ["-C", root, "config", "user.email", "test@example.invalid"]);
+  childProcess.execFileSync("git", ["-C", root, "config", "user.name", "Bridge Test"]);
+  fs.writeFileSync(path.join(root, "README.md"), "cache", "utf8");
+  fs.writeFileSync(path.join(root, ".gitignore"), "local-input\nignored-dir/\n", "utf8");
+  childProcess.execFileSync("git", ["-C", root, "add", "README.md", ".gitignore"]);
+  childProcess.execFileSync("git", ["-C", root, "commit", "-m", "initial"], { stdio: "ignore" });
+  const cache = createReadOnlyResultCache();
+  const key = await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" });
+  cache.set(key, { ok: true, result: "cached", metrics: { retries: 0 } });
+  assert.equal(cache.get(key).result, "cached");
+  assert.equal(await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "different" }) === key, false);
+  fs.writeFileSync(path.join(root, "local-input"), "ignored but mutable", "utf8");
+  const ignoredKey = await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" });
+  assert.equal(typeof ignoredKey, "string");
+  assert.equal(ignoredKey === key, false);
+  fs.writeFileSync(path.join(root, "local-input"), "ignored content changed", "utf8");
+  assert.equal(await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" }) === ignoredKey, false);
+  fs.writeFileSync(path.join(root, "dirty.txt"), "dirty", "utf8");
+  const untrackedKey = await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" });
+  assert.equal(typeof untrackedKey, "string");
+  assert.equal(untrackedKey === ignoredKey, false);
+  fs.writeFileSync(path.join(root, "README.md"), "staged-alpha", "utf8");
+  childProcess.execFileSync("git", ["-C", root, "add", "README.md"]);
+  fs.writeFileSync(path.join(root, "README.md"), "cache", "utf8");
+  const stagedAlphaKey = await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" });
+  fs.writeFileSync(path.join(root, "README.md"), "staged-beta", "utf8");
+  childProcess.execFileSync("git", ["-C", root, "add", "README.md"]);
+  fs.writeFileSync(path.join(root, "README.md"), "cache", "utf8");
+  const stagedBetaKey = await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" });
+  assert.equal(typeof stagedAlphaKey, "string");
+  assert.equal(stagedAlphaKey === stagedBetaKey, false);
+  fs.mkdirSync(path.join(root, "ignored-dir"));
+  fs.writeFileSync(path.join(root, "ignored-dir", "artifact.bin"), "artifact", "utf8");
+  assert.equal(await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" }), null);
+});
+
+test("OPT-02b: cache parmak izi boyut sınırını aşan ignored dosyada kapanır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cache-size-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  childProcess.execFileSync("git", ["init", root], { stdio: "ignore" });
+  childProcess.execFileSync("git", ["-C", root, "config", "user.email", "test@example.invalid"]);
+  childProcess.execFileSync("git", ["-C", root, "config", "user.name", "Bridge Test"]);
+  fs.writeFileSync(path.join(root, "README.md"), "cache", "utf8");
+  fs.writeFileSync(path.join(root, ".gitignore"), "big.bin\n", "utf8");
+  childProcess.execFileSync("git", ["-C", root, "add", "README.md", ".gitignore"]);
+  childProcess.execFileSync("git", ["-C", root, "commit", "-m", "initial"], { stdio: "ignore" });
+  const cache = createReadOnlyResultCache();
+  fs.writeFileSync(path.join(root, "big.bin"), Buffer.alloc(1048577, 120));
+  assert.equal(await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" }), null);
+  fs.writeFileSync(path.join(root, "big.bin"), "small", "utf8");
+  assert.equal(typeof await cache.keyFor({ workspace: root, backend: "codex", model: "default", profile: "review", prompt: "inspect" }), "string");
+});
+
+test("OPT-01f1: writer intent bekleyen istek kuyruk kapasitesine dahildir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-pending-capacity-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const workspaceDirectory = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"));
+  fs.mkdirSync(workspaceDirectory, { recursive: true });
+  fs.writeFileSync(path.join(workspaceDirectory, "guard.lock"), "held", "utf8");
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, maxQueuedPerWorkspace: 1 });
+  const pendingWriter = coordinator.acquire(root, "edit", "pending-writer");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(coordinator.snapshot().localQueued, 1);
+  assert.equal(await coordinator.acquire(root, "edit", "overflow-writer"), null);
+  assert.equal(coordinator.cancel("pending-writer"), true);
+  assert.equal(await pendingWriter, null);
+});
+
+test("OPT-02a: read-only cache en eski girişi LRU sınırında çıkarır", () => {
+  const cache = createReadOnlyResultCache({ maxEntries: 2 });
+  cache.set("first", { ok: true, result: "first" });
+  cache.set("second", { ok: true, result: "second" });
+  assert.equal(cache.get("first").result, "first");
+  cache.set("third", { ok: true, result: "third" });
+  assert.equal(cache.get("second"), null);
+  assert.equal(cache.get("first").result, "first");
+  assert.equal(cache.get("third").result, "third");
+});
+
+test("OPT-03: profile canonical target ve modla route edilir", () => {
+  const configuration = { orchestration: { taskProfiles: { review: { target: "codex", mode: "read_only" } } } };
+  assert.deepEqual(resolveRuntimeRoute({ target: "profile", profile: "review" }, configuration), { backend: "codex", model: "default" });
+  assert.throws(() => resolveRuntimeRoute({ target: "profile", profile: "unknown" }, configuration), /unsupported task profile/);
+});
+
+test("OPT-03a: MCP profile modu policy tanımından alır", async () => {
+  let request = null;
+  const handlers = createMcpToolHandlers({
+    runtime: { run: async (value) => {
+      request = value;
+      return { ok: true, backend: "codex", model: "default", result: "ok", error: null, retryable: false, timedOut: false, exitCode: 0, durationMs: 0, metrics: { retries: 0 } };
+    } },
+    trustedWorkspace: "C:\\trusted",
+    configuration: { orchestration: { taskProfiles: { custom_review: { target: "codex", mode: "read_only" } } } }
+  });
+  await handlers.runProfile({ profile: "custom_review", prompt: "inspect" });
+  assert.equal(request.mode, "read_only");
+  assert.equal(request.profile, "custom_review");
+});
+
+test("OPT-03b: provider circuit open ve half-open tek probe sözleşmesini uygular", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-provider-circuit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const circuit = createProviderCircuitBreaker({ stateDirectory: root, failureThreshold: 1, windowMs: 1000, openMs: 100 });
+  assert.deepEqual(await circuit.beforeCall("codex", 1000), { allowed: true, state: "closed", probe: false });
+  await circuit.recordFailure("codex", 1000);
+  assert.deepEqual(await circuit.beforeCall("codex", 1050), { allowed: false, state: "open" });
+  assert.deepEqual(await circuit.beforeCall("codex", 1101), { allowed: true, state: "half_open", probe: true });
+  assert.deepEqual(await circuit.beforeCall("codex", 1102), { allowed: false, state: "half_open" });
+  await circuit.recordSuccess("codex", 1103);
+  assert.deepEqual(await circuit.beforeCall("codex", 1104), { allowed: true, state: "closed", probe: false });
+  const serializedState = fs.readdirSync(root).filter((entry) => entry.endsWith(".json")).map((entry) => fs.readFileSync(path.join(root, entry), "utf8")).join("\n");
+  assert.equal(serializedState.includes("codex"), false);
+});
+
+test("OPT-03c: süreçler arası circuit state tutarlılığı bozulmaz", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-provider-circuit-cross-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const circuitModule = pathToFileURL(path.resolve("subagent-bridge/src/services/provider-circuit-breaker.js")).href;
+  const fixedNow = 1000000;
+  const recordFailureInChild = () => new Promise((resolve, reject) => {
+    const source = `import { createProviderCircuitBreaker } from ${JSON.stringify(circuitModule)}; const breaker = createProviderCircuitBreaker({ stateDirectory: ${JSON.stringify(root)}, failureThreshold: 5, windowMs: 60000 }); await breaker.recordFailure("codex", ${fixedNow}); process.stdout.write("ok");`;
+    const child = childProcess.spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve(true) : reject(new Error(`circuit process exited with ${code}: ${stderr}`)));
+  });
+  await Promise.all(Array.from({ length: 10 }, () => recordFailureInChild()));
+  const breaker = createProviderCircuitBreaker({ stateDirectory: root, failureThreshold: 5, windowMs: 60000 });
+  const snapshot = await breaker.snapshot(["codex"], fixedNow);
+  assert.equal(snapshot.codex.state, "open");
+  assert.ok(snapshot.codex.failureCount >= 5, `failureCount=${snapshot.codex.failureCount}`);
+});
+
+test("OPT-04: reliability budget provider ve global sınırı birlikte uygular", () => {
+  const budget = resolveReliabilityBudget({
+    reliability: { maxAttempts: 3, maxTotalDurationMs: 60000, maxRetryCostUsd: 1, baseRetryDelayMs: 500, maxRetryDelayMs: 2000 },
+    codex: { timeoutMs: 90000, maxRetries: 1 }
+  }, "codex", 30000);
+  assert.equal(budget.maxAttempts, 2);
+  assert.equal(budget.timeoutMs, 30000);
+  assert.equal(budget.maxTotalDurationMs, 60000);
+  const defaultBudget = resolveReliabilityBudget({ reliability: { maxAttempts: 3 }, codex: { timeoutMs: 90000, maxRetries: 1 } }, "codex", 30000);
+  assert.equal(defaultBudget.maxTotalDurationMs, 60000);
+});
+
+test("OPT-05: telemetry özeti provider, percentile ve cache bilgisini taşır", () => {
+  const summary = summarizeMetrics([
+    { backend: "codex", outcomeStatus: "completed", failureClass: null, usage: { durationMs: 100, totalCostUsd: 0.01 }, attempts: [{}], retries: 0, cacheHit: false },
+    { backend: "antigravity", outcomeStatus: "failed", failureClass: "process_exit", usage: { durationMs: 200, totalCostUsd: null }, attempts: [{}, {}], retries: 1, cacheHit: true },
+    { recordType: "cost_settlement", backend: "cost", chargedCostUsd: 0.2 },
+    { recordType: "health_snapshot", recordedAt: "2026-08-11T00:00:00.000Z", backend: "bridge-health", adapters: { codex: { installed: true, authValid: true, error: null } } },
+    { recordType: "health_snapshot", recordedAt: "2026-08-11T00:01:00.000Z", backend: "bridge-health", adapters: { codex: { installed: true, authValid: false, error: "unavailable" } } }
+  ]);
+  assert.equal(summary.runCount, 2);
+  assert.equal(summary.p95DurationMs, 200);
+  assert.equal(summary.byBackend.codex.completed, 1);
+  assert.equal(summary.byBackend.antigravity.cacheHits, 1);
+  assert.equal(summary.averageAttempts, 1.5);
+  assert.equal(summary.health.observationCount, 2);
+  assert.equal(summary.health.byAdapter.codex.availabilityRate, 0.5);
+  assert.deepEqual(summary.directEditBaseline, {
+    totalEditRuns: 0,
+    eligibleEditRuns: 0,
+    ineligibleEditRuns: 0,
+    labeledEditRuns: 0,
+    conflictingLabeledRuns: 0,
+    pendingFeedback: 0,
+    dispositionCounts: {},
+    outcomes: { accepted: 0, minor_fix: 0, reverted: 0, security_concern: 0 },
+    interventionRate: null,
+    rollbackOrSecurityRate: null,
+    decisionReady: false,
+    byBackend: {},
+    byProfile: {}
+  });
+  assert.deepEqual(summary.routingEvaluation, { byProfile: {} });
+});
+
+test("OPT-05a: direct edit baseline yalnız redacted kullanıcı sonucunu özetler", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-edit-feedback-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = { statePaths: { logs: root }, observability: { maxMetricFileBytes: 65536 } };
+  const executionIdHash = crypto.createHash("sha256").update("private-edit-execution").digest("hex");
+  await appendRedactedRunMetric(configuration, {
+    recordedAt: "2026-08-11T00:00:00.000Z",
+    backend: "codex",
+    executionIdHash,
+    mode: "edit",
+    profile: "implementation",
+    outcomeStatus: "completed",
+    usage: { durationMs: 250, totalCostUsd: 0.02 },
+    attempts: [{}]
+  });
+  await appendRedactedRunMetric(configuration, {
+    recordedAt: "2026-08-11T00:01:00.000Z",
+    backend: "codex",
+    executionIdHash: crypto.createHash("sha256").update("failed-private-edit-execution").digest("hex"),
+    mode: "edit",
+    outcomeStatus: "failed",
+    usage: { durationMs: 250, totalCostUsd: 0.02 },
+    attempts: [{}]
+  });
+  assert.deepEqual(listPendingDirectEditFeedback(configuration), [{
+    feedbackId: executionIdHash.slice(0, 12),
+    backend: "codex",
+    recordedAt: "2026-08-11T00:00:00.000Z",
+    outcomeStatus: "completed",
+    durationMs: 250,
+    totalCostUsd: 0.02
+  }]);
+  await recordDirectEditFeedback(configuration, executionIdHash.slice(0, 12), "minor_fix");
+  assert.deepEqual(listPendingDirectEditFeedback(configuration), []);
+  const summary = summarizeMetrics(readMetricsDirectory(path.join(root, "metrics")));
+  assert.equal(summary.directEditBaseline.totalEditRuns, 1);
+  assert.equal(summary.directEditBaseline.labeledEditRuns, 1);
+  assert.equal(summary.directEditBaseline.outcomes.minor_fix, 1);
+  assert.equal(summary.directEditBaseline.interventionRate, 1);
+  assert.deepEqual(summary.directEditBaseline.byBackend.codex, {
+    totalEditRuns: 1,
+    eligibleEditRuns: 1,
+    ineligibleEditRuns: 0,
+    labeledEditRuns: 1,
+    conflictingLabeledRuns: 0,
+    pendingFeedback: 0,
+    dispositionCounts: {},
+    outcomes: { accepted: 0, minor_fix: 1, reverted: 0, security_concern: 0 },
+    interventionRate: 1,
+    rollbackOrSecurityRate: 0,
+    decisionReady: false
+  });
+  assert.deepEqual(summary.directEditBaseline.byProfile.implementation, summary.directEditBaseline.byBackend.codex);
+  const serialized = fs.readFileSync(path.join(root, "metrics", "direct-edit-baseline-runs.jsonl"), "utf8");
+  assert.equal(serialized.includes("private-edit-execution"), false);
+  await assert.rejects(() => recordDirectEditFeedback(configuration, executionIdHash.slice(0, 12), "accepted"), /already recorded/);
+});
+
+test("OPT-05b: routing değerlendirmesi profile kalite süre ve maliyetini özetler", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-routing-feedback-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = { statePaths: { logs: root }, observability: { maxMetricFileBytes: 65536 } };
+  const executionIdHash = crypto.createHash("sha256").update("private-profile-execution").digest("hex");
+  await appendRedactedRunMetric(configuration, {
+    recordedAt: "2026-08-11T00:00:00.000Z",
+    backend: "codex",
+    modelHash: crypto.createHash("sha256").update("gpt-5.6-terra").digest("hex"),
+    executionIdHash,
+    mode: "read_only",
+    profile: "review",
+    outcomeStatus: "completed",
+    usage: { durationMs: 400, totalCostUsd: 0.03 },
+    attempts: [{}]
+  });
+  assert.equal(listPendingRoutingFeedback(configuration).length, 0);
+  assert.equal(listRoutingCandidates(configuration)[0].feedbackId, executionIdHash.slice(0, 12));
+  await recordRoutingDisposition(configuration, executionIdHash.slice(0, 12), "eligible_real_user", "user_confirmed");
+  assert.equal(listPendingRoutingFeedback(configuration)[0].profile, "review");
+  await recordRoutingFeedback(configuration, executionIdHash.slice(0, 12), "useful");
+  assert.deepEqual(listPendingRoutingFeedback(configuration), []);
+  const legacyId = crypto.createHash("sha256").update("legacy-profile-execution").digest("hex");
+  await appendRedactedRunMetric(configuration, {
+    recordedAt: "2026-08-11T00:01:00.000Z",
+    backend: "codex",
+    executionIdHash: legacyId,
+    mode: "read_only",
+    profile: "review",
+    outcomeStatus: "completed",
+    usage: { durationMs: 450, totalCostUsd: 0.02 },
+    attempts: [{}]
+  });
+  await appendRedactedRunMetric(configuration, {
+    recordType: "routing_feedback",
+    recordedAt: "2026-08-11T00:01:30.000Z",
+    backend: "routing-evaluation",
+    executionIdHash: legacyId,
+    outcome: "partial"
+  });
+  assert.equal(listRoutingCandidates(configuration).some((entry) => entry.feedbackId === legacyId.slice(0, 12)), false);
+  const ineligibleId = crypto.createHash("sha256").update("synthetic-profile-execution").digest("hex");
+  await appendRedactedRunMetric(configuration, {
+    recordedAt: "2026-08-11T00:02:00.000Z",
+    backend: "codex",
+    executionIdHash: ineligibleId,
+    mode: "read_only",
+    profile: "review",
+    outcomeStatus: "completed",
+    usage: { durationMs: 500, totalCostUsd: 0.04 },
+    attempts: [{}]
+  });
+  await recordRoutingDisposition(configuration, ineligibleId.slice(0, 12), "ineligible_synthetic", "fixture_run");
+  assert.equal(listRoutingCandidates(configuration).some((entry) => entry.feedbackId === ineligibleId.slice(0, 12)), false);
+  assert.equal(listPendingRoutingFeedback(configuration).some((entry) => entry.feedbackId === ineligibleId.slice(0, 12)), false);
+  const summary = summarizeMetrics(readMetricsDirectory(path.join(root, "metrics")));
+  assert.equal(summary.routingEvaluation.legacyLabeledRuns, 1);
+  assert.equal(summary.routingEvaluation.byProfile.review.runs, 1);
+  assert.deepEqual(summary.routingEvaluation.byProfile.review, {
+    runs: 1,
+    labeledRuns: 1,
+    useful: 1,
+    partial: 0,
+    notUseful: 0,
+    totalCostUsd: 0.03,
+    pendingFeedback: 0,
+    usefulRate: 1,
+    averageDurationMs: 400,
+    costMeasurement: {
+      measurementStatus: "observed",
+      observedCostUsd: 0.03,
+      knownCostRuns: 1,
+      unknownCostRuns: 0,
+      costCoverageRatio: 1
+    },
+    decisionReady: false
+  });
+  await assert.rejects(() => recordRoutingFeedback(configuration, executionIdHash.slice(0, 12), "not_useful"), /already recorded/);
+});
+
+test("V2-DECISION-01: direct edit karar hazırlığı 30 etikette açılır ve oranlar hesaplanır", () => {
+  const buildRecords = (labeled, outcomeForIndex) => {
+    const records = [];
+    for (let index = 0; index < 30; index += 1) {
+      const executionIdHash = `edit-${index}`;
+      records.push({ backend: "codex", mode: "edit", outcomeStatus: "completed", executionIdHash, usage: { durationMs: 10, totalCostUsd: 0 } });
+      if (index < labeled) records.push({ recordType: "direct_edit_feedback", executionIdHash, outcome: outcomeForIndex(index) });
+    }
+    return records;
+  };
+  const partial = summarizeMetrics(buildRecords(29, () => "accepted")).directEditBaseline;
+  assert.equal(partial.labeledEditRuns, 29);
+  assert.equal(partial.pendingFeedback, 1);
+  assert.equal(partial.decisionReady, false);
+  const ready = summarizeMetrics(buildRecords(30, (index) => (index === 0 ? "reverted" : index === 1 ? "minor_fix" : "accepted"))).directEditBaseline;
+  assert.equal(ready.labeledEditRuns, 30);
+  assert.equal(ready.pendingFeedback, 0);
+  assert.equal(ready.decisionReady, true);
+  assert.equal(ready.interventionRate, Number((2 / 30).toFixed(4)));
+  assert.equal(ready.rollbackOrSecurityRate, Number((1 / 30).toFixed(4)));
+});
+
+test("V2-DECISION-02: profil ve routing karar hazırlığı 15 etikette açılır", () => {
+  const editRecords = (labeled) => {
+    const records = [];
+    for (let index = 0; index < 30; index += 1) {
+      const executionIdHash = `profile-edit-${index}`;
+      records.push({ backend: "codex", mode: "edit", outcomeStatus: "completed", profile: "implementation", executionIdHash, usage: {} });
+      if (index < labeled) records.push({ recordType: "direct_edit_feedback", executionIdHash, outcome: "accepted" });
+    }
+    return records;
+  };
+  assert.equal(summarizeMetrics(editRecords(29)).directEditBaseline.byProfile.implementation.decisionReady, false);
+  assert.equal(summarizeMetrics(editRecords(30)).directEditBaseline.byProfile.implementation.decisionReady, true);
+  const routingRecords = (labeled) => {
+    const records = [];
+    for (let index = 0; index < 15; index += 1) {
+      const executionIdHash = `route-${index}`;
+      records.push({ backend: "codex", profile: "review", mode: "read_only", executionIdHash, outcomeStatus: "completed", usage: {} });
+      records.push({ recordType: "routing_disposition", executionIdHash, disposition: "eligible_real_user", reason: "user_confirmed" });
+      if (index < labeled) records.push({ recordType: "routing_feedback", executionIdHash, outcome: "useful" });
+    }
+    return records;
+  };
+  assert.equal(summarizeMetrics(routingRecords(14)).routingEvaluation.byProfile.review.decisionReady, false);
+  const readyRouting = summarizeMetrics(routingRecords(15)).routingEvaluation.byProfile.review;
+  assert.equal(readyRouting.decisionReady, true);
+  assert.equal(readyRouting.usefulRate, 1);
+});
+
+test("V2-DECISION-03: edit feedback kaydı provider çağrısını veya execution kaydını değiştirmez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-feedback-noop-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = { statePaths: { logs: root }, observability: { maxMetricFileBytes: 65536 } };
+  const executionIdHash = crypto.createHash("sha256").update("provider-run").digest("hex");
+  await appendRedactedRunMetric(configuration, {
+    recordedAt: "2026-08-11T00:00:00.000Z",
+    backend: "codex",
+    executionIdHash,
+    mode: "edit",
+    profile: "implementation",
+    outcomeStatus: "completed",
+    usage: { durationMs: 10, totalCostUsd: 0.01 },
+    attempts: [{}]
+  });
+  const beforeExecution = readMetricsDirectory(path.join(root, "metrics")).filter((record) => !record.recordType);
+  await recordDirectEditFeedback(configuration, executionIdHash.slice(0, 12), "accepted");
+  const afterRecords = readMetricsDirectory(path.join(root, "metrics"));
+  const afterExecution = afterRecords.filter((record) => !record.recordType);
+  assert.equal(afterExecution.length, beforeExecution.length);
+  assert.deepEqual(afterExecution[0], beforeExecution[0]);
+  assert.equal(afterRecords.filter((record) => record.recordType === "direct_edit_feedback").length, 1);
+  await assert.rejects(() => recordDirectEditFeedback(configuration, executionIdHash.slice(0, 12), "accepted"), /already recorded/);
+});
+
+test("OPT-06: metrics dosyası sınırda rotasyon yapar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-metrics-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = { statePaths: { logs: root }, observability: { maxMetricFileBytes: 120 } };
+  await appendRedactedRunMetric(configuration, { backend: "codex", recordedAt: "one", workspaceHash: crypto.createHash("sha256").update("one").digest("hex") });
+  await appendRedactedRunMetric(configuration, { backend: "codex", recordedAt: "two", workspaceHash: crypto.createHash("sha256").update("two").digest("hex") });
+  const entries = fs.readdirSync(path.join(root, "metrics"));
+  assert.equal(entries.some((entry) => entry.startsWith("codex-runs-") && entry.endsWith(".jsonl")), true);
+  assert.equal(entries.includes("codex-runs.jsonl"), true);
+  assert.equal(readMetricsDirectory(path.join(root, "metrics")).length, 2);
+});
+
+test("OPT-06a: eşzamanlı processler metrics kaydı kaybetmez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-metrics-concurrent-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = { statePaths: { logs: root }, observability: { maxMetricFileBytes: 65536 } };
+  const metricsModule = pathToFileURL(path.resolve("subagent-bridge/src/metrics.js")).href;
+  const writeMetric = (index) => new Promise((resolve, reject) => {
+    const workspaceHash = crypto.createHash("sha256").update(`concurrent-${index}`).digest("hex");
+    const source = `import { appendRedactedRunMetric } from ${JSON.stringify(metricsModule)}; await appendRedactedRunMetric(${JSON.stringify(configuration)}, { backend: "codex", workspaceHash: ${JSON.stringify(workspaceHash)} });`;
+    const child = childProcess.spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: "ignore" });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`metric writer exited with ${code}`)));
+  });
+  await Promise.all(Array.from({ length: 12 }, (_, index) => writeMetric(index)));
+  const metricsPath = path.join(root, "metrics", "codex-runs.jsonl");
+  const entries = fs.readFileSync(metricsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(entries.length, 12);
+  assert.deepEqual(
+    entries.map((entry) => entry.workspaceHash).sort(),
+    Array.from({ length: 12 }, (_, index) => crypto.createHash("sha256").update(`concurrent-${index}`).digest("hex")).sort()
+  );
+  assert.equal(fs.existsSync(`${metricsPath}.lock`), false);
+});
+
+test("OPT-06b: cost circuit breaker günlük rezerv limiti uygular", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-budget-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    reliability: { dailyCostLimitUsd: 0.2, monthlyCostLimitUsd: 1 }
+  };
+  assert.deepEqual(await reserveCostBudget(configuration, "first", 0.1), { allowed: true });
+  assert.deepEqual(await reserveCostBudget(configuration, "second", 0.11), {
+    allowed: false,
+    reason: "daily_cost_budget_exhausted",
+    budget: { period: "daily", limitUsd: 0.2, spentUsd: 0.1, remainingUsd: 0.1 }
+  });
+  await appendRedactedRunMetric(configuration, {
+    backend: "codex",
+    executionIdHash: crypto.createHash("sha256").update("first").digest("hex"),
+    recordedAt: new Date().toISOString(),
+    usage: { totalCostUsd: 0.05 }
+  });
+  assert.deepEqual(await reserveCostBudget(configuration, "second", 0.11), { allowed: true });
+});
+
+test("OPT-06c: cost budget günlüğü sınırda rotasyon yapar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-budget-rotation-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 200 },
+    reliability: { dailyCostLimitUsd: 10, monthlyCostLimitUsd: 10 }
+  };
+  await reserveCostBudget(configuration, "first", 0.1);
+  await reserveCostBudget(configuration, "second", 0.1);
+  const entries = fs.readdirSync(path.join(root, "metrics"));
+  assert.equal(entries.some((entry) => entry.startsWith("cost-budget-runs-") && entry.endsWith(".jsonl")), true);
+  assert.equal(entries.includes("cost-budget-runs.jsonl"), true);
+});
+
+test("OPT-06i: aylık bütçe reddi limit harcama ve kalan kotayı raporlar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-monthly-budget-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    reliability: { monthlyCostLimitUsd: 0.2, maxTotalDurationMs: 60000 }
+  };
+  assert.deepEqual(await reserveCostBudget(configuration, "first", 0.15), { allowed: true });
+  assert.deepEqual(await reserveCostBudget(configuration, "second", 0.06), {
+    allowed: false,
+    reason: "monthly_cost_budget_exhausted",
+    budget: { period: "monthly", limitUsd: 0.2, spentUsd: 0.15, remainingUsd: 0.05 }
+  });
+});
+
+test("OPT-06j: costBudgetEnforced false butce limitini devre disi birakir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-budget-disabled-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    reliability: { monthlyCostLimitUsd: 0.2, costBudgetEnforced: false, maxTotalDurationMs: 60000 }
+  };
+  assert.deepEqual(await reserveCostBudget(configuration, "first", 0.15), { allowed: true });
+  assert.deepEqual(await reserveCostBudget(configuration, "second", 0.5), { allowed: true });
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.enforced, false);
+  assert.equal(snapshot.costAccounting.limitMode, "advisory_only");
+  assert.equal(snapshot.costAccounting.reportedAmountIsProviderInvoice, false);
+  assert.equal(snapshot.costAccounting.totalUsdBasis, "observed_plus_estimated");
+  assert.equal(snapshot.monthlyLimitUsd, 0.2);
+  assert.equal(snapshot.monthlySpentUsd, 0.65);
+  assert.equal(snapshot.monthlyAccountedUsd, snapshot.monthlySpentUsd);
+  configuration.reliability.costBudgetEnforced = true;
+  assert.deepEqual(await reserveCostBudget(configuration, "third", 0.5), {
+    allowed: false,
+    reason: "monthly_cost_budget_exhausted",
+    budget: { period: "monthly", limitUsd: 0.2, spentUsd: 0.65, remainingUsd: 0 }
+  });
+});
+
+test("OPT-06t: bütçe ölçümü gözlenen ve tahmini maliyeti kapsamayla ayırır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-measurement-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, costBudgetEnforced: false, maxTotalDurationMs: 60000 }
+  };
+  const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
+  await appendRedactedRunMetric(configuration, {
+    backend: "codex",
+    executionIdHash: hash("unknown-run"),
+    recordedAt: new Date().toISOString(),
+    usage: { durationMs: 5 }
+  });
+  const unknownSnapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(unknownSnapshot.monthlySpentUsd, 0);
+  assert.equal(unknownSnapshot.dailyAccountedUsd, unknownSnapshot.dailySpentUsd);
+  assert.equal(unknownSnapshot.costAccounting.unknownCostRunsCountedSeparately, true);
+  assert.equal(unknownSnapshot.costMeasurement.measurementStatus, "not_observable");
+  assert.equal(unknownSnapshot.costMeasurement.observedCostUsd, 0);
+  assert.equal(unknownSnapshot.costMeasurement.unknownCostRuns, 1);
+  assert.equal(unknownSnapshot.costMeasurement.costCoverageRatio, 0);
+  assert.equal(unknownSnapshot.dailyCostMeasurement.measurementStatus, "not_observable");
+  assert.equal(unknownSnapshot.dailyCostMeasurement.observedCostUsd, 0);
+  assert.equal(unknownSnapshot.dailyCostMeasurement.unknownCostRuns, 1);
+  await appendRedactedRunMetric(configuration, {
+    backend: "codex",
+    executionIdHash: hash("known-run"),
+    recordedAt: new Date().toISOString(),
+    usage: { totalCostUsd: 0.05, durationMs: 5 }
+  });
+  await reserveCostBudget(configuration, "estimated-run", 0.3);
+  await settleCostBudget(configuration, "estimated-run");
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.monthlySpentUsd, 0.35);
+  assert.equal(snapshot.costAccounting.estimatedIncludesActiveReservations, true);
+  assert.equal(snapshot.costMeasurement.observedCostUsd, 0.05);
+  assert.equal(snapshot.costMeasurement.estimatedCostUsd, 0.3);
+  assert.equal(snapshot.costMeasurement.knownCostRuns, 1);
+  assert.equal(snapshot.costMeasurement.unknownCostRuns, 2);
+  assert.equal(snapshot.costMeasurement.costCoverageRatio, Number((1 / 3).toFixed(4)));
+  assert.equal(snapshot.costMeasurement.measurementStatus, "not_observable");
+  assert.equal(snapshot.dailyCostMeasurement.observedCostUsd, 0.05);
+  assert.equal(snapshot.dailyCostMeasurement.estimatedCostUsd, 0.3);
+  assert.equal(snapshot.dailyCostMeasurement.knownCostRuns, 1);
+  assert.equal(snapshot.dailyCostMeasurement.unknownCostRuns, 2);
+});
+
+test("OPT-06d: cost reservation açık settlement kaydıyla gerçek maliyete uzlaştırılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-settlement-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 0.2, monthlyCostLimitUsd: 1, maxTotalDurationMs: 60000 }
+  };
+  assert.deepEqual(await reserveCostBudget(configuration, "private-execution", 0.15), { allowed: true });
+  assert.deepEqual(await settleCostBudget(configuration, "private-execution", 0.05), { settled: true, chargedCostUsd: 0.05 });
+  assert.deepEqual(await reserveCostBudget(configuration, "private-execution", 0.01), { allowed: false, reason: "duplicate_cost_reservation" });
+  assert.deepEqual(await reserveCostBudget(configuration, "next", 0.15), { allowed: true });
+  const journal = fs.readFileSync(path.join(root, "metrics", "cost-budget-runs.jsonl"), "utf8");
+  assert.equal(journal.includes("private-execution"), false);
+  assert.match(journal, /"recordType":"cost_settlement"/);
+});
+
+test("OPT-06e: bağımsız süreçlerin eşzamanlı rezervleri hard cap değerini aşmaz", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-concurrent-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 0.2, monthlyCostLimitUsd: 1, maxTotalDurationMs: 60000 }
+  };
+  const metricsModule = pathToFileURL(path.resolve("subagent-bridge/src/metrics.js")).href;
+  const reserve = (index) => new Promise((resolve, reject) => {
+    const source = `import { reserveCostBudget } from ${JSON.stringify(metricsModule)}; const result = await reserveCostBudget(${JSON.stringify(configuration)}, "execution-${index}", 0.03); process.stdout.write(JSON.stringify(result));`;
+    const child = childProcess.spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve(JSON.parse(stdout)) : reject(new Error(`reservation process exited with ${code}: ${stderr}`)));
+  });
+  const results = await Promise.all(Array.from({ length: 10 }, (_, index) => reserve(index)));
+  assert.equal(results.filter((result) => result.allowed).length, 6);
+  assert.ok(results.filter((result) => result.allowed).length * 0.03 <= configuration.reliability.dailyCostLimitUsd);
+});
+
+test("OPT-06g: bozuk JSONL satırları droppedMetricRecords olarak sayılır ve harcama etkilenmez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-dropped-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 10, monthlyCostLimitUsd: 10, maxTotalDurationMs: 60000 }
+  };
+  const metricsDirectory = path.join(root, "metrics");
+  fs.mkdirSync(metricsDirectory, { recursive: true });
+  fs.appendFileSync(path.join(metricsDirectory, "codex-runs.jsonl"), "{this is not valid json}\n");
+  fs.appendFileSync(path.join(metricsDirectory, "codex-runs.jsonl"), JSON.stringify({ backend: "codex", recordedAt: new Date().toISOString(), usage: { totalCostUsd: 0.5, durationMs: 100 }, executionIdHash: "abc" }) + "\n");
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.droppedMetricRecords, 1);
+  assert.equal(snapshot.dailySpentUsd, 0.5);
+});
+
+test("OPT-06f: bütçe snapshot harcama kalan tutar ve aktif rezervleri raporlar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-snapshot-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, warningThresholdPercent: 20, maxTotalDurationMs: 60000 }
+  };
+  await reserveCostBudget(configuration, "active", 0.2);
+  await reserveCostBudget(configuration, "completed", 0.3);
+  await settleCostBudget(configuration, "completed", 0.1);
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.costAccounting.limitMode, "admission_blocking");
+  assert.equal(snapshot.dailySpentUsd, 0.3);
+  assert.equal(snapshot.monthlySpentUsd, 0.3);
+  assert.equal(snapshot.dailyRemainingUsd, 0.7);
+  assert.equal(snapshot.monthlyRemainingUsd, 4.7);
+  assert.equal(snapshot.activeReservations, 1);
+  assert.equal(snapshot.dailyUsagePercent, 30);
+  assert.equal(snapshot.monthlyUsagePercent, 6);
+  assert.equal(snapshot.dailyWarning, true);
+  assert.equal(snapshot.monthlyWarning, false);
+});
+
+test("OPT-06k: süresi dolan rezervasyon kalıcı expiry kaydı üretir, idempotent kalır ve bütçeyi serbest bırakır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-expiry-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 1 }
+  };
+  assert.deepEqual(await reserveCostBudget(configuration, "crashed-process", 0.4), { allowed: true });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const first = await getCostBudgetSnapshot(configuration);
+  assert.equal(first.dailySpentUsd, 0);
+  assert.equal(first.activeReservations, 0);
+  configuration.reliability.maxTotalDurationMs = 60000;
+  assert.deepEqual(await reserveCostBudget(configuration, "next-process", 0.9), { allowed: true });
+  const journalPath = path.join(root, "metrics", "cost-budget-runs.jsonl");
+  const journal = fs.readFileSync(journalPath, "utf8");
+  assert.equal((journal.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 1);
+  assert.equal(journal.includes("crashed-process"), false);
+  const second = await getCostBudgetSnapshot(configuration);
+  assert.equal(second.dailySpentUsd, 0.9);
+  const journalAfter = fs.readFileSync(journalPath, "utf8");
+  assert.equal((journalAfter.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 1);
+});
+
+test("OPT-06l: settlement yapılan rezervasyon expire edilmez ve gerçek maliyet sayılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-settled-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 60000 }
+  };
+  await reserveCostBudget(configuration, "settled-process", 0.4);
+  assert.deepEqual(await settleCostBudget(configuration, "settled-process", 0.05), { settled: true, chargedCostUsd: 0.05 });
+  const currentDate = new Date();
+  const endOfCurrentUtcDay = new Date(Date.UTC(currentDate.getUTCFullYear(), currentDate.getUTCMonth(), currentDate.getUTCDate(), 23, 59, 59, 999));
+  const snapshot = await getCostBudgetSnapshot(configuration, endOfCurrentUtcDay);
+  assert.equal(snapshot.dailySpentUsd, 0.05);
+  assert.equal(snapshot.activeReservations, 0);
+  const journal = fs.readFileSync(path.join(root, "metrics", "cost-budget-runs.jsonl"), "utf8");
+  assert.equal((journal.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 0);
+});
+
+test("OPT-06m: expiry sonrası geç settlement gerçek maliyeti tam bir kez sayar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-late-settlement-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 1 }
+  };
+  await reserveCostBudget(configuration, "late-process", 0.4);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  await getCostBudgetSnapshot(configuration);
+  assert.deepEqual(await settleCostBudget(configuration, "late-process", 0.05), { settled: true, chargedCostUsd: 0.05 });
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.dailySpentUsd, 0.05);
+  const journal = fs.readFileSync(path.join(root, "metrics", "cost-budget-runs.jsonl"), "utf8");
+  assert.equal((journal.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 1);
+  assert.equal((journal.match(/"recordType":"cost_settlement"/g) || []).length, 1);
+});
+
+test("OPT-06n: geçersiz expiresAt rezervi sessizce serbest bırakmaz", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-invalid-expiry-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 60000 }
+  };
+  const metricsDirectory = path.join(root, "metrics");
+  fs.mkdirSync(metricsDirectory, { recursive: true });
+  fs.appendFileSync(path.join(metricsDirectory, "cost-budget-runs.jsonl"), `${JSON.stringify({
+    recordType: "cost_reservation",
+    recordedAt: new Date().toISOString(),
+    executionIdHash: "deadbeefdeadbeef",
+    reservedCostUsd: 0.3,
+    expiresAt: "bozuk-tarih"
+  })}\n`, "utf8");
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.dailySpentUsd, 0.3);
+  assert.equal(snapshot.activeReservations, 1);
+  const journal = fs.readFileSync(path.join(metricsDirectory, "cost-budget-runs.jsonl"), "utf8");
+  assert.equal((journal.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 0);
+});
+
+test("OPT-06o: eşzamanlı süreçlerin recovery'si tek expiry kaydı üretir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-concurrent-expiry-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 1 }
+  };
+  await reserveCostBudget(configuration, "crashed-again", 0.4);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const metricsModule = pathToFileURL(path.resolve("subagent-bridge/src/metrics.js")).href;
+  const snapshotInChild = () => new Promise((resolve, reject) => {
+    const source = `import { getCostBudgetSnapshot } from ${JSON.stringify(metricsModule)}; await getCostBudgetSnapshot(${JSON.stringify(configuration)}); process.stdout.write("ok");`;
+    const child = childProcess.spawn(process.execPath, ["--input-type=module", "--eval", source], { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve(true) : reject(new Error(`snapshot process exited with ${code}: ${stderr}`)));
+  });
+  await Promise.all([snapshotInChild(), snapshotInChild()]);
+  const journal = fs.readFileSync(path.join(root, "metrics", "cost-budget-runs.jsonl"), "utf8");
+  assert.equal((journal.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 1);
+});
+
+test("OPT-06p: rotasyon sonrası eski rezervasyon da bulunup expire edilir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-rotated-expiry-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 200 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 1 }
+  };
+  await reserveCostBudget(configuration, "rotated-crashed", 0.4);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  configuration.reliability.maxTotalDurationMs = 60000;
+  await reserveCostBudget(configuration, "rotated-next", 0.1);
+  await getCostBudgetSnapshot(configuration);
+  const metricsDirectory = path.join(root, "metrics");
+  const rotatedEntries = fs.readdirSync(metricsDirectory).filter((entry) => entry.startsWith("cost-budget-runs-") && entry.endsWith(".jsonl"));
+  assert.equal(rotatedEntries.length >= 1, true);
+  const allJournals = fs.readdirSync(metricsDirectory)
+    .filter((entry) => entry.startsWith("cost-budget-runs") && entry.endsWith(".jsonl"))
+    .map((entry) => fs.readFileSync(path.join(metricsDirectory, entry), "utf8"))
+    .join("\n");
+  assert.equal((allJournals.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 1);
+});
+
+test("OPT-06q: expiry sonrası yeni rezervasyon ve geç settlement overage olarak raporlanır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-expiry-overage-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 60 }
+  };
+  assert.deepEqual(await reserveCostBudget(configuration, "expired-a", 0.6), { allowed: true });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const afterExpiry = await getCostBudgetSnapshot(configuration);
+  assert.equal(afterExpiry.dailySpentUsd, 0);
+  configuration.reliability.maxTotalDurationMs = 60000;
+  assert.deepEqual(await reserveCostBudget(configuration, "replacement-b", 0.6), { allowed: true });
+  assert.deepEqual(await settleCostBudget(configuration, "expired-a", 0.6), { settled: true, chargedCostUsd: 0.6 });
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.dailySpentUsd, 1.2);
+  assert.equal(snapshot.dailyOverageUsd, 0.2);
+});
+
+test("OPT-06r: snapshot enjekte edilen now ile tutarlıdır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-injected-now-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 10, monthlyCostLimitUsd: 10, maxTotalDurationMs: 60000 }
+  };
+  await reserveCostBudget(configuration, "future-process", 0.4);
+  const injectedNow = new Date(Date.now() + 120000);
+  const snapshot = await getCostBudgetSnapshot(configuration, injectedNow);
+  assert.equal(snapshot.activeReservations, 0);
+  assert.equal(snapshot.dailySpentUsd, 0);
+  const journal = fs.readFileSync(path.join(root, "metrics", "cost-budget-runs.jsonl"), "utf8");
+  assert.equal((journal.match(/"recordType":"cost_reservation_expiry"/g) || []).length, 1);
+});
+
+test("OPT-06s: settlement yazılamasa da execution metriği rezervasyonu terminal yapar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-cost-metric-terminal-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536 },
+    reliability: { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 5, maxTotalDurationMs: 60000 }
+  };
+  await reserveCostBudget(configuration, "metric-terminal", 0.4);
+  await appendRedactedRunMetric(configuration, {
+    backend: "opencode",
+    executionIdHash: crypto.createHash("sha256").update("metric-terminal").digest("hex"),
+    recordedAt: new Date().toISOString(),
+    mode: "read_only",
+    outcomeStatus: "completed",
+    usage: { totalCostUsd: 0.05 }
+  });
+  const snapshot = await getCostBudgetSnapshot(configuration);
+  assert.equal(snapshot.activeReservations, 0);
+  assert.equal(snapshot.dailySpentUsd, 0.05);
+});
+
+test("OPT-06h: pruneMetricFiles yalnız retention dışı rotated dosyaları siler", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-prune-retention-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = {
+    statePaths: { logs: root },
+    observability: { maxMetricFileBytes: 65536, maxMetricRetentionDays: 30 }
+  };
+  const metricsDirectory = path.join(root, "metrics");
+  fs.mkdirSync(metricsDirectory, { recursive: true });
+  const activePath = path.join(metricsDirectory, "codex-runs.jsonl");
+  const stalePath = path.join(metricsDirectory, "codex-runs-2020-01-01T00-00-00-000Z-aaaa.jsonl");
+  const freshRotatedPath = path.join(metricsDirectory, "codex-runs-2026-01-01T00-00-00-000Z-bbbb.jsonl");
+  fs.writeFileSync(activePath, "active\n", "utf8");
+  fs.writeFileSync(stalePath, "stale\n", "utf8");
+  fs.writeFileSync(freshRotatedPath, "fresh\n", "utf8");
+  const now = Date.parse("2026-02-01T00:00:00.000Z");
+  fs.utimesSync(stalePath, new Date(now), new Date(Date.parse("2020-01-01T00:00:00.000Z")));
+  fs.utimesSync(freshRotatedPath, new Date(now), new Date(Date.parse("2026-01-15T00:00:00.000Z")));
+  fs.utimesSync(activePath, new Date(now), new Date(now));
+  const deleted = pruneMetricFiles(configuration, now);
+  assert.equal(deleted, 1);
+  assert.equal(fs.existsSync(activePath), true);
+  assert.equal(fs.existsSync(stalePath), false);
+  assert.equal(fs.existsSync(freshRotatedPath), true);
+});

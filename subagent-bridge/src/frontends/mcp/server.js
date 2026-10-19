@@ -1,0 +1,460 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { createRequire } from "node:module";
+import { z } from "zod";
+import { ANTIGRAVITY_ACTIVE_MODEL_ALIASES, ANTIGRAVITY_DISABLED_MODEL_ALIASES } from "../../adapters/antigravity-adapter.js";
+import { analyzePersistentMemoryWrite, checkPersistentMemory, promotePersistentMemory, readPersistentMemory, reviewPersistentMemory, searchPersistentMemory, storePersistentMemory } from "../../memory.js";
+import { capabilityProbeSchema, capabilityStatusValues, workspaceReadStatusValues } from "../../schemas/core-schemas.js";
+import { createMcpToolHandlers, publicToolSchemas, antigravityProbeSchema, storeMemorySchema } from "./tools.js";
+import { createRuleAttestation, RULE_ATTESTATION_MIME_TYPE, RULE_ATTESTATION_NAME, RULE_ATTESTATION_URI } from "./rule-attestation.js";
+
+const readOnlyAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+};
+const require = createRequire(import.meta.url);
+const { version: packageVersion } = require("../../../../package.json");
+
+const executionAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: false,
+  openWorldHint: true
+};
+
+const externalReadOnlyExecutionAnnotations = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: false,
+  openWorldHint: true
+};
+
+function errorResponse(error) {
+  return {
+    isError: true,
+    content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }]
+  };
+}
+
+function publicToolInputShape(schema) {
+  let current = schema;
+  while (current instanceof z.ZodEffects) current = current.innerType();
+  return current.shape;
+}
+
+function safe(handler) {
+  return async (...args) => {
+    try {
+      return await handler(...args);
+    } catch (error) {
+      return errorResponse(error);
+    }
+  };
+}
+
+function safeHealth(handler) {
+  return async (...args) => {
+    try {
+      return await handler(...args);
+    } catch {
+      return errorResponse(new Error("health check unavailable"));
+    }
+  };
+}
+
+function sanitizeHealth(health) {
+  const probes = health.probes && typeof health.probes === "object"
+    ? Object.fromEntries(Object.entries({
+      cli: ["available", "unavailable"],
+      modelAccess: capabilityStatusValues,
+      toolFreeResponse: capabilityStatusValues,
+      workspaceRead: workspaceReadStatusValues,
+      sandboxStartup: capabilityStatusValues,
+      webRead: capabilityStatusValues
+    })
+      .filter(([key, statuses]) => statuses.includes(health.probes[key]))
+      .map(([key]) => [key, health.probes[key]]))
+    : {};
+  const capabilityProbes = health.capabilityProbes && typeof health.capabilityProbes === "object"
+    ? Object.fromEntries(Object.entries(health.capabilityProbes)
+      .filter(([model, probe]) => /^[a-z][a-z0-9_-]{0,63}$/.test(model) && capabilityProbeSchema.safeParse(probe).success)
+      .map(([model, probe]) => [model, capabilityProbeSchema.parse(probe)]))
+    : {};
+  const versionMatch = typeof health.version === "string" ? /\b[vV]?\d+(?:\.\d+){1,3}\b/.exec(health.version) : null;
+  return {
+    installed: health.installed === true,
+    version: versionMatch ? versionMatch[0] : null,
+    authValid: typeof health.authValid === "boolean" ? health.authValid : null,
+    ...(Object.keys(probes).length > 0 ? { probes } : {}),
+    ...(Object.keys(capabilityProbes).length > 0 ? { capabilityProbes } : {}),
+    ...(health.error ? { error: "unavailable" } : {})
+  };
+}
+
+function sanitizeRuntimeHealth(result) {
+  return {
+    services: result.services,
+    circuits: result.circuits,
+    costBudget: result.costBudget,
+    adapters: Object.fromEntries(Object.entries(result.adapters).map(([id, entry]) => [id, {
+      id: entry.id,
+      capabilities: entry.capabilities,
+      modePolicy: entry.modePolicy,
+      configuredModels: entry.configuredModels,
+      health: sanitizeHealth(entry.health)
+    }]))
+  };
+}
+
+export { isOrchestratorApprovalEnabled } from "../../services/orchestrator-approval.js";
+
+export function createSubagentMcpServer({ runtime, configuration, trustedWorkspace, enableOrchestratorApproval = false }) {
+  const server = new McpServer({
+    name: "subagent-bridge",
+    version: packageVersion
+  }, {
+    instructions: "Frontend-neutral subagent bridge runtime için MCP frontend'i. Trusted workspace sunucu başlangıç context'i tarafından sağlanır. Paralel batch başlatıldığında get_parallel_batch ile durumu terminal duruma kadar sorgula ve kullanıcıya kısa, doğal durum güncellemeleri ver. Kullanıcı ayrı terminalde sürekli görünüm isterse batchId ile `npm run parallel:watch -- <batchId>` komutunu öner; bu salt-okunur watcher ikinci bridge süreci başlatmaz ve Ctrl+C batch'i iptal etmez. Yüzde çözümlenmiş task'lardan hesaplanır; unknown task tamamlanmış sayılmaz ve çalışan task içindeki model token ilerlemesi ölçülmez. Özel ASCII panel biçimi üretme."
+  });
+  const handlers = createMcpToolHandlers({ runtime, trustedWorkspace, caller: "openCode", configuration });
+
+  server.registerResource(RULE_ATTESTATION_NAME, RULE_ATTESTATION_URI, {
+    title: "Workspace kural attestation manifesti",
+    description: "Kanonik workspace kural dosyalarının ham-byte SHA-256 manifestini redacted doğrulama gözlemi olarak döndürür; startup context veya model uyumu kanıtlamaz.",
+    mimeType: RULE_ATTESTATION_MIME_TYPE
+  }, async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      mimeType: RULE_ATTESTATION_MIME_TYPE,
+      text: JSON.stringify(createRuleAttestation(trustedWorkspace))
+    }]
+  }));
+
+  server.registerTool("check_persistent_memory", {
+    title: "Kalıcı hafıza bağlantısını kontrol et",
+    description: "Obsidian Vault erişimini, sınırları ve izinli yazma klasörlerini içerik veya secret göstermeden kontrol eder.",
+    inputSchema: {},
+    annotations: readOnlyAnnotations
+  }, safe(async () => {
+    const result = checkPersistentMemory(configuration);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("search_persistent_memory", {
+    title: "Kalıcı hafızada ara",
+    description: "Vault'un tamamını bağlama yüklemeden ilgili Markdown notlarını yerel olarak arar; secret içeriği engeller, injection şüphelilerini karantinaya alır ve güvenilmeyen sınırlı alıntılar döndürür.",
+    inputSchema: {
+      query: z.string().min(2).max(500),
+      limit: z.number().int().min(1).max(20).default(5),
+      includeExpired: z.boolean().default(false),
+      includeDrafts: z.boolean().default(false)
+    },
+    annotations: readOnlyAnnotations
+  }, safe(async (input) => {
+    const result = searchPersistentMemory(configuration, input);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("read_persistent_memory", {
+    title: "Kalıcı hafıza notunu oku",
+    description: "Arama sonucunda seçilen tek bir Markdown notunu boyut, yol, secret ve prompt injection sınırlarıyla güvenilmeyen içerik olarak okur.",
+    inputSchema: {
+      relativePath: z.string().min(3).max(500),
+      acknowledgeQuarantinedContent: z.boolean().default(false)
+    },
+    annotations: readOnlyAnnotations
+  }, safe(async (input) => {
+    const result = readPersistentMemory(configuration, input);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("review_persistent_memory", {
+    title: "Kalıcı hafızayı denetle",
+    description: "Vault'u değiştirmeden taslak, süresi dolmuş, inceleme tarihi geçmiş, kaynağı eskimiş, düşük güvenli, geçersiz metadata veya konsolidasyon adaylarını raporlar.",
+    inputSchema: {},
+    annotations: readOnlyAnnotations
+  }, safe(async () => {
+    const result = reviewPersistentMemory(configuration);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("analyze_memory_write", {
+    title: "Kalıcı hafıza yazımını analiz et",
+    description: "Vault'u değiştirmeden yeni not için aynı gövdeli tekrarları ve aynı başlıklı olası çelişkileri bulur.",
+    inputSchema: {
+      relativePath: z.string().min(3).max(500).optional(),
+      title: z.string().min(1).max(200),
+      content: z.string().min(1).max(60000)
+    },
+    annotations: readOnlyAnnotations
+  }, safe(async (input) => {
+    const result = analyzePersistentMemoryWrite(configuration, input);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("store_persistent_memory", {
+    title: "Kalıcı hafıza notunu sakla",
+    description: "Ana orkestratörün değerlendirdiği, kaynaklandırılmış, doğrulama metadata'sı bulunan ve secret içermeyen bir Markdown notunu izinli Vault klasörüne yazar.",
+    inputSchema: storeMemorySchema.shape,
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false
+    }
+  }, safe(async (input) => {
+    const result = storePersistentMemory(configuration, input);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("promote_memory", {
+    title: "Kalıcı hafıza taslağını yayınla",
+    description: "00_Inbox altındaki SHA-256 kontrollü taslağı çift kilit ve redacted audit ile yayın klasörüne taşır.",
+    inputSchema: {
+      sourceRelativePath: z.string().min(3).max(500),
+      targetRelativePath: z.string().min(3).max(500),
+      expectedSourceSha256: z.string().regex(/^[a-f0-9]{64}$/)
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false
+    }
+  }, safe(async (input) => {
+    const result = promotePersistentMemory(configuration, input);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("check_deepseek_subagent", {
+    title: "DeepSeek subagent bağlantısını kontrol et",
+    description: "Resmî DeepSeek API anahtar erişimini ve canonical deepseek-flash model kataloğu eşleşmesini secret değerlerini göstermeden kontrol eder.",
+    inputSchema: {},
+    annotations: readOnlyAnnotations
+  }, safe(async () => {
+    const health = await runtime.checkLegacyDeepSeek();
+    const { executable, ...result } = health;
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("run_deepseek_subagent", {
+    title: "DeepSeek Flash subagent çalıştır",
+    description: "Resmî DeepSeek API üzerinden canonical deepseek-flash modelini salt-okunur modda çalıştırır. İstekler strict JSON ve Zod sonuç doğrulamasından, model kimliği kontrolünden ve ayrı 1 USD pilot admission sınırından geçer.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runDeepSeek),
+    annotations: executionAnnotations
+  }, safe(handlers.runDeepSeek));
+
+  server.registerTool("run_deepseek_edit_pilot", {
+    title: "DeepSeek disposable edit pilotu çalıştır",
+    description: "DeepSeek Flash'tan yapılandırılmış dosya içeriği ister, yalnız seçilmiş dosyalara path/secret doğrulamalı patch'i bridge-owned disposable workspace içinde yazar ve değişiklikleri ana workspace'e terfi ettirmeden raporlar.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runDeepSeekEditPilot),
+    annotations: executionAnnotations
+  }, safe(handlers.runDeepSeekEditPilot));
+
+  server.registerTool("check_glm_subagent", {
+    title: "GLM subagent bağlantısını kontrol et",
+    description: "OpenCode yürütücüsünü ve GLM 5.2/HighSpeed/5.3/5.3 Flash model eşlemesini secret değerlerini göstermeden kontrol eder.",
+    inputSchema: {},
+    annotations: readOnlyAnnotations
+  }, safe(async () => {
+    const health = await runtime.checkGlm();
+    const { executable, ...result } = health;
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("run_glm_subagent", {
+    title: "GLM subagent çalıştır",
+    description: "OpenCode üzerinden GLM 5.2, GLM 5.2 HighSpeed, GLM 5.3 veya GLM 5.3 Flash'ı read-only ya da kontrollü edit modunda çalıştırır. Reviewer rolü için açık files/contextFiles kapsamı zorunludur; required review katı JSON bulguları ve host manifestine göre doğrulanan path/line atıfları ister. Edit yalnız seçilmiş dosyaları disposable workspace sonrası trusted host workspace'e doğrulanmış promotion ile uygular.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runGlm),
+    annotations: executionAnnotations
+  }, safe(handlers.runGlm));
+
+  server.registerTool("run_glm_edit_pilot", {
+    title: "GLM disposable edit pilotu çalıştır",
+    description: "GLM 5.2, HighSpeed, 5.3 veya 5.3 Flash'a yalnız bridge-owned disposable workspace içinde kontrollü dosya düzenleme görevi verir; ana workspace'e değişiklik uygulamaz.",
+    inputSchema: publicToolSchemas.runGlmEditPilot.shape,
+    annotations: executionAnnotations
+  }, safe(handlers.runGlmEditPilot));
+
+  for (const [provider, handler] of [["kimi", handlers.runKimi], ["qwen", handlers.runQwen]]) {
+    server.registerTool(`check_${provider}_subagent`, {
+      title: `${provider} subagent bağlantısını kontrol et`,
+      description: `OpenCode model kataloğunda ${provider} model eşlemesini secret göstermeden kontrol eder.`,
+      inputSchema: {},
+      annotations: readOnlyAnnotations
+    }, safe(async () => {
+      const result = await runtime.checkCatalogProvider(provider);
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+    }));
+    server.registerTool(`run_${provider}_subagent`, {
+      title: `${provider} subagent çalıştır`,
+      description: `OpenCode üzerinden ${provider} modelini read-only veya kontrollü edit modunda çalıştırır. Reviewer rolü için açık files/contextFiles kapsamı zorunludur; required review katı JSON bulguları ve host manifestine göre doğrulanan path/line atıfları ister.`,
+      inputSchema: publicToolInputShape(publicToolSchemas.runCatalogProvider),
+      annotations: executionAnnotations
+    }, safe(handler));
+  }
+
+  server.registerTool("check_antigravity_subagent", {
+    title: "Antigravity subagent bağlantısını kontrol et",
+    description: "Antigravity CLI, model/auth erişimi, sandbox başlangıcı ve workspace-read yeteneklerini redakte biçimde kontrol eder. gemini_pro ve gemini_flash_3_7 normal çalıştırmada devre dışıdır; yalnızca bu açık capability-probe aracıyla erişim teşhisi yapılabilir. probeModels ve probeCapabilities birlikte verilirse isteğe bağlı, seri, düşük maliyetli capability probları çalıştırır; workspaceReadTarget trusted_workspace olduğunda host kontrollü kısa ömürlü sentinel dizini oluşturur.",
+    inputSchema: antigravityProbeSchema,
+    annotations: readOnlyAnnotations
+  }, safeHealth(async (input) => {
+    const health = await runtime.health(["antigravity"], {
+      probeModels: input.probeModels,
+      probeCapabilities: input.probeCapabilities,
+      workspaceReadTarget: input.workspaceReadTarget,
+      trustedWorkspace
+    });
+    const entry = health.adapters.antigravity;
+    const result = {
+      adapterId: entry.id,
+      capabilities: entry.capabilities,
+      modePolicy: entry.modePolicy,
+      configuredModels: entry.configuredModels,
+      health: sanitizeHealth(entry.health),
+      modelAliases: ANTIGRAVITY_ACTIVE_MODEL_ALIASES,
+      disabledModelAliases: [...ANTIGRAVITY_DISABLED_MODEL_ALIASES],
+      schemaValid: true
+    };
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("run_antigravity_subagent", {
+    title: "Antigravity subagent çalıştır",
+    description: "Antigravity CLI üzerinden yalnızca erişilebilir Gemini Flash 3.8 veya Claude Sonnet modelleriyle görev devreder. Erişilemeyen Gemini Pro ve Gemini Flash 3.7 çalıştırma şemasında devre dışıdır; erişim durumu check_antigravity_subagent ile ayrıca probe edilebilir. İsteğe bağlı workspace yalnızca salt okunur modda ve izinli kökler altında kullanılabilir. Host source-bundle reviewScope transport'u desteklenmez.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runAntigravity),
+    annotations: executionAnnotations
+  }, safe(handlers.runAntigravity));
+
+  server.registerTool("run_claude_code_subagent", {
+    title: "Claude Code subagent çalıştır",
+    description: "Claude Code CLI üzerinden salt okunur veya düzenleme modunda görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runClaudeCode),
+    annotations: executionAnnotations
+  }, safe(handlers.runClaudeCode));
+
+  server.registerTool("run_opencode_subagent", {
+    title: "OpenCode subagent çalıştır",
+    description: "Açıkça belirtilmiş bağımsız OpenCode provider modellerine görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır. Gemini modelleri Antigravity üzerinden çalıştırılmalıdır.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runOpenCode),
+    annotations: executionAnnotations
+  }, safe(handlers.runOpenCode));
+
+  server.registerTool("check_space_bunny_subagent", {
+    title: "Space Bunny Free kataloğunu kontrol et",
+    description: "OpenCode models.dev kataloğunu yenileyip yalnız opencode/space-bunny-free durumunu ve sıfır fiyat metadata'sını doğrular; auth veya canlı model erişimini kanıtlamaz.",
+    inputSchema: {},
+    annotations: externalReadOnlyExecutionAnnotations
+  }, safe(async () => {
+    const result = await runtime.checkSpaceBunny();
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("run_space_bunny_subagent", {
+    title: "Space Bunny Free subagent çalıştır",
+    description: "Güncel durum (2026-10-13): OpenCode Free Tier, Bridge CLI üretim çağrısını HTTP 403 FreeTierError ile reddetti; bu route non-retryable permission_denied döndürür. Katalog/fiyat kontrolü canlı erişim kanıtı değildir. Erişim yolu izinli hale gelene kadar Space Bunny üretim çağrıları başarısız olur. Erişim sağlandığında sabit opencode/space-bunny-free modeliyle read-only görev, yalnız read-only researcher rolü ve OS-temp çalışma alanında webResearch, veya seçilmiş dosyalarda kontrollü edit yürütür; edit yalnız açık approve_prepared_edit ile trusted workspace'e terfi eder.",
+    inputSchema: publicToolSchemas.runSpaceBunny.innerType().shape,
+    annotations: executionAnnotations
+  }, safe(handlers.runSpaceBunny));
+
+  server.registerTool("run_space_bunny_edit_pilot", {
+    title: "Space Bunny disposable edit pilotu çalıştır",
+    description: "Space Bunny Free Bridge CLI yolu şu anda provider HTTP 403 FreeTierError nedeniyle non-retryable permission_denied ile blokludur; katalog kontrolü bu erişimi doğrulamaz. Erişim yolu izinli hale gelirse yalnız seçilmiş dosyaların bridge-owned disposable kopyasında dener ve ana workspace'e hiçbir değişiklik terfi ettirmez.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runSpaceBunnyEditPilot),
+    annotations: executionAnnotations
+  }, safe(handlers.runSpaceBunnyEditPilot));
+
+  server.registerTool("run_codex_subagent", {
+    title: "OpenAI Codex subagent çalıştır",
+    description: "OpenAI Codex CLI üzerinden salt okunur veya düzenleme modunda görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runCodex),
+    annotations: executionAnnotations
+  }, safe(handlers.runCodex));
+
+  server.registerTool("run_task_profile", {
+    title: "Görev profiliyle subagent çalıştır",
+    description: "Açıkça seçilen görev profiline ait canonical provider ve modla çalışır; yalnız policy'de tanımlı read-only fallback hedeflerini kullanabilir. Required source review için açık reviewScope, strict JSON sonucu ve host manifestine göre doğrulanmış path/line atıfları gerekir.",
+    inputSchema: publicToolInputShape(publicToolSchemas.runProfile),
+    annotations: executionAnnotations
+  }, safe(handlers.runProfile));
+
+  server.registerTool("check_subagent_bridge", {
+    title: "Subagent bridge runtime bağlantısını kontrol et",
+    description: "Runtime servislerini ve tüm provider adapter health durumlarını doğrular. dailySpentUsd/monthlySpentUsd are compatibility aliases for observed-plus-estimated accounting totals, not provider invoices; costBudget.costAccounting.limitMode distinguishes advisory from admission-blocking behavior.",
+    inputSchema: {},
+    annotations: readOnlyAnnotations
+  }, safeHealth(async () => {
+    const result = sanitizeRuntimeHealth(await runtime.health());
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("check_workspace_lock", {
+    title: "Workspace kilit durumunu kontrol et",
+    description: "Yerel kuyruk ve süreçler arası disk kilitlerini workspace yolu veya owner kimliği göstermeden raporlar.",
+    inputSchema: {},
+    annotations: readOnlyAnnotations
+  }, safe(async () => {
+    const result = runtime.workspaceLockSnapshot();
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+  }));
+
+  server.registerTool("check_provider_capability", {
+    title: "Sağlayıcı capability probe çalıştır",
+    description: "Seçilen sağlayıcı ve model için opt-in, salt-okunur capability probu çalıştırır; probeWorkspaceRead=true ek bir sağlayıcı çağrısıyla yalnız trusted workspace altında host tarafından oluşturulmuş kısa ömürlü sentinel'i okumayı dener. Maliyet modele göre değişebilir; sonucu redacted live_observation metriği olarak kaydeder.",
+    inputSchema: publicToolInputShape(publicToolSchemas.checkProviderCapability),
+    annotations: externalReadOnlyExecutionAnnotations
+  }, safe(handlers.checkProviderCapability));
+
+  if (enableOrchestratorApproval === true) {
+    server.registerTool("approve_prepared_edit", {
+      title: "Hazırlanmış edit değişikliğini onayla ve uygula",
+      description: "Yalnız orkestratör oturumunda hazırlanmış, yüksek etkili edit değişikliğini sağlayıcıyı yeniden çalıştırmadan saklanan kesin içerikle uygular.",
+      inputSchema: publicToolInputShape(publicToolSchemas.approvePreparedEdit),
+      annotations: executionAnnotations
+    }, safe(handlers.approvePreparedEdit));
+  }
+
+  if (configuration.parallelBatch?.enabled === true) {
+    server.registerTool("prepare_parallel_batch", {
+      title: "Paralel batch planı hazırla",
+      description: "Ana orkestratörün sunduğu task DAG'ını strict şemaya göre doğrular, read-only dependency wave'lerini, dosya sahipliğini ve batch-local admission sınırlarını hesaplar, bounded özet döndürür ve hiçbir worker başlatmaz. Edit task'ları tek wave'dir. Plan kullanıcıya gösterildikten sonra ayrı bir açık onay turunda start_parallel_batch çağrılmalıdır.",
+      inputSchema: publicToolInputShape(publicToolSchemas.prepareParallelBatch),
+      annotations: executionAnnotations
+    }, safe(handlers.prepareParallelBatch));
+    server.registerTool("start_parallel_batch", {
+      title: "Onaylanmış paralel batch'i başlat",
+      description: "Yalnız kullanıcıya gösterilmiş değişmez plan hash'i ve ayrı kullanıcı onayından sonra tek kullanımlık planı tüketir; manifesti atomik kaydedip batchId ile hemen döner. Worker'lar arka planda çalışır. autoOpenTerminalDashboard opt-in ise session penceresinden bağımsız, Windows ekranının sağında küçük Windows Terminal penceresi açılır; aksi halde watcher komutu npm run parallel:watch -- <batchId> ile ikinci terminalde başlatılabilir.",
+      inputSchema: publicToolInputShape(publicToolSchemas.startParallelBatch),
+      annotations: executionAnnotations
+    }, safe(handlers.startParallelBatch));
+    server.registerTool("get_parallel_batch", {
+      title: "Paralel batch durumunu sorgula",
+      description: "Batch durumu, çözümlenmiş task'lardan hesaplanan ilerleme yüzdesi, per-task statü ve batch-local admission bütçesinin sınırlı yapılandırılmış özetini döndürür. Task içi token ilerlemesi ölçülmez. Tam worker çıktısı yalnız get_parallel_task_detail ile alınır; admission tutarı sağlayıcı faturası değildir.",
+      inputSchema: publicToolInputShape(publicToolSchemas.getParallelBatch),
+      annotations: readOnlyAnnotations
+    }, safe(handlers.getParallelBatch));
+    server.registerTool("get_parallel_task_detail", {
+      title: "Paralel task ayrıntısını oku",
+      description: "Yalnız aynı batch, task, caller ve trusted workspace yetkisiyle opak detail_ref artefaktının sınırlı sayfasını döndürür; taskId=integration birleşik edit diff önizlemesidir. Süresi dolan veya yetkisiz artefakt için fail-closed hata verir.",
+      inputSchema: publicToolInputShape(publicToolSchemas.getParallelTaskDetail),
+      annotations: readOnlyAnnotations
+    }, safe(handlers.getParallelTaskDetail));
+    server.registerTool("cancel_parallel_batch", {
+      title: "Paralel batch'i iptal et",
+      description: "Açık iptal isteğini manifeste yazar, çalışan child execution'ları iptal eder; belirsiz child durumu unknown kalır ve otomatik tekrar veya entegrasyon yapılmaz.",
+      inputSchema: publicToolInputShape(publicToolSchemas.cancelParallelBatch),
+      annotations: executionAnnotations
+    }, safe(handlers.cancelParallelBatch));
+    if (enableOrchestratorApproval === true) {
+      server.registerTool("approve_parallel_integration", {
+        title: "Paralel entegrasyon diff'ini onayla ve uygula",
+        description: "Yalnız edit batch'i ready_for_approval durumundayken, kaynak HEAD ve dosya durumu doğrulandıktan sonra saklanan birleşik diff'i atomik dosya promosyonuyla kaynak workspace'e uygular; Git commit veya push yapmaz.",
+        inputSchema: publicToolInputShape(publicToolSchemas.approveParallelIntegration),
+        annotations: executionAnnotations
+      }, safe(handlers.approveParallelIntegration));
+    }
+  }
+
+  return server;
+}

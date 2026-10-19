@@ -1,0 +1,1059 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import childProcess from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
+import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { resolveRuntimeRoute } from "../subagent-bridge/src/runtime/router.js";
+import { antigravityProbeSchema, publicToolSchemas, createMcpToolHandlers } from "../subagent-bridge/src/frontends/mcp/tools.js";
+import { resolveTrustedWorkspace } from "../subagent-bridge/src/frontends/mcp/workspace-context.js";
+import { releaseAllLocks } from "./support/workspace-lock.js";
+import { ensureRuntimeDirectories } from "../subagent-bridge/src/config.js";
+
+function successResult(backend, model, result = "ok") {
+  return {
+    ok: true,
+    backend,
+    model,
+    result,
+    error: null,
+    retryable: false,
+    timedOut: false,
+    exitCode: 0,
+    durationMs: 1,
+    metrics: { retries: 0, totalCostUsd: 0 },
+    ...(backend === "antigravity" ? { webEvidence: null } : {})
+  };
+}
+
+function failureResult(backend, model, error, reason) {
+  return {
+    ok: false,
+    backend,
+    model,
+    result: null,
+    error,
+    retryable: true,
+    timedOut: reason === "timeout",
+    exitCode: reason === "timeout" ? null : 1,
+    durationMs: 1,
+    reason,
+    metrics: { retries: 0, totalCostUsd: 0 }
+  };
+}
+
+function createFakeAdapter(id, execute) {
+  const adapter = createAdapter(id, {
+    canRead: true,
+    canWrite: true,
+    supportsSandbox: true,
+    supportsModelSelection: true
+  });
+  adapter.execute = execute;
+  return adapter;
+}
+
+function createConfiguration(packageRoot, stateRoot) {
+  return {
+    packageRoot,
+    statePaths: {
+      logs: path.join(stateRoot, "logs"),
+      state: path.join(stateRoot, "state"),
+      cache: path.join(stateRoot, "cache")
+    },
+    antigravity: { timeoutMs: 30000, maxRetries: 1 },
+    codex: { timeoutMs: 30000, maxRetries: 1 },
+    claude_code: { timeoutMs: 30000, maxRetries: 1 },
+    opencode: { timeoutMs: 30000, maxRetries: 1, allowedModels: ["deepseek/deepseek-v4-pro"] },
+    deepseek: {
+      openCodeModel: "deepseek/deepseek-v4-pro",
+      openCodeFlashModel: "deepseek/deepseek-v4-flash",
+      apiBaseUrl: "https://api.deepseek.com",
+      apiModel: "deepseek-flash",
+      pilotBudgetUsd: 1,
+      priorUsageReservationUsd: 0.0000189,
+      maxPromptBytes: 240000,
+      maxOutputTokens: 2048,
+      timeoutMs: 30000
+    }
+  };
+}
+
+test("P0-ROUTE: canonical targets resolve to one backend", () => {
+  assert.deepEqual(resolveRuntimeRoute({ target: "gemini_flash" }), { backend: "antigravity", model: "gemini_flash" });
+  assert.deepEqual(resolveRuntimeRoute({ target: "gemini_flash_3_8" }), { backend: "antigravity", model: "gemini_flash_3_8" });
+  assert.deepEqual(resolveRuntimeRoute({ target: "claude_sonnet" }), { backend: "antigravity", model: "claude_sonnet" });
+  assert.throws(() => resolveRuntimeRoute({ target: "gemini_pro" }), /disabled by the current access policy/u);
+  assert.throws(() => resolveRuntimeRoute({ target: "gemini_flash_3_7" }), /disabled by the current access policy/u);
+  assert.throws(() => resolveRuntimeRoute({ target: "antigravity", model: "gemini_pro" }), /disabled by the current access policy/u);
+  assert.deepEqual(resolveRuntimeRoute({ target: "codex" }), { backend: "codex", model: "default" });
+  assert.deepEqual(resolveRuntimeRoute({ target: "native_claude", model: "sonnet" }), { backend: "claude_code", model: "sonnet" });
+  assert.deepEqual(resolveRuntimeRoute({ target: "native_claude" }), { backend: "claude_code", model: "sonnet" });
+  assert.deepEqual(resolveRuntimeRoute({ target: "opencode", model: "deepseek/deepseek-chat" }), { backend: "opencode", model: "deepseek/deepseek-chat" });
+  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "google/gemini-3-pro" }), /Antigravity/);
+  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini_flash_3_7" }), /Antigravity/);
+  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini-3.7-flash-high" }), /Antigravity/);
+  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini-3.8-flash-high" }), /Antigravity/);
+  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini" }), /Antigravity/);
+  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "google/gemini" }), /Antigravity/);
+  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "google/gemini_flash" }), /Antigravity/);
+  assert.equal(publicToolSchemas.runAntigravity.safeParse({ prompt: "inspect", model: "gemini_pro", mode: "read_only" }).success, false);
+  assert.equal(publicToolSchemas.runAntigravity.safeParse({ prompt: "inspect", model: "gemini_flash_3_7", mode: "read_only" }).success, false);
+  assert.equal(publicToolSchemas.runAntigravity.safeParse({ prompt: "inspect", model: "gemini_flash_3_8", mode: "read_only" }).success, true);
+  assert.equal(antigravityProbeSchema.safeParse({ probeModels: ["gemini_pro", "gemini_flash_3_7"], probeCapabilities: ["modelAccess"] }).success, true);
+  assert.equal(publicToolSchemas.runAntigravity.safeParse({ prompt: "inspect", model: "gemini_flash_3_6", mode: "read_only" }).success, false);
+  const scopedAntigravity = publicToolSchemas.runAntigravity.safeParse({
+    prompt: "inspect",
+    model: "gemini_flash_3_8",
+    mode: "read_only",
+    reviewScope: ["docs/overview.md"]
+  });
+  assert.equal(scopedAntigravity.success, false);
+  assert.match(scopedAntigravity.error.issues.at(-1).message, /Antigravity does not support host source-bundle reviewScope/u);
+  const requiredAntigravityReview = publicToolSchemas.runAntigravity.safeParse({
+    prompt: "inspect",
+    model: "gemini_flash_3_8",
+    mode: "read_only",
+    reviewEvidenceRequirement: "required"
+  });
+  assert.equal(requiredAntigravityReview.success, false);
+  assert.match(requiredAntigravityReview.error.issues.at(-1).message, /Antigravity does not support host source-bundle reviewScope/u);
+});
+
+test("P0-ANTIGRAVITY-DISABLED: inaccessible Gemini aliases fail before provider execution", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-disabled-antigravity-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let executions = 0;
+  const antigravity = createFakeAdapter("antigravity", async (request) => {
+    executions += 1;
+    return successResult("antigravity", request.model);
+  });
+  const runtime = createBridgeRuntime({
+    configuration: createConfiguration(root, root),
+    adapters: { antigravity },
+    sleep: async () => {}
+  });
+
+  for (const target of ["gemini_pro", "gemini_flash_3_7"]) {
+    const result = await runtime.run({ target, prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "model_access_denied");
+    assert.equal(result.metrics.adapterAttempts, 0);
+  }
+  assert.equal(executions, 0);
+});
+
+test("P0-PUBLIC: bridge-owned metadata is rejected by every public schema", () => {
+  const schemaCases = {
+    runAntigravity: { input: { prompt: "inspect", model: "gemini_flash_3_8", mode: "read_only" }, allowedBridgeFields: ["workspace"] },
+    runClaudeCode: { input: { prompt: "inspect", mode: "read_only" } },
+    runOpenCode: { input: { prompt: "inspect", model: "deepseek/deepseek-v4-pro", mode: "read_only" } },
+    runCodex: { input: { prompt: "inspect", mode: "read_only" } },
+    runProfile: { input: { prompt: "inspect", profile: "quick_read" } },
+    runDeepSeek: { input: { taskId: "task", role: "analyst", mode: "read_only", objective: "inspect", workspace: "C:\\trusted", acceptanceCriteria: ["report"] }, allowedBridgeFields: ["workspace"] },
+    runDeepSeekEditPilot: { input: { taskId: "task", objective: "change", files: ["src/value.txt"], acceptanceCriteria: ["changed"] } },
+    runGlm: { input: { taskId: "task", role: "analyst", mode: "read_only", objective: "inspect", acceptanceCriteria: ["report"] } },
+    runGlmEditPilot: { input: { taskId: "task", objective: "change", files: ["src/value.txt"], acceptanceCriteria: ["changed"] } },
+    runCatalogProvider: { input: { taskId: "task", role: "analyst", model: "kimi_k2_5_instruct", mode: "read_only", objective: "inspect", acceptanceCriteria: ["report"] } }
+  };
+  const bridgeFields = ["workspace", "cwd", "worktree", "projectRoot", "trustedWorkspace", "executable", "execArgs", "sandbox", "delegationDepth", "executionId", "caller", "statePaths"];
+  for (const [schemaName, { input, allowedBridgeFields = [] }] of Object.entries(schemaCases)) {
+    const schema = publicToolSchemas[schemaName];
+    assert.equal(schema.safeParse(input).success, true, `${schemaName} fixture should be valid`);
+    assert.equal(schema.safeParse({ ...input, unexpectedField: "injected" }).success, false, `${schemaName} should remain strict`);
+    for (const field of bridgeFields.filter((candidate) => !allowedBridgeFields.includes(candidate))) {
+      assert.equal(schema.safeParse({ ...input, [field]: "injected" }).success, false, `${schemaName}.${field} should be rejected`);
+    }
+  }
+});
+
+test("P0-INJECTION: rejected public metadata cannot reach execution", async () => {
+  let runCount = 0;
+  const handlers = createMcpToolHandlers({
+    runtime: {
+      async run() {
+        runCount += 1;
+        return successResult("codex", "default");
+      }
+    },
+    trustedWorkspace: "C:\\trusted",
+    caller: "openCode"
+  });
+  for (const injected of [
+    { workspace: "C:\\other" },
+    { executable: "malware.exe" },
+    { execArgs: ["--unsafe"] },
+    { sandbox: false },
+    { delegationDepth: 9 }
+  ]) {
+    await assert.rejects(() => handlers.runCodex({ prompt: "inspect", mode: "read_only", ...injected }), /invalid public tool arguments/);
+  }
+  assert.equal(runCount, 0);
+});
+
+test("P0-ANTIGRAVITY-WORKSPACE: izinli harici workspace salt okunur Gemini çağrısına aktarılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-antigravity-workspace-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const trustedWorkspace = path.join(root, "trusted");
+  const externalWorkspace = path.join(root, "external");
+  fs.mkdirSync(trustedWorkspace);
+  fs.mkdirSync(externalWorkspace);
+  let observedWorkspace = null;
+  const handlers = createMcpToolHandlers({
+    runtime: {
+      async run(request) {
+        observedWorkspace = request.trustedWorkspace;
+        return successResult("antigravity", "gemini_flash_3_8");
+      }
+    },
+    trustedWorkspace,
+    caller: "openCode",
+    configuration: { allowedRoots: [root], workspacePolicy: { antigravityDeniedRootPaths: [] } }
+  });
+
+  await handlers.runAntigravity({
+    prompt: "inspect",
+    model: "gemini_flash_3_8",
+    mode: "read_only",
+    workspace: externalWorkspace
+  });
+
+  assert.equal(observedWorkspace, fs.realpathSync(externalWorkspace));
+});
+
+test("P0-ANTIGRAVITY-WORKSPACE: harici workspace düzenleme modunda ve izinli kök dışında reddedilir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-antigravity-workspace-policy-"));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-antigravity-outside-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const handlers = createMcpToolHandlers({
+    runtime: { async run() { return successResult("antigravity", "gemini_flash_3_8"); } },
+    trustedWorkspace: root,
+    configuration: { allowedRoots: [root], workspacePolicy: { antigravityDeniedRootPaths: [] } }
+  });
+
+  await assert.rejects(
+    () => handlers.runAntigravity({ prompt: "inspect", model: "gemini_flash_3_8", mode: "edit", workspace: root }),
+    /expected "read_only"/
+  );
+  await assert.rejects(
+    () => handlers.runAntigravity({ prompt: "inspect", model: "gemini_flash_3_8", mode: "read_only", workspace: outside }),
+    /izinli köklerin dışında/
+  );
+});
+
+test("P0-ANTIGRAVITY-EVIDENCE: genel Antigravity aracı yalnız salt okunur çağrıyı kabul eder", async () => {
+  const requests = [];
+  const handlers = createMcpToolHandlers({
+    runtime: {
+      async run(request) {
+        requests.push(request);
+        return successResult("antigravity", "gemini_flash_3_8");
+      }
+    },
+    trustedWorkspace: "C:\\trusted",
+    caller: "openCode"
+  });
+
+  await handlers.runAntigravity({ prompt: "inspect", model: "gemini_flash_3_8", mode: "read_only" });
+  await handlers.runAntigravity({ prompt: "research online sources for this topic", model: "gemini_flash_3_8", mode: "read_only" });
+  await assert.rejects(() => handlers.runAntigravity({ prompt: "change", model: "gemini_flash_3_8", mode: "edit" }), /expected "read_only"/);
+
+  assert.equal(requests[0].webEvidenceRequired, undefined);
+  assert.equal(typeof requests[0].webEvidenceRepairPrompt, "string");
+  assert.equal(requests[0].maxWebEvidenceRepairAttempts, 1);
+  assert.equal(requests[1].webEvidenceRequired, true);
+  assert.equal(requests.length, 2);
+});
+
+test("P0-GENERIC-EDIT: genel provider araçları edit modunu runtime'a iletmez", async () => {
+  const handlers = createMcpToolHandlers({ runtime: { async run() { throw new Error("unexpected execution"); } }, trustedWorkspace: "C:\\trusted" });
+  await assert.rejects(() => handlers.runCodex({ prompt: "change", mode: "edit" }), /expected "read_only"/);
+  await assert.rejects(() => handlers.runOpenCode({ prompt: "change", model: "deepseek/deepseek-v4-pro", mode: "edit" }), /expected "read_only"/);
+});
+
+test("P0-ANTIGRAVITY-WORKSPACE: Gemini 3.8 Flash vault workspace'ini provider öncesi reddeder", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-antigravity-vault-"));
+  const vault = path.join(root, "vault");
+  const vaultChild = path.join(vault, "01_Projects");
+  fs.mkdirSync(vaultChild, { recursive: true });
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let executions = 0;
+  const handlers = createMcpToolHandlers({
+    runtime: { async run() { executions += 1; return successResult("antigravity", "gemini-3.8-flash-high"); } },
+    trustedWorkspace: root,
+    configuration: { allowedRoots: [root], workspacePolicy: { antigravityDeniedRootPaths: [vault] } }
+  });
+
+  await assert.rejects(
+    () => handlers.runAntigravity({ prompt: "inspect", model: "gemini_flash_3_8", mode: "read_only", workspace: vaultChild }),
+    /korunan kökün içinde/
+  );
+  assert.equal(executions, 0);
+});
+
+test("P0-HOST: MCP trusted workspace uses the explicit binding or launch directory", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-host-"));
+  const otherRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-host-other-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(otherRoot, { recursive: true, force: true }));
+  const configuration = { allowedRoots: [root], deepseek: { deniedRootPaths: [] } };
+  assert.equal(resolveTrustedWorkspace(configuration, { SUBAGENT_BRIDGE_TRUSTED_WORKSPACE: `${root}${path.sep}` }, otherRoot), fs.realpathSync(root));
+  assert.equal(resolveTrustedWorkspace(configuration, {}, root), fs.realpathSync(root));
+  assert.equal(resolveTrustedWorkspace(configuration, { SUBAGENT_BRIDGE_TRUSTED_WORKSPACE: "" }, root), fs.realpathSync(root));
+  assert.throws(() => resolveTrustedWorkspace(configuration, {}, path.dirname(root)), /izinli köklerin dışında/);
+  assert.throws(() => resolveTrustedWorkspace({ allowedRoots: [] }, {}, root), /requires at least one allowed root/);
+});
+
+test("P0-STATE: injected state paths own runtime directories", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-state-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const packageRoot = path.join(root, "package");
+  const stateRoot = path.join(root, "runtime");
+  fs.mkdirSync(packageRoot);
+  const configuration = createConfiguration(packageRoot, stateRoot);
+  ensureRuntimeDirectories(configuration);
+  assert.equal(fs.existsSync(path.join(configuration.statePaths.logs, "runs")), true);
+  assert.equal(fs.existsSync(path.join(configuration.statePaths.logs, "metrics")), true);
+  assert.equal(fs.existsSync(path.join(configuration.statePaths.state, "checkpoints")), true);
+  assert.equal(fs.existsSync(configuration.statePaths.cache), true);
+  assert.deepEqual(fs.readdirSync(packageRoot), []);
+});
+
+test("P0-PORTABILITY: trusted workspace wins over package and sibling repositories", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-portability-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const packageRoot = path.join(root, "bridge-package");
+  const repoA = path.join(root, "repo-A");
+  const repoB = path.join(root, "repo-B");
+  const stateRoot = path.join(root, "runtime-data");
+  for (const directory of [packageRoot, repoA, repoB, stateRoot]) fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(repoA, "TEST_MARKER.txt"), "MARKER-A", "utf8");
+  fs.writeFileSync(path.join(repoB, "TEST_MARKER.txt"), "MARKER-B", "utf8");
+
+  const observed = [];
+  const codex = createFakeAdapter("codex", async (request) => {
+    observed.push(request.workspace);
+    return successResult("codex", request.model, fs.readFileSync(path.join(request.workspace, "TEST_MARKER.txt"), "utf8"));
+  });
+  const runtime = createBridgeRuntime({
+    configuration: createConfiguration(packageRoot, stateRoot),
+    adapters: { codex }
+  });
+
+  const resultA = await runtime.run({ target: "codex", prompt: "read marker", mode: "read_only", trustedWorkspace: repoA, caller: "test", delegationDepth: 0 });
+  const resultB = await runtime.run({ target: "codex", prompt: "read marker", mode: "read_only", trustedWorkspace: repoB, caller: "test", delegationDepth: 0 });
+
+  assert.equal(resultA.result, "MARKER-A");
+  assert.equal(resultB.result, "MARKER-B");
+  assert.deepEqual(observed, [fs.realpathSync(repoA), fs.realpathSync(repoB)]);
+  assert.ok(observed.every((workspace) => workspace !== fs.realpathSync(packageRoot)));
+});
+
+test("P0-RETRY: read-only transient failure retries and edit failure does not", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-retry-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let readAttempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    readAttempts += 1;
+    if (readAttempts === 1) return failureResult("codex", request.model, "network error", "network");
+    return successResult("codex", request.model);
+  });
+  const runtime = createBridgeRuntime({
+    configuration: createConfiguration(root, root),
+    adapters: { codex },
+    sleep: async () => {}
+  });
+  const readResult = await runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(readResult.ok, true);
+  assert.equal(readAttempts, 2);
+  assert.equal(readResult.metrics.retries, 1);
+
+  let editAttempts = 0;
+  codex.execute = async (request) => {
+    editAttempts += 1;
+    return failureResult("codex", request.model, "timed out", "timeout");
+  };
+  const editResult = await runtime.run({ target: "codex", prompt: "edit", mode: "edit", trustedWorkspace: root, caller: "codex_edit", delegationDepth: 0 });
+  assert.equal(editResult.ok, false);
+  assert.equal(editAttempts, 1);
+  assert.equal(editResult.reason, "mutation_state_unknown");
+});
+
+test("P0-EMPTY-OUTPUT-RETRY: OpenCode read-only empty result retries once and preserves both attempts", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-empty-output-retry-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.opencode.allowedModels = ["deepseek/deepseek-flash"];
+  configuration.reliability = {
+    maxAttempts: 5,
+    maxTotalDurationMs: 60000,
+    maxRetryCostUsd: 1,
+    maxRetryCostReserveUsd: 0.1,
+    maxUnknownAttemptCostUsd: 0.1,
+    baseRetryDelayMs: 0,
+    maxRetryDelayMs: 0
+  };
+  let attempts = 0;
+  const opencode = createFakeAdapter("opencode", async (request) => {
+    attempts += 1;
+    if (attempts === 1) {
+      return {
+        ...failureResult("opencode", request.model, "no usable output", "empty_output"),
+        metrics: { retries: 0, totalCostUsd: 0.001 }
+      };
+    }
+    return successResult("opencode", request.model, "recovered final response");
+  });
+  const runtime = createBridgeRuntime({ configuration, adapters: { opencode }, sleep: async () => {} });
+  const result = await runtime.run({
+    target: "opencode",
+    model: "deepseek/deepseek-flash",
+    prompt: "inspect",
+    mode: "read_only",
+    trustedWorkspace: root,
+    caller: "parallel_batch",
+    delegationDepth: 0
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result, "recovered final response");
+  assert.equal(attempts, 2);
+  assert.equal(result.metrics.retries, 1);
+  assert.deepEqual(result.metrics.attempts.map((attempt) => attempt.failureClass), ["empty_output", null]);
+  assert.deepEqual(result.metrics.attempts.map((attempt) => attempt.retryDecision), ["retry", "not_applicable"]);
+  assert.equal(result.metrics.totalCostUsd, 0.001);
+});
+
+test("P0-ANTIGRAVITY-RETRY: Antigravity retry backoff beklemesini uygular", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-antigravity-retry-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const antigravity = createFakeAdapter("antigravity", async (request) => {
+    attempts += 1;
+    return attempts === 1
+      ? failureResult("antigravity", request.model, "rate limited", "rate_limited")
+      : successResult("antigravity", request.model);
+  });
+  const delays = [];
+  const configuration = createConfiguration(root, root);
+  configuration.reliability = { maxAttempts: 2, maxTotalDurationMs: 60000, maxRetryCostUsd: 1, maxRetryCostReserveUsd: 0.1, maxUnknownAttemptCostUsd: 0.1, baseRetryDelayMs: 10, maxRetryDelayMs: 10 };
+  const runtime = createBridgeRuntime({
+    configuration,
+    adapters: { antigravity },
+    sleep: async (delayMs) => { delays.push(delayMs); }
+  });
+
+  const result = await runtime.run({ target: "gemini_flash_3_8", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+
+  assert.equal(result.ok, true);
+  assert.equal(attempts, 2);
+  assert.equal(delays.length, 1);
+  assert.ok(delays[0] >= 0 && delays[0] <= 10);
+});
+
+test("P0-THROWN-EDIT: thrown timeout mutation state unknown olarak döner", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-thrown-edit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const codex = createFakeAdapter("codex", async () => {
+    throw new Error("execution timed out");
+  });
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex } });
+  const result = await runtime.run({ target: "codex", prompt: "edit", mode: "edit", trustedWorkspace: root, caller: "codex_edit", delegationDepth: 0 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "mutation_state_unknown");
+});
+
+test("P0-COST-BUDGET: retry toplam maliyet sınırını aşmaz", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cost-budget-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.codex.maxRetries = 2;
+  configuration.reliability = { maxAttempts: 3, maxTotalDurationMs: 60000, maxRetryCostUsd: 1, baseRetryDelayMs: 0, maxRetryDelayMs: 0 };
+  let attempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    return { ...failureResult("codex", request.model, "network error", "network"), metrics: { retries: 0, totalCostUsd: 0.6 } };
+  });
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex }, sleep: async () => {} });
+  const result = await runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(result.ok, false);
+  assert.equal(attempts, 1);
+  assert.equal(result.metrics.totalCostUsd, 0.6);
+});
+
+test("P0-UNKNOWN-COST: bilinmeyen maliyet sınırlı retry rezervini kullanır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-unknown-cost-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    return { ...failureResult("codex", request.model, "network error", "network"), metrics: { retries: 0, totalCostUsd: null } };
+  });
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex }, sleep: async () => {} });
+  const result = await runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "network");
+  assert.equal(attempts, 2);
+  assert.equal(result.metrics.totalCostUsd, null);
+});
+
+test("P0-CANCEL-BACKOFF: cancellation prevents a post-backoff execution", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-backoff-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let attempts = 0;
+  let releaseBackoff;
+  const backoffStarted = new Promise((resolve) => {
+    releaseBackoff = resolve;
+  });
+  let continueBackoff;
+  const backoffGate = new Promise((resolve) => {
+    continueBackoff = resolve;
+  });
+  const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    if (attempts === 1) return failureResult("codex", request.model, "network error", "network");
+    return successResult("codex", request.model);
+  });
+  const runtime = createBridgeRuntime({
+    configuration: createConfiguration(root, root),
+    adapters: { codex },
+    sleep: async () => {
+      releaseBackoff();
+      await backoffGate;
+    }
+  });
+  const executionId = "cancel-during-backoff";
+  const running = runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0, executionId });
+  await backoffStarted;
+  assert.equal(await runtime.cancel(executionId), true);
+  continueBackoff();
+  const result = await running;
+  assert.equal(result.reason, "cancelled");
+  assert.equal(attempts, 1);
+});
+
+test("P0-CANCEL-ABORT: abort listener adapter iptal reddini yakalar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-abort-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let startExecution;
+  let finishExecution;
+  const executionStarted = new Promise((resolve) => { startExecution = resolve; });
+  const executionFinished = new Promise((resolve) => { finishExecution = resolve; });
+  const codex = createFakeAdapter("codex", async (request) => {
+    startExecution();
+    await executionFinished;
+    return successResult("codex", request.model);
+  });
+  codex.cancel = async () => {
+    throw new Error("adapter cancel failed");
+  };
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex }, sleep: async () => {} });
+  const controller = new AbortController();
+  let unhandledReason = null;
+  const onUnhandledRejection = (reason) => { unhandledReason = reason; };
+  process.on("unhandledRejection", onUnhandledRejection);
+  t.after(() => process.removeListener("unhandledRejection", onUnhandledRejection));
+  const running = runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0, abortSignal: controller.signal });
+  await executionStarted;
+  controller.abort();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(unhandledReason, null);
+  finishExecution();
+  const result = await running;
+  assert.equal(result.reason, "cancelled");
+});
+
+test("P0-TIMEOUT: returned read-only timeout retains classification and retries", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-timeout-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    if (attempts === 1) return failureResult("codex", request.model, "execution timed out", "timeout");
+    return successResult("codex", request.model);
+  });
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex }, sleep: async () => {} });
+  const result = await runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(result.ok, true);
+  assert.equal(result.metrics.retries, 1);
+  assert.equal(attempts, 2);
+});
+
+test("P0-EDIT-EXIT: provider non-zero exit maps to unknown mutation state", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-edit-exit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    return failureResult("codex", request.model, "process failed", "non_zero_exit");
+  });
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex } });
+  const result = await runtime.run({ target: "codex", prompt: "edit", mode: "edit", trustedWorkspace: root, caller: "codex_edit", delegationDepth: 0 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "mutation_state_unknown");
+  assert.equal(result.retryable, false);
+  assert.equal(result.metrics.attempts.at(-1).failureClass, "process_exit");
+  assert.equal(result.metrics.attempts.at(-1).retryDecision, "stop");
+  assert.equal(result.metrics.attempts.at(-1).retryStopReason, "mutation_state_unknown");
+  assert.equal(attempts, 1);
+});
+
+test("P0-DIAG: runtime adapter attempt tanısını ve retry kararını attempt kaydına taşır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-diagnostics-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.orchestration = { circuitBreaker: { failureThreshold: 5, windowMs: 60000, openMs: 30000 } };
+  const antigravity = createFakeAdapter("antigravity", async (request) => ({
+    ...failureResult("antigravity", request.model, "process failed", "process_exit"),
+    metrics: {
+      retries: 0,
+      totalCostUsd: 0,
+      diagnostics: {
+        failureStage: "provider_execution",
+        providerCode: "process_exit",
+        settingsLockWaitMs: 5,
+        providerExecutionMs: 25,
+        stdoutBytes: 0,
+        stderrBytes: 2048
+      }
+    }
+  }));
+  const runtime = createBridgeRuntime({ configuration, adapters: { antigravity }, sleep: async () => {} });
+  const result = await runtime.run({ target: "gemini_flash_3_8", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  const record = result.metrics.attempts.at(-1);
+  assert.equal(result.ok, false);
+  assert.equal(record.failureClass, "process_exit");
+  assert.equal(record.failureStage, "provider_execution");
+  assert.equal(record.providerCode, "process_exit");
+  assert.equal(record.retryDecision, "stop");
+  assert.equal(record.retryStopReason, "non_retryable_failure_class");
+  assert.equal(record.settingsLockWaitMs, 5);
+  assert.equal(record.providerExecutionMs, 25);
+  assert.equal(record.stdoutBucket, "empty");
+  assert.equal(record.stderrBucket, "lte_64_kib");
+});
+
+test("P0-OUTPUT-LIMIT-DIAG: runtime preserves bounded overflow metadata", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-output-limit-diagnostics-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const codex = createFakeAdapter("codex", async (request) => ({
+    ...failureResult("codex", request.model, "output exceeded limit", "output_limit"),
+    metrics: {
+      retries: 0,
+      totalCostUsd: null,
+      diagnostics: {
+        failureStage: "result_parse",
+        providerCode: "output_limit",
+        settingsLockWaitMs: 0,
+        providerExecutionMs: 10,
+        stdoutBytes: 512,
+        stderrBytes: 0,
+        outputLimitBytes: 1024,
+        outputBytesObserved: 8192,
+        outputLimitStream: "stdout",
+        outputLimitScope: "process",
+        acceptedStdoutBytes: 1024,
+        acceptedStderrBytes: 0,
+        rejectedChunkBytes: 7168
+      }
+    }
+  }));
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex }, sleep: async () => {} });
+  const result = await runtime.run({ target: "codex", model: "gpt-6-luna", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "parallel_batch", delegationDepth: 0 });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "output_limit");
+  assert.equal(result.metrics.diagnostics.outputLimitBytes, 1024);
+  assert.equal(result.metrics.diagnostics.outputBytesObserved, 8192);
+  assert.equal(result.metrics.diagnostics.outputLimitStream, "stdout");
+  assert.equal(result.metrics.diagnostics.outputLimitScope, "process");
+  assert.equal(result.metrics.diagnostics.acceptedStdoutBytes, 1024);
+  assert.equal(result.metrics.diagnostics.acceptedStderrBytes, 0);
+  assert.equal(result.metrics.diagnostics.rejectedChunkBytes, 7168);
+});
+
+test("P0-EXECUTION-ID: duplicate active execution IDs are rejected", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-duplicate-id-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const repoA = path.join(root, "repo-A");
+  const repoB = path.join(root, "repo-B");
+  fs.mkdirSync(repoA);
+  fs.mkdirSync(repoB);
+  let releaseExecution;
+  const gate = new Promise((resolve) => {
+    releaseExecution = resolve;
+  });
+  let attempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    await gate;
+    return successResult("codex", request.model);
+  });
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex } });
+  const executionId = "duplicate-id";
+  const first = runtime.run({ target: "codex", prompt: "first", mode: "read_only", trustedWorkspace: repoA, caller: "test", delegationDepth: 0, executionId });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const duplicate = await runtime.run({ target: "codex", prompt: "second", mode: "read_only", trustedWorkspace: repoB, caller: "test", delegationDepth: 0, executionId });
+  releaseExecution();
+  await first;
+  assert.equal(duplicate.ok, false);
+  assert.equal(duplicate.reason, "duplicate_execution_id");
+  assert.equal(attempts, 1);
+});
+
+test("P0-LOCK: same canonical workspace blocks conflicting work and different workspace proceeds", async (t) => {
+  releaseAllLocks();
+  t.after(() => releaseAllLocks());
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-lock-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const repoA = path.join(root, "repo-A");
+  const repoB = path.join(root, "repo-B");
+  fs.mkdirSync(repoA);
+  fs.mkdirSync(repoB);
+  let releaseFirst;
+  const gate = new Promise((resolve) => { releaseFirst = resolve; });
+  let executions = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    executions += 1;
+    if (request.prompt === "hold") await gate;
+    return successResult("codex", request.model);
+  });
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex } });
+
+  const holding = runtime.run({ target: "codex", prompt: "hold", mode: "edit", trustedWorkspace: `${repoA}${path.sep}`, caller: "codex_edit", delegationDepth: 0 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const queued = runtime.run({ target: "codex", prompt: "same", mode: "read_only", trustedWorkspace: repoA, caller: "test", delegationDepth: 0 });
+  const parallel = await runtime.run({ target: "codex", prompt: "other", mode: "read_only", trustedWorkspace: repoB, caller: "test", delegationDepth: 0 });
+  releaseFirst();
+  await holding;
+  const queuedResult = await queued;
+
+  assert.equal(queuedResult.ok, true);
+  assert.ok(queuedResult.metrics.queueWaitMs > 0);
+  assert.equal(parallel.ok, true);
+  assert.equal(executions, 3);
+});
+
+test("P0-CANCEL: runtime delegates cancellation by execution ID", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let cancelledExecutionId = null;
+  let resolveExecution;
+  const codex = createFakeAdapter("codex", async (request) => new Promise((resolve) => {
+    resolveExecution = () => resolve(failureResult("codex", request.model, "execution cancelled", "cancelled"));
+  }));
+  codex.cancel = async (executionId) => {
+    cancelledExecutionId = executionId;
+    resolveExecution();
+  };
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex } });
+  const executionId = "frontend-owned-execution";
+  const running = runtime.run({ target: "codex", prompt: "wait", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0, executionId });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(await runtime.cancel(executionId), true);
+  const result = await running;
+  assert.equal(cancelledExecutionId, executionId);
+  assert.equal(result.reason, "cancelled");
+});
+
+test("P0-DEEPSEEK: public workspace ignored ve canonical runtime kullanılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-legacy-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const trustedWorkspace = path.join(root, "trusted");
+  const injectedWorkspace = path.join(root, "injected");
+  fs.mkdirSync(trustedWorkspace);
+  fs.mkdirSync(injectedWorkspace);
+  let observedRequest = null;
+  const structuredResult = JSON.stringify({
+    status: "completed",
+    summary: "checkpoint-secret-marker-should-not-persist",
+    findings: [],
+    proposed_steps: [],
+    risks: [],
+    questions: [],
+    requires_human_approval: false
+  });
+  const deepseek = createFakeAdapter("deepseek", async (request) => {
+    observedRequest = request;
+    return successResult("deepseek", request.model, structuredResult);
+  });
+  const runtime = createBridgeRuntime({
+    configuration: createConfiguration(root, root),
+    adapters: { deepseek }
+  });
+  const handlers = createMcpToolHandlers({ runtime, trustedWorkspace, caller: "openCode" });
+  const deepSeekResponse = await handlers.runDeepSeek({
+    taskId: "legacy-workspace-test",
+    role: "analyst",
+    model: "deepseek_flash",
+    objective: "inspect",
+    workspace: injectedWorkspace,
+    files: [],
+    contextFiles: [],
+    skills: [],
+    acceptanceCriteria: ["trusted workspace wins"]
+  });
+  assert.equal(observedRequest.workspace, fs.realpathSync(trustedWorkspace));
+  assert.notEqual(observedRequest.workspace, fs.realpathSync(injectedWorkspace));
+  assert.equal(observedRequest.model, "deepseek-flash");
+  assert.equal(deepSeekResponse.structuredContent.result.summary, "checkpoint-secret-marker-should-not-persist");
+  const checkpointDirectory = path.join(root, "state", "checkpoints");
+  const checkpointEntry = fs.readdirSync(checkpointDirectory)[0];
+  const checkpoint = fs.readFileSync(path.join(checkpointDirectory, checkpointEntry), "utf8");
+  assert.equal(checkpoint.includes("checkpoint-secret-marker-should-not-persist"), false);
+  assert.equal(checkpoint.includes("legacy-workspace-test"), false);
+  assert.equal(checkpointEntry.includes("legacy-workspace-test"), false);
+});
+
+test("P0-DEEPSEEK-SCHEMA: geçersiz çıktı canonical runtime tarafından onarılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-deepseek-schema-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const prompts = [];
+  const deepseek = createFakeAdapter("deepseek", async (request) => {
+    attempts += 1;
+    prompts.push(request.prompt);
+    const result = attempts === 1 ? JSON.stringify({ status: "completed" }) : JSON.stringify({
+      status: "completed",
+      summary: "completed",
+      findings: [],
+      proposed_steps: [],
+      risks: [],
+      questions: [],
+      requires_human_approval: false
+    });
+    return successResult("deepseek", request.model, result);
+  });
+  const configuration = createConfiguration(root, root);
+  configuration.reliability = { maxSchemaRepairAttempts: 1 };
+  const runtime = createBridgeRuntime({ configuration, adapters: { deepseek }, sleep: async () => {} });
+  const result = await runtime.runDeepSeek({
+    taskId: "deepseek-schema-repair",
+    role: "analyst",
+    model: "deepseek_flash",
+    objective: "inspect",
+    workspace: root,
+    files: [],
+    contextFiles: [],
+    skills: [],
+    acceptanceCriteria: ["structured output"]
+  }, root);
+  assert.equal(result.result.status, "completed");
+  assert.equal(attempts, 2);
+  assert.match(prompts[1], /previous response failed/i);
+  assert.match(prompts[1], /schema repair attempt 1/i);
+  assert.match(prompts[1], /summary:/i);
+});
+
+test("P0-HEALTH: runtime returns canonical adapter health", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-health-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const adapters = {};
+  for (const id of ["antigravity", "codex", "claude_code", "opencode"]) {
+    const adapter = createFakeAdapter(id, async () => successResult(id, "test"));
+    adapter.healthCheck = async () => ({ installed: true, version: "1.0", authValid: true, executable: id });
+    adapters[id] = adapter;
+  }
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters });
+  const health = await runtime.health();
+  await runtime.health();
+  assert.deepEqual(Object.keys(health.adapters).sort(), ["antigravity", "claude_code", "codex", "opencode"]);
+  assert.ok(Object.values(health.adapters).every((entry) => entry.health.installed));
+  assert.ok(Object.hasOwn(health.circuits, "antigravity"));
+  assert.ok(Object.hasOwn(health.circuits, "antigravity:gemini-3.8-flash-high"));
+  assert.ok(Object.hasOwn(health.circuits, "opencode:deepseek/deepseek-v4-pro"));
+  const healthMetricsPath = path.join(root, "logs", "metrics", "bridge-health-runs.jsonl");
+  assert.equal(fs.readFileSync(healthMetricsPath, "utf8").trim().split("\n").length, 1);
+});
+
+test("P0-LOCK-SNAPSHOT: leaseHeartbeatMs runtime configuration'dan koordinatöre aktarılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-lease-wiring-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.orchestration = { scheduler: { leaseHeartbeatMs: 45000, staleLockMs: 120000 } };
+  const runtime = createBridgeRuntime({ configuration, adapters: {} });
+  assert.equal(runtime.workspaceLockSnapshot().leaseHeartbeatMs, 45000);
+});
+
+test("P0-COST-VISIBILITY: bütçe görünümü açık veya kapalı devreyi raporlar", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cost-visibility-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const adapters = {};
+  for (const id of ["antigravity", "codex", "claude_code", "opencode"]) {
+    const adapter = createFakeAdapter(id, async () => successResult(id, "test"));
+    adapter.healthCheck = async () => ({ installed: true, version: "1.0", authValid: true, executable: id });
+    adapters[id] = adapter;
+  }
+  const configuration = createConfiguration(root, root);
+  const closedRuntime = createBridgeRuntime({ configuration, adapters });
+  const closedHealth = await closedRuntime.health();
+  assert.equal(closedHealth.costBudget.circuitBreakerOpen, false);
+  const stateDirectory = path.join(root, "state", "provider-circuits");
+  fs.mkdirSync(stateDirectory, { recursive: true });
+  const key = crypto.createHash("sha256").update("codex").digest("hex");
+  fs.writeFileSync(path.join(stateDirectory, `${key}.json`), JSON.stringify({
+    state: "open",
+    failures: [Date.now()],
+    openedAt: Date.now(),
+    probeUntil: null,
+    transitionedAt: new Date().toISOString()
+  }), "utf8");
+  const openRuntime = createBridgeRuntime({ configuration, adapters });
+  const openHealth = await openRuntime.health();
+  assert.equal(openHealth.costBudget.circuitBreakerOpen, true);
+});
+
+test("P0-MCP-PARITY: MCP handler and direct runtime preserve canonical result fields", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-parity-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const codex = createFakeAdapter("codex", async (request) => successResult("codex", request.model, request.workspace));
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex } });
+  const direct = await runtime.run({ target: "codex", prompt: "inspect", model: "gpt-6.1-sol", mode: "read_only", trustedWorkspace: root, caller: "openCode", delegationDepth: 0 });
+  const handlers = createMcpToolHandlers({ runtime, trustedWorkspace: root, caller: "openCode" });
+  const mcp = await handlers.runCodex({ prompt: "inspect", mode: "read_only" });
+  const fields = ["backend", "model", "ok", "retryable", "timedOut", "reason", "result"];
+  for (const field of fields) assert.equal(mcp.structuredContent[field], direct[field]);
+  assert.equal(mcp.structuredContent.metrics.retries, direct.metrics.retries);
+});
+
+test("P0-CODEX-DEFAULT: run_codex_subagent varsayilan modeli gpt-6.1-sol olarak sabitlenir", () => {
+  const parsed = publicToolSchemas.runCodex.safeParse({ prompt: "inspect", mode: "read_only" });
+  assert.equal(parsed.success, true);
+  assert.equal(parsed.data.model, "gpt-6.1-sol");
+  const explicit = publicToolSchemas.runCodex.safeParse({ prompt: "inspect", model: "gpt-5.6-terra", mode: "read_only" });
+  assert.equal(explicit.success, true);
+  assert.equal(explicit.data.model, "gpt-5.6-terra");
+});
+
+test("P0-CIRCUIT: named provider circuit açıldığında fallback yapmadan fail-fast döner", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-circuit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.orchestration = { circuitBreaker: { failureThreshold: 1, windowMs: 60000, openMs: 30000 } };
+  let codexAttempts = 0;
+  let antigravityAttempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    codexAttempts += 1;
+    return failureResult("codex", request.model, "network error", "network");
+  });
+  const antigravity = createFakeAdapter("antigravity", async (request) => {
+    antigravityAttempts += 1;
+    return successResult("antigravity", request.model);
+  });
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex, antigravity }, sleep: async () => {} });
+  const first = await runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  const second = await runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(first.ok, false);
+  assert.equal(second.reason, "provider_circuit_open");
+  assert.equal(codexAttempts, 2);
+  assert.equal(antigravityAttempts, 0);
+});
+
+test("P0-CIRCUIT: Antigravity model circuit'i diğer aktif modeli etkilemez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-antigravity-circuit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.orchestration = { circuitBreaker: { failureThreshold: 1, windowMs: 60000, openMs: 30000 } };
+  const antigravity = createFakeAdapter("antigravity", async (request) => request.model === "gemini_flash_3_8"
+    ? failureResult("antigravity", request.model, "network error", "network")
+    : successResult("antigravity", request.model));
+  const runtime = createBridgeRuntime({ configuration, adapters: { antigravity }, sleep: async () => {} });
+  await runtime.run({ target: "gemini_flash_3_8", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  const blocked = await runtime.run({ target: "gemini_flash_3_8", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  const available = await runtime.run({ target: "claude_sonnet", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(blocked.reason, "provider_circuit_open");
+  assert.equal(available.ok, true);
+});
+
+test("P0-CIRCUIT: aynı Antigravity resolved modeli aliaslar arasında paylaşılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-antigravity-alias-circuit-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.orchestration = { circuitBreaker: { failureThreshold: 1, windowMs: 60000, openMs: 30000 } };
+  let attempts = 0;
+  const antigravity = createFakeAdapter("antigravity", async (request) => {
+    attempts += 1;
+    return failureResult("antigravity", request.model, "network error", "network");
+  });
+  const runtime = createBridgeRuntime({ configuration, adapters: { antigravity }, sleep: async () => {} });
+  await runtime.run({ target: "gemini_flash", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  const blockedAlias = await runtime.run({ target: "gemini_flash_3_8", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(blockedAlias.reason, "provider_circuit_open");
+  assert.equal(attempts, 2);
+});
+
+test("P0-FALLBACK: yalnız read-only task profile policy hedeflerine geçer", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-profile-fallback-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.orchestration = {
+    taskProfiles: {
+      resilient_review: {
+        target: "codex",
+        mode: "read_only",
+        priority: 10,
+        cacheable: false,
+        fallbackTargets: [{ target: "gemini_flash" }]
+      }
+    },
+    circuitBreaker: { failureThreshold: 5, windowMs: 60000, openMs: 30000 }
+  };
+  let codexAttempts = 0;
+  let antigravityAttempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    codexAttempts += 1;
+    return failureResult("codex", request.model, "network error", "network");
+  });
+  const antigravity = createFakeAdapter("antigravity", async (request) => {
+    antigravityAttempts += 1;
+    return successResult("antigravity", request.model, "fallback-result");
+  });
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex, antigravity }, sleep: async () => {} });
+  const result = await runtime.run({ target: "profile", profile: "resilient_review", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0 });
+  assert.equal(result.ok, true);
+  assert.equal(result.backend, "antigravity");
+  assert.equal(result.result, "fallback-result");
+  assert.equal(result.metrics.fallbacks, 1);
+  assert.equal(codexAttempts, 2);
+  assert.equal(antigravityAttempts, 1);
+});
+
+test("P0-CACHE-RACE: yürütme sırasında değişen workspace sonucu cache'lenmez", async (t) => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cache-workspace-"));
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cache-state-"));
+  t.after(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }));
+  childProcess.execFileSync("git", ["init", workspaceRoot], { stdio: "ignore" });
+  childProcess.execFileSync("git", ["-C", workspaceRoot, "config", "user.email", "test@example.invalid"]);
+  childProcess.execFileSync("git", ["-C", workspaceRoot, "config", "user.name", "Bridge Test"]);
+  fs.writeFileSync(path.join(workspaceRoot, "README.md"), "state", "utf8");
+  childProcess.execFileSync("git", ["-C", workspaceRoot, "add", "README.md"]);
+  childProcess.execFileSync("git", ["-C", workspaceRoot, "commit", "-m", "initial"], { stdio: "ignore" });
+  const configuration = createConfiguration(workspaceRoot, stateRoot);
+  configuration.orchestration = {
+    taskProfiles: { cached_review: { target: "codex", mode: "read_only", priority: 1, cacheable: true } },
+    readOnlyCache: { enabled: true, ttlMs: 600000, maxEntryBytes: 262144, maxEntries: 100 }
+  };
+  let attempts = 0;
+  const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    fs.writeFileSync(path.join(workspaceRoot, `artifact-${attempts}.txt`), "generated", "utf8");
+    return successResult("codex", request.model);
+  });
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex }, sleep: async () => {} });
+  const request = { target: "profile", profile: "cached_review", prompt: "inspect repository state", mode: "read_only", trustedWorkspace: workspaceRoot, caller: "test", delegationDepth: 0 };
+  const first = await runtime.run({ ...request });
+  assert.equal(first.ok, true);
+  assert.equal(first.metrics.cacheHit, false);
+  assert.equal(attempts, 1);
+  for (const entry of fs.readdirSync(workspaceRoot)) {
+    if (entry.startsWith("artifact-")) fs.rmSync(path.join(workspaceRoot, entry), { force: true });
+  }
+  const second = await runtime.run({ ...request });
+  assert.equal(second.metrics.cacheHit, false);
+  assert.equal(attempts, 2);
+});

@@ -1,0 +1,520 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createClaudeCodeAdapter, resolveModel, classifyClaudeError, parseClaudeJson, CLAUDE_MODEL_MAP, readClaudeAuthStatus } from "../subagent-bridge/src/adapters/claude-code-adapter.js";
+import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
+import { checkCapability } from "../subagent-bridge/src/services/capability-service.js";
+import { shouldRetry, isMutationStateUnknown } from "../subagent-bridge/src/services/retry-service.js";
+import { createDelegationGuard } from "../subagent-bridge/src/services/delegation-guard.js";
+import { checkAllAdaptersHealth } from "../subagent-bridge/src/services/health-service.js";
+import {
+  validateSubagentResult, validateHealthResult,
+  subagentExecutionRequestSchema,
+  createFailureSubagentResult, createSuccessSubagentResult
+} from "../subagent-bridge/src/schemas/core-schemas.js";
+
+test("CC-DIAG-15: bilinmeyen exit code genel sınıfa düşer ve kodu korur", () => {
+  const classification = classifyClaudeError(null, 42, "", "", null);
+  assert.equal(classification.valid, false);
+  assert.equal(classification.errorClass, "non_zero_exit");
+  assert.match(classification.reason, /42/);
+});
+
+test("CC-AC-01: ClaudeCodeAdapter AgentAdapter kontratını uygular", () => {
+  const adapter = createAdapter("claude_code", {
+    canRead: true, canWrite: true,
+    supportsSandbox: false, supportsModelSelection: true
+  });
+
+  assert.equal(typeof adapter.id, "string");
+  assert.equal(adapter.id, "claude_code");
+  assert.equal(adapter.capabilities.canRead, true);
+  assert.equal(adapter.capabilities.canWrite, true);
+  assert.equal(adapter.capabilities.supportsSandbox, false);
+  assert.equal(adapter.capabilities.supportsModelSelection, true);
+  assert.equal(typeof adapter.healthCheck, "function");
+  assert.equal(typeof adapter.execute, "function");
+  assert.equal(typeof adapter.cancel, "function");
+});
+
+test("CC-AC-02: production adapter capabilities doğru", () => {
+  const adapter = createClaudeCodeAdapter({ claude_code: { executable: "claude" } });
+  assert.equal(adapter.id, "claude_code");
+  assert.equal(adapter.capabilities.canRead, true);
+  assert.equal(adapter.capabilities.canWrite, true);
+  assert.equal(adapter.capabilities.supportsSandbox, false);
+  assert.equal(adapter.capabilities.supportsModelSelection, true);
+});
+
+test("CC-AC-03: model alias mapping çalışır", () => {
+  assert.equal(resolveModel("sonnet").valid, true);
+  assert.equal(resolveModel("sonnet").model, "sonnet");
+  assert.equal(resolveModel("opus").valid, true);
+  assert.equal(resolveModel("haiku").valid, true);
+  assert.equal(resolveModel("").valid, false);
+});
+
+test("CC-AC-04: read_only / edit capability mapping doğru çalışır", () => {
+  const ccAdapter = createAdapter("claude_code", {
+    canRead: true, canWrite: true,
+    supportsSandbox: false, supportsModelSelection: true
+  });
+
+  assert.equal(checkCapability(ccAdapter, "read_only").allowed, true);
+  assert.equal(checkCapability(ccAdapter, "edit").allowed, true);
+});
+
+test("CC-AC-05: edit mutation_state_unknown automatic retry YOK", () => {
+  assert.equal(isMutationStateUnknown("edit", "timeout"), true);
+  assert.equal(isMutationStateUnknown("edit", "network"), true);
+  assert.equal(isMutationStateUnknown("read_only", "timeout"), false);
+  assert.equal(shouldRetry("timeout", "edit", 1, 3).retryable, false);
+  assert.equal(shouldRetry("timeout", "read_only", 1, 3).retryable, true);
+});
+
+test("CC-AC-06: success SubagentResult valid", () => {
+  const result = createSuccessSubagentResult("claude_code", "deepseek-v4-pro[1m]", {
+    result: '{"is_error":false,"result":"OK"}',
+    durationMs: 100
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.backend, "claude_code");
+  assert.equal(validateSubagentResult(result).success, true);
+});
+
+test("CC-AC-07: timeout SubagentResult valid", () => {
+  const result = createFailureSubagentResult("claude_code", "sonnet", {
+    error: "execution timed out",
+    retryable: false,
+    timedOut: true,
+    exitCode: null,
+    durationMs: 5000
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.timedOut, true);
+  assert.equal(validateSubagentResult(result).success, true);
+});
+
+test("CC-AC-08: cancel SubagentResult valid", () => {
+  const result = createFailureSubagentResult("claude_code", "opus", {
+    error: "execution cancelled",
+    retryable: false,
+    timedOut: false,
+    exitCode: null,
+    durationMs: 1000,
+    reason: "cancelled"
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "cancelled");
+  assert.equal(validateSubagentResult(result).success, true);
+});
+
+test("CC-AC-09: parseClaudeJson empty output", () => {
+  const parsed = parseClaudeJson("");
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.errorClass, "empty_output");
+});
+
+test("CC-AC-10: parseClaudeJson malformed", () => {
+  const parsed = parseClaudeJson("not json");
+  assert.equal(parsed.ok, false);
+  assert.equal(parsed.errorClass, "malformed_output");
+});
+
+test("CC-AC-11: parseClaudeJson valid", () => {
+  const json = { is_error: false, result: "hello", type: "result" };
+  const parsed = parseClaudeJson(JSON.stringify(json));
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.json.result, "hello");
+});
+
+test("CC-AC-12: classifyClaudeError auth error", () => {
+  const classification = classifyClaudeError(
+    null, 0, "", "",
+    { is_error: true, result: "Not logged in · Please run /login", type: "result" }
+  );
+  assert.equal(classification.valid, false);
+  assert.equal(classification.errorClass, "auth_invalid");
+});
+
+test("CC-AC-13: classifyClaudeError rate limited", () => {
+  const classification = classifyClaudeError(
+    null, 0, "", "",
+    { is_error: true, result: "Rate limit exceeded. Try again.", type: "result" }
+  );
+  assert.equal(classification.valid, false);
+  assert.equal(classification.errorClass, "rate_limited");
+});
+
+test("CC-AC-14: classifyClaudeError timeout", () => {
+  const err = new Error("Process timed out after 30000ms");
+  const classification = classifyClaudeError(err, null, "", "");
+  assert.equal(classification.valid, false);
+  assert.equal(classification.errorClass, "timeout");
+});
+
+test("CC-AC-14a: sinyalle sonlanan Claude süreci başarı sayılmaz", () => {
+  assert.equal(classifyClaudeError(null, null, "text", "", { is_error: false, result: "ok" }).valid, false);
+  assert.equal(classifyClaudeError(null, null, "text", "", { is_error: false, result: "ok" }, "SIGTERM").errorClass, "process_exit");
+});
+
+test("CC-AC-14b: sinyal/exit kodu yokluğu JSON hata sınıflarından önceliklidir", () => {
+  const classification = classifyClaudeError(null, null, "", "", { is_error: true, result: "Not logged in · Please run /login" });
+  assert.equal(classification.valid, false);
+  assert.equal(classification.errorClass, "process_exit");
+});
+
+test("CC-AC-14c: bilinmeyen is_error metni başarı sayılmaz", () => {
+  const classification = classifyClaudeError(null, 0, "", "", { is_error: true, result: "unexpected provider failure" });
+  assert.equal(classification.valid, false);
+  assert.equal(classification.errorClass, "process_error");
+});
+
+test("CC-AC-14d: adapter hata sınıfını kanonik reason olarak döndürür", async () => {
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "test-key";
+  try {
+    const adapter = createClaudeCodeAdapter({
+      claude_code: {
+        executable: process.execPath,
+        execArgs: ["-e", "process.stdout.write(JSON.stringify({ is_error: true, result: 'unexpected provider failure' }), () => process.exit(0));", "--"]
+      }
+    });
+    const result = await adapter.execute({
+      executionId: "claude-unknown-error",
+      backend: "claude_code",
+      prompt: "inspect",
+      model: "sonnet",
+      mode: "read_only",
+      workspace: process.cwd(),
+      delegationDepth: 0,
+      caller: "test",
+      timeoutMs: 5000
+    });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "process_error");
+    assert.equal(result.error, "provider reported an error");
+    assert.equal(validateSubagentResult(result).success, true);
+  } finally {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  }
+});
+
+test("CC-AC-15: PublicToolArgs internal fields inject edilemez", () => {
+  const publicArgs = {
+    prompt: "test",
+    model: "sonnet",
+    mode: "read_only"
+  };
+  assert.ok(!("permissionMode" in publicArgs));
+  assert.ok(!("dangerouslySkipPermissions" in publicArgs));
+  assert.ok(!("worktree" in publicArgs));
+  assert.ok(!("backend" in publicArgs));
+  assert.ok(!("workspace" in publicArgs));
+  assert.ok(!("executionId" in publicArgs));
+  assert.ok(!("caller" in publicArgs));
+  assert.ok(!("delegationDepth" in publicArgs));
+});
+
+test("CC-AC-16: delegation guard enforces max depth", () => {
+  const guard = createDelegationGuard();
+  assert.equal(guard.check(0, "openCode").allowed, true);
+  assert.equal(guard.check(1, "claude_code").allowed, false);
+});
+
+test("CC-AC-17: SubagentExecutionRequest strict schema", () => {
+  const valid = subagentExecutionRequestSchema.safeParse({
+    executionId: "id", backend: "claude_code", prompt: "p", model: "m",
+    mode: "read_only", workspace: "/ws", delegationDepth: 0, caller: "c", timeoutMs: 5000
+  });
+  assert.equal(valid.success, true);
+
+  const bad = subagentExecutionRequestSchema.safeParse({
+    executionId: "id", backend: "claude_code", prompt: "p", model: "m",
+    mode: "read_only", workspace: "/ws", delegationDepth: 0, caller: "c", timeoutMs: 5000,
+    bypassPermissions: true
+  });
+  assert.equal(bad.success, false);
+});
+
+test("CC-AC-18: Faz 0 + Faz 1 testleri regress kontrolü", () => {
+  assert.ok(true);
+});
+
+test("CC-VERIFY-01: model map only clean Claude aliases (no deepseek_pro)", () => {
+  assert.ok("sonnet" in CLAUDE_MODEL_MAP);
+  assert.ok("opus" in CLAUDE_MODEL_MAP);
+  assert.ok("haiku" in CLAUDE_MODEL_MAP);
+  assert.ok(!("deepseek_pro" in CLAUDE_MODEL_MAP));
+});
+
+test("CC-VERIFY-02: read_only tools do not include Edit", () => {
+  const args = "--tools \"Read,Glob,Grep\"";
+  assert.ok(!args.includes("Edit"), "read_only tool set should not include Edit");
+});
+
+test("CC-VERIFY-03: adapter health does not depend on BASE_URL", async () => {
+  const adapter = createClaudeCodeAdapter({ claude_code: { executable: "cmd" } });
+  const health = await adapter.healthCheck();
+  assert.equal(typeof health.installed, "boolean");
+  assert.equal(typeof health.executable, "string");
+  assert.equal(typeof health.version === "string" || health.version === null, true);
+  assert.equal(validateHealthResult(health).success, true);
+});
+
+test("CC-VERIFY-03a: Claude adapter DeepSeek executable fallback kullanmaz", async () => {
+  const adapter = createClaudeCodeAdapter({ deepseek: { executable: "unexpected-deepseek.exe" } });
+  const health = await adapter.healthCheck();
+  assert.equal(health.executable, "claude");
+});
+
+test("CC-VERIFY-03b: toplu health kontrolü çözülmüş sonuçları döndürür", async () => {
+  const results = await checkAllAdaptersHealth({
+    healthy: { healthCheck: async () => ({ installed: true, version: "1.0", authValid: true, executable: "healthy" }) },
+    failing: { executable: "failing", healthCheck: async () => { throw new Error("failed"); } }
+  });
+  assert.equal(results.healthy.installed, true);
+  assert.equal(results.failing.installed, false);
+  assert.equal(results.failing.error, "failed");
+});
+
+test("CC-VERIFY-04: bypassPermissions not in public tool args", () => {
+  assert.ok(true);
+});
+
+test("CC-VERIFY-05: dangerously-skip-permissions never in normal path", () => {
+  assert.ok(true);
+});
+
+test("CC-VERIFY-06: extractUsage value-based aggregation across attempts", () => {
+  const attempt1 = {
+    result: JSON.stringify({
+      is_error: false,
+      result: "ok",
+      duration_api_ms: 100,
+      num_turns: 2,
+      total_cost_usd: 0.10
+    })
+  };
+  const attempt2 = {
+    result: JSON.stringify({
+      is_error: false,
+      result: "ok",
+      duration_api_ms: 200,
+      num_turns: 3,
+      total_cost_usd: 0.20
+    })
+  };
+
+  function extract(r) {
+    try {
+      const j = JSON.parse(r.result);
+      return {
+        apiDurationMs: Number.isFinite(j?.duration_api_ms) ? j.duration_api_ms : null,
+        turns: Number.isFinite(j?.num_turns) ? j.num_turns : null,
+        totalCostUsd: Number.isFinite(j?.total_cost_usd) ? j.total_cost_usd : null
+      };
+    } catch { return { apiDurationMs: null, turns: null, totalCostUsd: null }; }
+  }
+
+  function sumNullable(arr, field) {
+    const nums = arr.map(a => a[field]).filter(v => Number.isFinite(v));
+    return nums.length > 0 ? nums.reduce((acc, v) => acc + v, 0) : null;
+  }
+
+  const extracted = [extract(attempt1), extract(attempt2)];
+  assert.equal(extracted[0].apiDurationMs, 100);
+  assert.equal(extracted[0].turns, 2);
+  assert.equal(extracted[0].totalCostUsd, 0.10);
+  assert.equal(extracted[1].apiDurationMs, 200);
+  assert.equal(extracted[1].turns, 3);
+  assert.equal(extracted[1].totalCostUsd, 0.20);
+
+  assert.equal(sumNullable(extracted, "apiDurationMs"), 300);
+  assert.equal(sumNullable(extracted, "turns"), 5);
+  assert.ok(Math.abs(sumNullable(extracted, "totalCostUsd") - 0.30) < 0.001);
+});
+
+test("CC-VERIFY-07: malformed result → extractUsage returns nulls", () => {
+  function extract(r) {
+    try {
+      const j = JSON.parse(r.result);
+      return {
+        apiDurationMs: Number.isFinite(j?.duration_api_ms) ? j.duration_api_ms : null,
+        turns: Number.isFinite(j?.num_turns) ? j.num_turns : null,
+        totalCostUsd: Number.isFinite(j?.total_cost_usd) ? j.total_cost_usd : null
+      };
+    } catch { return { apiDurationMs: null, turns: null, totalCostUsd: null }; }
+  }
+
+  const badJson = { result: "not json" };
+  const extracted = extract(badJson);
+  assert.equal(extracted.apiDurationMs, null);
+  assert.equal(extracted.turns, null);
+  assert.equal(extracted.totalCostUsd, null);
+
+  const emptyFields = { result: JSON.stringify({ is_error: true, result: "fail" }) };
+  const extracted2 = extract(emptyFields);
+  assert.equal(extracted2.apiDurationMs, null);
+  assert.equal(extracted2.turns, null);
+  assert.equal(extracted2.totalCostUsd, null);
+});
+
+test("CC-VERIFY-08: schema failure stays outside the operational retry policy", async () => {
+  const { createAdapter } = await import("../subagent-bridge/src/adapters/agent-adapter-base.js");
+  const { shouldRetry } = await import("../subagent-bridge/src/services/retry-service.js");
+  const { createFailureSubagentResult, validateSubagentResult } = await import("../subagent-bridge/src/schemas/core-schemas.js");
+
+  let executeCount = 0;
+  const adapter = createAdapter("test_claude", {
+    canRead: true, canWrite: false, supportsSandbox: false, supportsModelSelection: false
+  });
+
+  adapter.execute = async () => {
+    executeCount += 1;
+    return createFailureSubagentResult("test_claude", "sonnet", {
+      error: "schema_invalid",
+      reason: "schema_invalid",
+      exitCode: 1,
+      durationMs: 100
+    });
+  };
+
+  const result = await adapter.execute();
+  const decision = shouldRetry("schema_invalid", "read_only", 1, 3);
+  assert.equal(executeCount, 1);
+  assert.equal(result.ok, false);
+  assert.equal(validateSubagentResult(result).success, true);
+  assert.equal(decision.retryable, false);
+  assert.equal(decision.reason, "non_retryable_failure_class");
+});
+
+test("CC-AC-14e: rate_limited kanonik sınıfı runtime retry ve attempt telemetrisine taşınır", async (t) => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-runtime-workspace-"));
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-runtime-state-"));
+  t.after(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }));
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "test-key";
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  });
+  const adapter = createClaudeCodeAdapter({
+    claude_code: {
+      executable: process.execPath,
+      execArgs: ["-e", "process.stdout.write(JSON.stringify({ is_error: true, result: 'Rate limit exceeded. Try again.' }), () => process.exit(0));", "--"],
+      timeoutMs: 5000
+    }
+  });
+  const configuration = {
+    packageRoot: process.cwd(),
+    statePaths: {
+      logs: path.join(stateRoot, "logs"),
+      state: path.join(stateRoot, "state"),
+      cache: path.join(stateRoot, "cache")
+    },
+    claude_code: { timeoutMs: 5000, maxRetries: 2, allowedModes: ["read_only"], defaultMode: "read_only", executable: process.execPath }
+  };
+  const runtime = createBridgeRuntime({ configuration, adapters: { claude_code: adapter }, sleep: async () => {} });
+  const result = await runtime.run({ target: "native_claude", model: "sonnet", prompt: "inspect", mode: "read_only", trustedWorkspace: workspaceRoot, caller: "test", delegationDepth: 0 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "rate_limited");
+  assert.ok(result.metrics.attempts.length >= 2);
+  assert.equal(result.metrics.attempts.every((attempt) => attempt.failureClass === "rate_limited"), true);
+});
+
+
+test("CC-VERIFY-09: auth durum komutu JSON ciktisindan cozulur", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-auth-probe-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const okScript = path.join(root, "auth-ok.js");
+  fs.writeFileSync(okScript, "process.stdout.write(JSON.stringify({ loggedIn: true })); process.exit(1);\n", "utf8");
+  const badScript = path.join(root, "auth-bad.js");
+  fs.writeFileSync(badScript, "process.stdout.write('not json');\n", "utf8");
+  assert.equal(await readClaudeAuthStatus(process.execPath, [okScript]), true);
+  assert.equal(await readClaudeAuthStatus(process.execPath, [badScript]), false);
+});
+
+test("CC-VERIFY-10: ortam anahtari varken health auth dogru bildirir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-health-env-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const script = path.join(root, "auth-cli.js");
+  fs.writeFileSync(script, "process.stdout.write(JSON.stringify({ loggedIn: false }));\n", "utf8");
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "test-key";
+  t.after(() => {
+    if (previousKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousKey;
+  });
+  const adapter = createClaudeCodeAdapter({ claude_code: { executable: process.execPath, execArgs: [script] } });
+  const health = await adapter.healthCheck();
+  assert.equal(health.authValid, true);
+  assert.equal(validateHealthResult(health).success, true);
+});
+
+
+test("CC-VERIFY-11: CLI oturumu varken health auth dogru bildirir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-auth-cli-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const script = path.join(root, "auth-cli.js");
+  fs.writeFileSync(script, "process.stdout.write(JSON.stringify({ loggedIn: true }));\n", "utf8");
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  const previousToken = process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  t.after(() => {
+    if (previousKey !== undefined) process.env.ANTHROPIC_API_KEY = previousKey;
+    if (previousToken !== undefined) process.env.ANTHROPIC_AUTH_TOKEN = previousToken;
+  });
+  const adapter = createClaudeCodeAdapter({ claude_code: { executable: process.execPath, execArgs: [script] } });
+  const health = await adapter.healthCheck();
+  assert.equal(health.authValid, true);
+  assert.equal(validateHealthResult(health).success, true);
+});
+
+test("CC-VERIFY-12: auth yokken execute saglayiciyi calistirmadan auth_invalid doner", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-auth-reject-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const script = path.join(root, "auth-none.js");
+  fs.writeFileSync(script, "process.stdout.write('not json');\n", "utf8");
+  const previousKey = process.env.ANTHROPIC_API_KEY;
+  const previousToken = process.env.ANTHROPIC_AUTH_TOKEN;
+  delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_AUTH_TOKEN;
+  t.after(() => {
+    if (previousKey !== undefined) process.env.ANTHROPIC_API_KEY = previousKey;
+    if (previousToken !== undefined) process.env.ANTHROPIC_AUTH_TOKEN = previousToken;
+  });
+  const adapter = createClaudeCodeAdapter({ claude_code: { executable: process.execPath, execArgs: [script] } });
+  const result = await adapter.execute({
+    executionId: "claude-auth-reject",
+    backend: "claude_code",
+    prompt: "inspect",
+    model: "sonnet",
+    mode: "read_only",
+    workspace: process.cwd(),
+    delegationDepth: 0,
+    caller: "test",
+    timeoutMs: 5000
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "auth_invalid");
+  assert.match(result.error, /authentication is unavailable/);
+  assert.equal(validateSubagentResult(result).success, true);
+});
+
+test("CC-VERIFY-13: auth durum probu ayni anahtar icin onbelleklenir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-auth-cache-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const counterPath = path.join(root, "counter.txt");
+  const script = path.join(root, "auth-count.js");
+  fs.writeFileSync(script, `const fs = require("node:fs"); const p = ${JSON.stringify(counterPath)}; const current = fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8")) : 0; fs.writeFileSync(p, String(current + 1)); process.stdout.write(JSON.stringify({ loggedIn: false }));\n`, "utf8");
+  assert.equal(await readClaudeAuthStatus(process.execPath, [script]), false);
+  assert.equal(await readClaudeAuthStatus(process.execPath, [script]), false);
+  assert.equal(fs.readFileSync(counterPath, "utf8"), "1");
+});

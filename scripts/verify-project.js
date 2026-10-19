@@ -1,0 +1,154 @@
+import fs from "node:fs";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { loadRuntimeConfiguration } from "../subagent-bridge/src/config.js";
+import { checkDeepSeek } from "../subagent-bridge/src/deepseek.js";
+import { checkPersistentMemory } from "../subagent-bridge/src/memory.js";
+import { compareSkillDirectories } from "./skill-directory-sync.js";
+
+export function buildCodexCheck(configuration) {
+  return configuration.codex
+    ? spawnSync(configuration.codex.executable, ["--version"], {
+      encoding: "utf8",
+      windowsHide: true
+    })
+    : { status: 1, stdout: "", stderr: "Codex configuration unavailable" };
+}
+
+export function buildCodexVerificationReport(codexCheck) {
+  return {
+    ok: codexCheck.status === 0,
+    version: (codexCheck.stdout || codexCheck.stderr || "").trim(),
+    model: null,
+    modelAccess: "not_probed",
+    role: "subagent"
+  };
+}
+
+export function isDeepSeekConfigurationValid(configuration) {
+  return configuration.deepseek?.apiBaseUrl === "https://api.deepseek.com"
+    && configuration.deepseek?.apiModel === "deepseek-flash"
+    && configuration.deepseek?.pilotBudgetUsd > 0
+    && configuration.deepseek?.pilotBudgetUsd <= 1;
+}
+
+export async function runVerification() {
+  const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+  const projectRoot = path.resolve(scriptDirectory, "..");
+  const configuration = loadRuntimeConfiguration();
+  const requiredFiles = [
+    ".codex/config.toml",
+    "AGENTS.md",
+    "CLAUDE.md",
+    "config/agent-rules.md",
+    "config/agents.json",
+    "config/deepseek-subagent-rules.md",
+    "config/policy.json",
+    "config/memory-evaluation.json",
+    "config/model-fit-evaluation.json",
+    "config/model-fit-live-evaluation.json",
+    "scripts/evaluate-memory.js",
+    "scripts/evaluate-model-fit.js",
+    "scripts/replay-run.js",
+    "scripts/apply-agent-modes.js",
+    "scripts/accept-glm-edit.js",
+    "scripts/accept-glm-read-only.js",
+    "scripts/pilot-glm-edit.js",
+    "scripts/accept-deepseek-edit.js",
+    "scripts/pilot-deepseek-edit.js",
+    "scripts/manage-project-logs.js",
+    "scripts/review-memory.js",
+    "scripts/doctor-memory.js",
+    "scripts/report-recent-runs.js",
+    "scripts/prune-memory-audit.js",
+    "subagent-bridge/src/memory-evaluation.js",
+    "subagent-bridge/src/model-fit-evaluation.js",
+    "subagent-bridge/src/glm.js",
+    "subagent-bridge/src/memory.js",
+    "subagent-bridge/src/version-contract.js",
+    "subagent-bridge/src/runtime-state-migration.js",
+    "scripts/migrate-runtime-state.js",
+    "subagent-bridge/src/metrics.js",
+    "subagent-bridge/src/replay.js",
+    "subagent-bridge/src/project-runs.js",
+    "subagent-bridge/src/recent-runs.js",
+    "subagent-bridge/src/result.js",
+    "subagent-bridge/src/retry.js",
+    "subagent-bridge/src/services/approval-boundary.js",
+    "subagent-bridge/src/services/disposable-workspace.js",
+    "subagent-bridge/src/services/prepared-edit-registry.js",
+    "subagent-bridge/src/services/slo-service.js",
+    "subagent-bridge/src/services/memory-hook.js",
+    "subagent-bridge/src/services/memory-hook-identity.js",
+    "subagent-bridge/src/services/memory-hook-cohort.js",
+    "subagent-bridge/src/services/memory-hook-client.js",
+    "subagent-bridge/src/services/memory-hook-plugin.js",
+    "subagent-bridge/src/services/memory-profile.js",
+    "scripts/install-memory-hook.js",
+    "scripts/memory-hook-client.js",
+    "scripts/record-memory-hook-feedback.js",
+    "scripts/classify-memory-hook.js",
+    "scripts/attribute-memory-hook-history.js",
+    "scripts/classify-edit-feedback.js",
+    "scripts/classify-routing-feedback.js",
+    "scripts/repair-memory.js",
+    "subagent-bridge/src/server.js",
+    "subagent-bridge/schemas/deepseek-result.schema.json"
+  ];
+
+  const fileChecks = requiredFiles.map((relativePath) => ({
+    component: relativePath,
+    ok: fs.existsSync(path.join(projectRoot, relativePath))
+  }));
+
+  const skillChecks = configuration.skills.allowed.map((skillName) => {
+    const codexSkillDirectory = path.join(projectRoot, ".agents", "skills", skillName);
+    const claudeSkillDirectory = path.join(projectRoot, ".claude", "skills", skillName);
+    const codexSkillPath = path.join(codexSkillDirectory, "SKILL.md");
+    const claudeSkillPath = path.join(claudeSkillDirectory, "SKILL.md");
+    const codexExists = fs.existsSync(codexSkillPath);
+    const claudeExists = fs.existsSync(claudeSkillPath);
+    const comparison = compareSkillDirectories(codexSkillDirectory, claudeSkillDirectory);
+    return {
+      skill: skillName,
+      codexExists,
+      claudeExists,
+      synchronized: codexExists && claudeExists && comparison.equal
+    };
+  });
+
+  const codexCheck = buildCodexCheck(configuration);
+  const deepSeekCheck = await checkDeepSeek(configuration);
+  const memoryCheck = checkPersistentMemory(configuration);
+
+  const report = {
+    projectRoot,
+    node: process.version,
+    files: fileChecks,
+    skills: skillChecks,
+    codex: buildCodexVerificationReport(codexCheck),
+    deepSeek: {
+      ok: isDeepSeekConfigurationValid(configuration),
+      apiAvailable: deepSeekCheck.available,
+      authenticated: deepSeekCheck.authenticated,
+      model: deepSeekCheck.model,
+      role: "read-only-subagent"
+    },
+    memory: memoryCheck
+  };
+
+  console.log(JSON.stringify(report, null, 2));
+
+  const validFiles = fileChecks.every((item) => item.ok);
+  const validSkills = skillChecks.every((item) => item.codexExists && item.claudeExists && item.synchronized);
+  if (!validFiles || !validSkills || !report.codex.ok || !report.deepSeek.ok || !memoryCheck.readable || !memoryCheck.writable) {
+    process.exitCode = 1;
+  }
+
+  return report;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  await runVerification();
+}

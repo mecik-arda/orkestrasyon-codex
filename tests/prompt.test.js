@@ -1,0 +1,65 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { buildDeepSeekPrompt, buildDeepSeekSchemaRepairPrompt } from "../subagent-bridge/src/deepseek.js";
+
+test("DeepSeek promptu salt okunur görev sözleşmesini içerir", () => {
+  const prompt = buildDeepSeekPrompt({
+    taskId: "task-1",
+    role: "reviewer",
+    objective: "Hata kaynağını analiz et",
+    files: ["src/app.js"],
+    contextFiles: ["task.md"],
+    skills: ["kod-denetleyicisi"],
+    acceptanceCriteria: ["Kanıt sunulmalı"]
+  }, {
+    agentRules: "Kod içinde yorum kullanma.",
+    subagentRules: "Dosya değiştirme.",
+    skills: [{ name: "kod-denetleyicisi", content: "Hataları önem sırasına göre raporla." }]
+  });
+  assert.match(prompt, /Görev: Hata kaynağını analiz et/);
+  assert.match(prompt, /Kanıt sunulmalı/);
+  assert.match(prompt, /Dosya değiştirme veya komut çalıştırma/);
+  assert.match(prompt, /Etkin skill: kod-denetleyicisi/);
+  assert.match(prompt, /Never use key\/value findings/);
+});
+
+test("DeepSeek şema onarım istemi eksiksiz JSON sözleşmesini tekrarlar", () => {
+  const input = {
+    objective: "Hata kaynağını analiz et",
+    files: ["src/app.js"],
+    contextFiles: [],
+    acceptanceCriteria: ["Kanıt sunulmalı"]
+  };
+  const prompt = buildDeepSeekSchemaRepairPrompt(input, { skills: [] });
+  assert.match(prompt, /previous response failed/i);
+  assert.match(prompt, /exactly one JSON object/i);
+  assert.match(prompt, /Every array field must be present/i);
+});
+
+test("DeepSeek required reviewer prompt demands manifest-bound line references", () => {
+  const input = {
+    role: "reviewer",
+    objective: "Review the selected source",
+    files: ["src/example.js"],
+    contextFiles: [],
+    skills: [],
+    acceptanceCriteria: ["Report only evidence-backed findings"],
+    reviewEvidenceRequirement: "required",
+    reviewScope: ["src/example.js"]
+  };
+  const prompt = buildDeepSeekPrompt(input, { skills: [] });
+  const repairPrompt = buildDeepSeekSchemaRepairPrompt(input, { skills: [] });
+  assert.match(prompt, /references/);
+  assert.match(prompt, /manifest-relative path/);
+  assert.match(prompt, /lineStart/);
+  assert.match(repairPrompt, /references/);
+});
+
+test("Orchestrator named provider failure için host fallback yapmaz", () => {
+  const prompt = fs.readFileSync(path.join(process.cwd(), ".opencode", "agent", "orchestrator.md"), "utf8");
+  assert.match(prompt, /Report named-provider failure with its canonical reason/);
+  assert.match(prompt, /do not substitute another provider or self-review for explicitly requested independent verification/i);
+  assert.match(prompt, /unless the user requests a fallback/);
+});

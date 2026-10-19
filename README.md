@@ -92,7 +92,7 @@ The MCP trusted workspace is not inferred from the package location: it uses a n
 
 ### MCP rule attestation
 
-The bridge exposes one read-only resource for a redacted workspace-rule manifest:
+The bridge exposes a read-only resource for a redacted workspace-rule manifest:
 
 - URI: `hades://rules/attestation/v1`
 - Name: `rule-attestation-v1`
@@ -103,6 +103,14 @@ The bridge exposes one read-only resource for a redacted workspace-rule manifest
 The manifest uses a strict schema, fixed entry order, RFC 8785 canonicalization, fixed file and total-size limits, descriptor reads, link checks, UTF-8 validation, secret scanning and TOCTOU checks. No tool fallback exists. Unsupported resource clients remain `unsupported` rather than invoking a tool.
 
 The result is an untrusted observation with `sourceClass: "mcp_resource"`. `workspace_file` and `mcp_resource` can report a matching snapshot; `startup_context` is `unavailable` until a trusted host loader hook exists. The resource does not prove that the host injected the rules into startup context, that a model followed them, or that the returned resource is a signed attestation. `npm run smoke` validates resource listing, reading and the strict manifest.
+
+The bridge also exposes a separate read-only workspace identity resource:
+
+- URI: `hades://workspace/identity/v1`
+- Name: `workspace-identity-v1`
+- Output: SHA-256 hashes of the process cwd captured at server startup and the validated canonical trusted workspace.
+
+The strict response contains hashes only. Hashes do not guarantee privacy, do not constitute cryptographic host attestation and do not prove that startup rules were received. The resource does not write files, invoke providers or change workspace selection. Compare both returned hashes with values computed for the intended checkout after restarting the MCP server; the new process is the evidence being checked.
 
 ### Personal configuration
 
@@ -537,7 +545,7 @@ MCP trusted workspace package konumundan türetilmez: dolu bir başlangıç orta
 
 ### MCP kural attestation
 
-Bridge, workspace kural dosyaları için redacted ve salt-okunur tek bir resource sunar:
+Bridge, workspace kural dosyaları için redacted ve salt-okunur bir resource sunar:
 
 - URI: `hades://rules/attestation/v1`
 - Ad: `rule-attestation-v1`
@@ -548,6 +556,14 @@ Bridge, workspace kural dosyaları için redacted ve salt-okunur tek bir resourc
 Manifest strict şema, sabit entry sırası, RFC 8785 canonicalization, dosya ve toplam boyut sınırları, descriptor okuması, link kontrolleri, UTF-8 doğrulaması, secret taraması ve TOCTOU kontrolleri uygular. Tool fallback yoktur. Resource desteklemeyen client `unsupported` kalır ve tool çağrılmaz.
 
 Sonuç `sourceClass: "mcp_resource"` ile güvenilmeyen bir gözlemdir. `workspace_file` ve `mcp_resource` eşleşen snapshot bildirebilir; trusted host loader hook'u bulunana kadar `startup_context` `unavailable` kalır. Resource, host'un kuralları startup context'e enjekte ettiğini, modelin kurallara uyduğunu veya sonucun imzalı attestation olduğunu kanıtlamaz. `npm run smoke` resource listeleme, okuma ve strict manifest doğrulamasını çalıştırır.
+
+Bridge ayrıca workspace kimliği için ayrı bir salt-okunur resource sunar:
+
+- URI: `hades://workspace/identity/v1`
+- Ad: `workspace-identity-v1`
+- Çıktı: server başlangıcında yakalanan süreç cwd'si ile doğrulanmış kanonik trusted workspace'in SHA-256 özetleri.
+
+Strict yanıt yalnız hash içerir. Hashler gizlilik garantisi vermez, kriptografik host attestation değildir ve başlangıç kurallarının alındığını kanıtlamaz. Resource dosya yazmaz, provider çalıştırmaz ve workspace seçimini değiştirmez. MCP server yeniden başlatıldıktan sonra iki özeti hedef checkout için hesaplanan değerlerle karşılaştırın; doğrulanan süreç yeniden başlatma sonrasındaki süreçtir.
 
 ### Kişisel yapılandırma
 

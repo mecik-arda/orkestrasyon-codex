@@ -14,6 +14,13 @@ import {
   RULE_ATTESTATION_URI,
   ruleAttestationSchema
 } from "../subagent-bridge/src/frontends/mcp/rule-attestation.js";
+import {
+  createWorkspaceIdentity,
+  WORKSPACE_IDENTITY_MIME_TYPE,
+  WORKSPACE_IDENTITY_NAME,
+  WORKSPACE_IDENTITY_URI,
+  workspaceIdentitySchema
+} from "../subagent-bridge/src/frontends/mcp/workspace-identity.js";
 
 function createWorkspace() {
   const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "orchestrator-rule-attestation-"));
@@ -35,9 +42,10 @@ function createCoreFromAttestation(attestation) {
 
 async function createClient(workspace) {
   const serverModule = pathToFileURL(path.resolve("subagent-bridge/src/frontends/mcp/server.js")).href;
+  const transportModule = import.meta.resolve("@modelcontextprotocol/sdk/server/stdio.js");
   const childSource = [
     `import { createSubagentMcpServer } from ${JSON.stringify(serverModule)};`,
-    'import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";',
+    `import { StdioServerTransport } from ${JSON.stringify(transportModule)};`,
     "const runtime = { health: async () => ({ services: {}, circuits: {}, costBudget: {}, adapters: {} }), workspaceLockSnapshot: () => ({}) };",
     `const server = createSubagentMcpServer({ runtime, configuration: {}, trustedWorkspace: ${JSON.stringify(workspace)} });`,
     "await server.connect(new StdioServerTransport());"
@@ -45,6 +53,7 @@ async function createClient(workspace) {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["--input-type=module", "--eval", childSource],
+    cwd: workspace,
     env: { ...process.env }
   });
   const client = new Client({ name: "rule-attestation-test", version: "1.0.0" });
@@ -62,7 +71,10 @@ test("MCP-ATTEST-01: yalnız sabit resource listelenir ve redacted manifest okun
       name: resource.name,
       uri: resource.uri,
       mimeType: resource.mimeType
-    })), [{ name: RULE_ATTESTATION_NAME, uri: RULE_ATTESTATION_URI, mimeType: RULE_ATTESTATION_MIME_TYPE }]);
+    })).sort((left, right) => left.uri.localeCompare(right.uri)), [
+      { name: RULE_ATTESTATION_NAME, uri: RULE_ATTESTATION_URI, mimeType: RULE_ATTESTATION_MIME_TYPE },
+      { name: WORKSPACE_IDENTITY_NAME, uri: WORKSPACE_IDENTITY_URI, mimeType: WORKSPACE_IDENTITY_MIME_TYPE }
+    ].sort((left, right) => left.uri.localeCompare(right.uri)));
     const read = await client.readResource({ uri: RULE_ATTESTATION_URI });
     const content = read.contents[0];
     const attestation = ruleAttestationSchema.parse(JSON.parse(content.text));
@@ -73,8 +85,32 @@ test("MCP-ATTEST-01: yalnız sabit resource listelenir ve redacted manifest okun
     assert.equal(attestation.manifestSha256, calculateRuleManifestSha256(createCoreFromAttestation(attestation)));
     assert.equal(JSON.stringify(attestation).includes(workspace), false);
     assert.equal(JSON.stringify(attestation).includes("agent rule alpha"), false);
+    const identityRead = await client.readResource({ uri: WORKSPACE_IDENTITY_URI });
+    const identity = workspaceIdentitySchema.parse(JSON.parse(identityRead.contents[0].text));
+    assert.equal(identityRead.contents[0].uri, WORKSPACE_IDENTITY_URI);
+    assert.equal(identity.processCwdSha256, createWorkspaceIdentity(workspace, workspace).processCwdSha256);
+    assert.equal(identity.trustedWorkspaceSha256, createWorkspaceIdentity(workspace, workspace).trustedWorkspaceSha256);
+    assert.equal(JSON.stringify(identity).includes(workspace), false);
+    assert.equal(JSON.stringify(identity).includes("agent rule alpha"), false);
+    assert.equal(identity.limitations.privacyGuarantee, false);
+    assert.equal(identity.limitations.cryptographicHostAttestation, false);
+    assert.equal(identity.limitations.startupRulesProven, false);
   } finally {
     await client.close().catch(() => {});
+  }
+});
+
+test("MCP-IDENTITY-01: aynı kuralların bulunduğu farklı checkout'lar farklı workspace özeti üretir", () => {
+  const firstWorkspace = createWorkspace();
+  const secondWorkspace = createWorkspace();
+  try {
+    const firstIdentity = createWorkspaceIdentity(firstWorkspace, firstWorkspace);
+    const secondIdentity = createWorkspaceIdentity(secondWorkspace, secondWorkspace);
+    assert.notEqual(firstIdentity.processCwdSha256, secondIdentity.processCwdSha256);
+    assert.notEqual(firstIdentity.trustedWorkspaceSha256, secondIdentity.trustedWorkspaceSha256);
+  } finally {
+    fs.rmSync(firstWorkspace, { recursive: true, force: true });
+    fs.rmSync(secondWorkspace, { recursive: true, force: true });
   }
 });
 

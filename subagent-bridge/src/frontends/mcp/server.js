@@ -6,6 +6,7 @@ import { analyzePersistentMemoryWrite, checkPersistentMemory, promotePersistentM
 import { capabilityProbeSchema, capabilityStatusValues, workspaceReadStatusValues } from "../../schemas/core-schemas.js";
 import { createMcpToolHandlers, publicToolSchemas, antigravityProbeSchema, storeMemorySchema } from "./tools.js";
 import { createRuleAttestation, RULE_ATTESTATION_MIME_TYPE, RULE_ATTESTATION_NAME, RULE_ATTESTATION_URI } from "./rule-attestation.js";
+import { createWorkspaceIdentity, WORKSPACE_IDENTITY_MIME_TYPE, WORKSPACE_IDENTITY_NAME, WORKSPACE_IDENTITY_URI } from "./workspace-identity.js";
 
 const readOnlyAnnotations = {
   readOnlyHint: true,
@@ -109,7 +110,7 @@ function sanitizeRuntimeHealth(result) {
 
 export { isOrchestratorApprovalEnabled } from "../../services/orchestrator-approval.js";
 
-export function createSubagentMcpServer({ runtime, configuration, trustedWorkspace, enableOrchestratorApproval = false }) {
+export function createSubagentMcpServer({ runtime, configuration, trustedWorkspace, processCwdAtStartup = process.cwd(), enableOrchestratorApproval = false }) {
   const server = new McpServer({
     name: "subagent-bridge",
     version: packageVersion
@@ -117,6 +118,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     instructions: "Frontend-neutral subagent bridge runtime için MCP frontend'i. Trusted workspace sunucu başlangıç context'i tarafından sağlanır. Paralel batch başlatıldığında get_parallel_batch ile durumu terminal duruma kadar sorgula ve kullanıcıya kısa, doğal durum güncellemeleri ver. Kullanıcı ayrı terminalde sürekli görünüm isterse batchId ile `npm run parallel:watch -- <batchId>` komutunu öner; bu salt-okunur watcher ikinci bridge süreci başlatmaz ve Ctrl+C batch'i iptal etmez. Yüzde çözümlenmiş task'lardan hesaplanır; unknown task tamamlanmış sayılmaz ve çalışan task içindeki model token ilerlemesi ölçülmez. Özel ASCII panel biçimi üretme."
   });
   const handlers = createMcpToolHandlers({ runtime, trustedWorkspace, caller: "openCode", configuration });
+  const workspaceIdentity = createWorkspaceIdentity(processCwdAtStartup, trustedWorkspace);
 
   server.registerResource(RULE_ATTESTATION_NAME, RULE_ATTESTATION_URI, {
     title: "Workspace kural attestation manifesti",
@@ -127,6 +129,18 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
       uri: uri.href,
       mimeType: RULE_ATTESTATION_MIME_TYPE,
       text: JSON.stringify(createRuleAttestation(trustedWorkspace))
+    }]
+  }));
+
+  server.registerResource(WORKSPACE_IDENTITY_NAME, WORKSPACE_IDENTITY_URI, {
+    title: "Workspace kimlik özeti",
+    description: "Server başlangıcında yakalanan süreç cwd'si ile doğrulanmış kanonik trusted workspace için SHA-256 özetlerini döndürür. Hashler gizlilik garantisi veya kriptografik host attestation değildir ve başlangıç kurallarının alındığını kanıtlamaz.",
+    mimeType: WORKSPACE_IDENTITY_MIME_TYPE
+  }, async (uri) => ({
+    contents: [{
+      uri: uri.href,
+      mimeType: WORKSPACE_IDENTITY_MIME_TYPE,
+      text: JSON.stringify(workspaceIdentity)
     }]
   }));
 

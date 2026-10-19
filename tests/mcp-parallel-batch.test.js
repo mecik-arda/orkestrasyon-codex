@@ -108,13 +108,13 @@ test("V2-MCP: server construction honors the parallel batch gate", () => {
   assert.doesNotThrow(() => createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration,
-    trustedWorkspace: "C:\\trusted",
+    trustedWorkspace: process.cwd(),
     enableOrchestratorApproval: true
   }));
   assert.doesNotThrow(() => createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration: { parallelBatch: { enabled: false } },
-    trustedWorkspace: "C:\\trusted",
+    trustedWorkspace: process.cwd(),
     enableOrchestratorApproval: false
   }));
 });
@@ -136,7 +136,7 @@ test("V2-MCP: parallel tools are registered only under the enabled and approval 
   const enabledTools = await listRegisteredToolNames(createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration: { parallelBatch: { enabled: true } },
-    trustedWorkspace: "C:\\trusted",
+    trustedWorkspace: process.cwd(),
     enableOrchestratorApproval: true
   }));
   for (const name of ["prepare_parallel_batch", "start_parallel_batch", "get_parallel_batch", "get_parallel_task_detail", "cancel_parallel_batch", "approve_parallel_integration"]) {
@@ -145,7 +145,7 @@ test("V2-MCP: parallel tools are registered only under the enabled and approval 
   const noApprovalTools = await listRegisteredToolNames(createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration: { parallelBatch: { enabled: true } },
-    trustedWorkspace: "C:\\trusted",
+    trustedWorkspace: process.cwd(),
     enableOrchestratorApproval: false
   }));
   assert.equal(noApprovalTools.includes("prepare_parallel_batch"), true);
@@ -153,7 +153,7 @@ test("V2-MCP: parallel tools are registered only under the enabled and approval 
   const disabledTools = await listRegisteredToolNames(createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration: { parallelBatch: { enabled: false } },
-    trustedWorkspace: "C:\\trusted",
+    trustedWorkspace: process.cwd(),
     enableOrchestratorApproval: true
   }));
   assert.equal(disabledTools.some((name) => name.includes("parallel_batch")), false);

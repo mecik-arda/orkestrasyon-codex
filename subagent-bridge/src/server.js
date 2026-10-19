@@ -4,10 +4,11 @@ import { createSubagentMcpServer, isOrchestratorApprovalEnabled } from "./fronte
 import { resolveTrustedWorkspace } from "./frontends/mcp/workspace-context.js";
 import { createBridgeRuntime } from "./runtime/bridge-runtime.js";
 
+const processCwdAtStartup = process.cwd();
 const configuration = loadRuntimeConfiguration();
 ensureRuntimeDirectories(configuration);
 const trustedWorkspace = resolveTrustedWorkspace(configuration);
 const runtime = createBridgeRuntime({ configuration });
-const server = createSubagentMcpServer({ runtime, configuration, trustedWorkspace, enableOrchestratorApproval: isOrchestratorApprovalEnabled(process.env) });
+const server = createSubagentMcpServer({ runtime, configuration, trustedWorkspace, processCwdAtStartup, enableOrchestratorApproval: isOrchestratorApprovalEnabled(process.env) });
 const transport = new StdioServerTransport();
 await server.connect(transport);

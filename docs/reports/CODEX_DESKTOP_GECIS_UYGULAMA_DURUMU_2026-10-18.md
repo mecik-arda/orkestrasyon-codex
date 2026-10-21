@@ -1,5 +1,22 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-10-21 yerel P2 onay ve recovery doğrulaması
+
+- P2 runtime incelemesinde `approve_prepared_edit` için uçtan uca yerel fixture kapsamı eksikti. `tests/profile-edit-pilot.test.js` içine sahte adapter ve geçici kaynakla üç test eklendi: açık onay öncesi kaynak değişmez ve onaydan sonra yalnız seçilen dosya uygulanır; kaynak durumu değişince eski onay `approval_invalid` ile reddedilir ve yeni kaynak içeriği korunur; recovery artefaktı `recovery_required` ile uygulamayı durdurur ve artefakt kaldırıldıktan sonra aynı açık onayla güvenli biçimde devam eder.
+- Bu testler provider çağrısı veya canlı entegrasyon değildir. Test dosyası `10/10` geçti. `npm test` `865` toplam, `861` geçti, `4` platform testi atlandı, `0` başarısız; `npm run verify:ci` geçti. İlk sandbox koşusu geçici Windows dizininde atomik rename için `EPERM` verdi; aynı test izinli yerel doğrulama bağlamında geçti.
+- Etkin Hades identity kaynağı bu turda iki beklenen workspace hash'ini verdi; araç envanterinde Codex/Claude özel pilotları bulunmuyor. Provider, batch, Vault, config veya kaynak entegrasyonu yapılmadı. `npm run verify` ve `npm run smoke`, DeepSeek `/models` health GET isteği oluşturduklarından çalıştırılmadı.
+- P2 yerel approval/stale-state/recovery senaryoları artık kapsanıyor; P2 canlı kullanım ve entegrasyon kabulü, P1b Claude görev kabulü, P3 canlı dayanıklılık ve edit batch entegrasyonu ile P6 nihai kapanış hâlâ açık. Çalışma ağacı kirli olduğu için `source_workspace_dirty` koşulu sağlanmış değildir.
+
+## 2026-10-21 güncel P1b/P2/P3 durumu ve yerel doğrulama
+
+- Kullanıcının önceki tekil P2 onayıyla `run_codex_profile_edit_pilot` bir kez çalıştırıldı. Raporlanan sonuç `status=completed`, `requestedModel=resolvedModel=gpt-6.1-sol`, yalnız sabit disposable fixture hedefi ve `cleanupCompleted=true` idi. `applied=false` host sözleşmesinin gereğidir; kaynak depoya terfi yapılmadı. Bu tek çalışma onay/red, stale-hash, recovery veya edit batch entegrasyonu kabulini kapatmaz. CLI iç inference sayısı ve gerçek ücret bilinmiyor; yeni canlı çağrı yapılmadı.
+- Kullanıcının bildirdiği Hades restart'ından sonra canlı `hades://workspace/identity/v1` kaynağında iki özet de beklenen `dc3d26eb65bfc4ef48a71103bfb33d44b73e7a1873139d2c6d7917b97248e68b` değeriyle eşleşti. Canlı araç envanterinde `run_codex_profile_edit_pilot` ve Claude Sonnet özel pilot aracı yok. Kimlik özeti restart'ın kendisini veya kaynak revizyonunu kanıtlamaz; bu turda pilot aracı çağrılmadı.
+- P1b Claude Sonnet görev sözleşmesi başarısız ve açık kalır. Son tek denemede `permission_denied/process_spawn/EPERM`, `taskCompletion=unavailable`, `outputIntegrity=unknown` ve `resolvedModel` yok/null raporlandı. Hangi alt komutun reddedildiği, gerçek inference ve faturalama bilinmiyor; deneme tekrarlanmadı.
+- Önceki `70e5d365632ba7b3927ad3e2d8edcaf2` salt-okunur DAG kabulü korunur; bu turda yeniden başlatılmadı. Yerel batch testleri cancel, unknown/restart recovery, expired plan, output cap ve edit entegrasyonu kapılarını sahte/fixture kaynaklarda sınar; canlı P3 dayanıklılık veya entegrasyon kanıtı değildir.
+- Hedefli P2/P3/Claude suite'i 68/68, provider admission suite'i 5/5 geçti. İlk tam `npm test` çalışmasında paralel yük altındaki `PROVIDER-ADMISSION-02` zamanlama testi başarısız oldu, izole tekrar geçti. Test helper'ındaki stale-lock penceresi yalnız test kodunda 5 saniyeden 60 saniyeye çıkarıldı; sonraki tam `npm test` 862 toplam, 858 başarılı, 4 platform testi atlandı, 0 başarısız oldu. `npm run verify:ci` ve `git diff --check` geçti.
+- `npm run verify` ve `npm run smoke` bu turda çalıştırılmadı: ikisi de DeepSeek `/models` health GET isteği yapar ve bu turda yeni harici provider isteği yetkisi verilmedi. Inference, batch, edit entegrasyonu, Vault veya kişisel config değişikliği yapılmadı.
+- P0 workspace identity canlı gözlemi ve P5 OpenCode envanter kabulü geçerli; P4 için daha önceki bağımsız DeepSeek pilot kanıtı korunur. P1b canlı görev kabulü, P2 onay/red/stale-hash/recovery, P3 canlı cancel/timeout/restart/expired-plan ve edit batch entegrasyonu, P6 nihai kapanış açık. Yeni provider denemesi için ayrı güncel onay; batch için yeni exact-plan hash onayı; kaynak entegrasyonu için ayrıca birleşik diff onayı gerekir.
+
 ## 2026-10-21 P2 disposable Codex edit pilot erişimi
 
 - MCP'ye varsayılanı kapalı `run_codex_profile_edit_pilot` aracı eklendi. Araç girdisi strict ve boş nesneyle sınırlı; görev, model `gpt-6.1-sol` ve `tests/fixtures/codex-profile-edit-pilot/value.txt` hedefi host tarafından sabittir.

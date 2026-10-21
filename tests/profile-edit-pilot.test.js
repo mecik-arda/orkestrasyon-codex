@@ -209,3 +209,97 @@ test("PILOT-PROFILE-06: onay kanali acikken new_file onayi standart mesaj dondur
   assert.equal(result.approvalRequestId.length, 64);
   assert.equal(result.summary.includes("orchestrator approval channel is disabled"), false);
 });
+
+test("PILOT-PROFILE-08: hazirlanan yeni dosya acik onaydan once kaynakta olusmaz ve onayla uygulanir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "profile-edit-approved-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const createdPath = path.join(root, "src", "new-value.txt");
+  const runtime = createBridgeRuntime({
+    configuration: configuration(root, { create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false } }),
+    adapters: {
+      codex: createFakeAdapter("codex", async (request) => {
+        fs.writeFileSync(path.join(request.workspace, "src", "new-value.txt"), "created\n", "utf8");
+        return createSuccessSubagentResult("codex", request.model, { result: "Created selected file", durationMs: 5 });
+      })
+    },
+    sleep: async () => {},
+    orchestratorApprovalEnabled: true
+  });
+
+  const preview = await runtime.runProfileEdit(pilotInput({ profile: "create_profile", files: ["src/new-value.txt"] }), root);
+
+  assert.equal(preview.failureClass, "approval_required");
+  assert.equal(preview.applied, false);
+  assert.equal(fs.existsSync(createdPath), false);
+
+  const approved = await runtime.approvePreparedEdit({ approvalRequestId: preview.approvalRequestId }, root);
+
+  assert.equal(approved.status, "completed");
+  assert.equal(approved.applied, true);
+  assert.deepEqual(approved.filesChanged, ["src/new-value.txt"]);
+  assert.equal(fs.readFileSync(createdPath, "utf8"), "created\n");
+});
+
+test("PILOT-PROFILE-09: hazirlanan degisikligin kaynak durumu degisince eski onay reddedilir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "profile-edit-stale-approval-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const createdPath = path.join(root, "src", "new-value.txt");
+  const runtime = createBridgeRuntime({
+    configuration: configuration(root, { create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false } }),
+    adapters: {
+      codex: createFakeAdapter("codex", async (request) => {
+        fs.writeFileSync(path.join(request.workspace, "src", "new-value.txt"), "prepared\n", "utf8");
+        return createSuccessSubagentResult("codex", request.model, { result: "Created selected file", durationMs: 5 });
+      })
+    },
+    sleep: async () => {},
+    orchestratorApprovalEnabled: true
+  });
+
+  const preview = await runtime.runProfileEdit(pilotInput({ profile: "create_profile", files: ["src/new-value.txt"] }), root);
+  fs.writeFileSync(createdPath, "changed after preview\n", "utf8");
+
+  const approved = await runtime.approvePreparedEdit({ approvalRequestId: preview.approvalRequestId }, root);
+
+  assert.equal(approved.status, "failed");
+  assert.equal(approved.failureClass, "approval_invalid");
+  assert.equal(approved.applied, false);
+  assert.equal(fs.readFileSync(createdPath, "utf8"), "changed after preview\n");
+});
+
+test("PILOT-PROFILE-10: recovery artefakti onayi fail-closed tutar ve acik onaydan sonra toparlanir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "profile-edit-recovery-approval-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const createdPath = path.join(root, "src", "new-value.txt");
+  const recoveryArtifact = path.join(root, "src", ".new-value.txt.123.456.abcdef.tmp");
+  const runtime = createBridgeRuntime({
+    configuration: configuration(root, { create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false } }),
+    adapters: {
+      codex: createFakeAdapter("codex", async (request) => {
+        fs.writeFileSync(path.join(request.workspace, "src", "new-value.txt"), "created\n", "utf8");
+        return createSuccessSubagentResult("codex", request.model, { result: "Created selected file", durationMs: 5 });
+      })
+    },
+    sleep: async () => {},
+    orchestratorApprovalEnabled: true
+  });
+
+  const preview = await runtime.runProfileEdit(pilotInput({ profile: "create_profile", files: ["src/new-value.txt"] }), root);
+  fs.writeFileSync(recoveryArtifact, "interrupted promotion\n", "utf8");
+
+  const blocked = await runtime.approvePreparedEdit({ approvalRequestId: preview.approvalRequestId }, root);
+
+  assert.equal(blocked.failureClass, "recovery_required");
+  assert.equal(blocked.applied, false);
+  assert.equal(fs.existsSync(createdPath), false);
+
+  fs.rmSync(recoveryArtifact);
+  const approved = await runtime.approvePreparedEdit({ approvalRequestId: preview.approvalRequestId }, root);
+
+  assert.equal(approved.status, "completed");
+  assert.equal(approved.applied, true);
+  assert.equal(fs.readFileSync(createdPath, "utf8"), "created\n");
+});

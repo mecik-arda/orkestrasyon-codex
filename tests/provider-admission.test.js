@@ -13,8 +13,8 @@ function createAdmission(t, options = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "provider-admission-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const firstCoordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 5000, leaseHeartbeatMs: 250 });
-  const secondCoordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 5000, leaseHeartbeatMs: 250 });
+  const firstCoordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 60000, leaseHeartbeatMs: 1000 });
+  const secondCoordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 60000, leaseHeartbeatMs: 1000 });
   const defaults = { defaultConcurrency: 1, profileConcurrency: {}, maxQueuedPerProfile: 10, pollIntervalMs: 10, maxWaitMs: 1000 };
   return {
     first: createProviderAdmission({ workspaceCoordinator: firstCoordinator, ...defaults, ...options }),

@@ -428,6 +428,10 @@ function classifyAntigravityError(error, exitCode, stdout, stderr, signal = null
     return { valid: false, errorClass: "prompt_transport_limit", providerCode: "prompt_transport_limit", reason: "prompt transport limit exceeded" };
   }
 
+  if (["EACCES", "EPERM"].includes(error?.code)) {
+    return { valid: false, errorClass: "permission_denied", providerCode: "permission_denied", reason: "permission denied" };
+  }
+
   if (/timed out|timeout|zaman aşımı/i.test(errorMessage)) {
     return { valid: false, errorClass: "timeout", providerCode: "timeout", reason: "execution timed out" };
   }
@@ -509,7 +513,8 @@ function createAttemptDiagnostics(failureStage, providerCode = null, timings = {
   };
 }
 
-function failureStageForClassification(errorClass, fallback = "provider_execution") {
+function failureStageForClassification(errorClass, fallback = "provider_execution", error = null) {
+  if (/^spawn(?:\s|$)/u.test(error?.syscall || "")) return "process_spawn";
   if (["sandbox_setup", "workspace_read", "provider_auth", "provider_rate_limit", "provider_process_exit", "evidence_invalid", "cancelled"].includes(errorClass)) return errorClass;
   if (errorClass === "authentication_failure" || errorClass === "auth_invalid") return "provider_auth";
   if (errorClass === "rate_limited") return "provider_rate_limit";
@@ -947,7 +952,7 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
             classification.errorClass, classification.reason || error.message,
             "antigravity", model.model,
             Date.now() - startedAt, 0, null, null,
-            createAttemptDiagnostics(readOnlyStage === "mcp_preflight" ? failureStageForClassification(classification.errorClass, readOnlyStage) : readOnlyStage, classification.providerCode, { settingsLockWaitMs, osErrorCode: error?.code })
+            createAttemptDiagnostics(readOnlyStage === "mcp_preflight" ? failureStageForClassification(classification.errorClass, readOnlyStage, error) : readOnlyStage, classification.providerCode, { settingsLockWaitMs, osErrorCode: error?.code })
           );
         }
       }
@@ -1164,7 +1169,7 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
             classification.errorClass, classification.reason || error.message,
             "antigravity", model.model,
             Date.now() - startedAt, 0, null, null,
-            createAttemptDiagnostics(failureStageForClassification(classification.errorClass), classification.providerCode, {
+            createAttemptDiagnostics(failureStageForClassification(classification.errorClass, "provider_execution", error), classification.providerCode, {
               settingsLockWaitMs,
               providerExecutionMs,
               stdoutBytes: Buffer.byteLength(error.stdout || "", "utf8"),

@@ -140,7 +140,7 @@ test("pilot CLI args omit workspace grants while normal Antigravity calls retain
 
 test("Antigravity adapter starts one fake provider CLI without granting workspace context", async (t) => {
   const fixturePath = fileURLToPath(new URL("./fixtures/claude-sonnet-pilot-read-only-fixture.js", import.meta.url));
-  for (const scenario of ["preflight_failure", "temporary_workspace_failure", "success", "provider_failure"]) {
+  for (const scenario of ["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "provider_failure", "provider_spawn_failure"]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-sonnet-pilot-cli-"));
     const temporaryDirectory = path.join(root, "temporary");
     fs.mkdirSync(temporaryDirectory);
@@ -184,6 +184,27 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.recentFailureStage, "mcp_preflight");
         assert.equal(result.recentProviderCode, null);
         assert.equal(result.recentExitCode, 1);
+      } else if (scenario === "preflight_spawn_failure") {
+        assert.equal(result.providerPurposeStarts, 0);
+        assert.equal(result.reason, "permission_denied");
+        assert.equal(result.failureStage, "process_spawn");
+        assert.equal(result.providerFailureDiagnostics.providerCode, "permission_denied");
+        assert.equal(result.providerFailureDiagnostics.osErrorCode, "EPERM");
+        assert.equal(result.recentFailureClass, "permission_denied");
+        assert.equal(result.recentFailureStage, "process_spawn");
+        assert.equal(result.recentProviderCode, "permission_denied");
+        assert.equal(result.recentOsErrorCode, "EPERM");
+        assert.equal(result.recentExitCode, null);
+      } else if (scenario === "preflight_non_spawn_permission_failure") {
+        assert.equal(result.providerPurposeStarts, 0);
+        assert.equal(result.reason, "permission_denied");
+        assert.equal(result.failureStage, "mcp_preflight");
+        assert.equal(result.providerFailureDiagnostics.providerCode, "permission_denied");
+        assert.equal(result.providerFailureDiagnostics.osErrorCode, "EPERM");
+        assert.equal(result.recentFailureClass, "permission_denied");
+        assert.equal(result.recentFailureStage, "mcp_preflight");
+        assert.equal(result.recentProviderCode, "permission_denied");
+        assert.equal(result.recentOsErrorCode, "EPERM");
       } else if (scenario === "temporary_workspace_failure") {
         assert.equal(result.providerPurposeStarts, 0);
         assert.equal(result.reason, "permission_denied");
@@ -197,7 +218,7 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.recentProviderCode, "permission_denied");
         assert.equal(result.recentOsErrorCode, "EPERM");
         assert.equal(result.recentExitCode, null);
-      } else {
+      } else if (scenario === "success" || scenario === "provider_failure") {
         assert.equal(result.providerPurposeStarts, 1);
         assert.equal(result.readOnlyEnforcementObserved, true);
         assert.equal(result.settingsLockObserved, true);
@@ -227,6 +248,22 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.recentFailureStage, "provider_process_exit");
         assert.equal(result.recentProviderCode, "process_exit");
         assert.equal(result.recentExitCode, 1);
+      }
+      if (scenario === "provider_spawn_failure") {
+        assert.equal(result.providerPurposeStarts, 1);
+        assert.equal(result.mcpIsError, true);
+        assert.equal(result.acceptancePassed, false);
+        assert.equal(result.providerFailureDiagnostics.failureClass, "permission_denied");
+        assert.equal(result.providerFailureDiagnostics.failureStage, "process_spawn");
+        assert.equal(result.providerFailureDiagnostics.providerCode, "permission_denied");
+        assert.equal(result.providerFailureDiagnostics.osErrorCode, "EPERM");
+        assert.equal(result.providerFailureDiagnostics.exitCode, null);
+        assert.equal(result.providerFailureDiagnostics.timedOut, false);
+        assert.equal(result.recentFailureClass, "permission_denied");
+        assert.equal(result.recentFailureStage, "process_spawn");
+        assert.equal(result.recentProviderCode, "permission_denied");
+        assert.equal(result.recentOsErrorCode, "EPERM");
+        assert.equal(result.recentExitCode, null);
       }
     } finally {
       fs.rmSync(root, { recursive: true, force: true });

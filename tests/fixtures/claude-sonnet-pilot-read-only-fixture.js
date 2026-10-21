@@ -24,7 +24,7 @@ const processObservations = [];
 let providerPurposeStarts = 0;
 
 assert.equal(typeof root, "string");
-assert.equal(["preflight_failure", "temporary_workspace_failure", "success", "provider_failure"].includes(scenario), true);
+assert.equal(["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "provider_failure", "provider_spawn_failure"].includes(scenario), true);
 fs.mkdirSync(settingsDirectory, { recursive: true });
 fs.writeFileSync(settingsPath, initialSettings);
 const originalMkdtempSync = fs.mkdtempSync;
@@ -50,6 +50,18 @@ const adapter = createAntigravityAdapter({
   runProcess: async (executable, args, options) => {
     processCalls.push({ executable, args, options });
     if (args.includes("mcp") && args.includes("list")) {
+      if (scenario === "preflight_spawn_failure") {
+        const error = new Error("spawn fake-agy EPERM");
+        error.code = "EPERM";
+        error.syscall = "spawn fake-agy";
+        throw error;
+      }
+      if (scenario === "preflight_non_spawn_permission_failure") {
+        const error = new Error("open fake-agy EPERM");
+        error.code = "EPERM";
+        error.syscall = "open";
+        throw error;
+      }
       return {
         code: 0,
         stdout: scenario === "preflight_failure" ? "Unexpected MCP listing" : "No MCP servers configured.\n",
@@ -59,6 +71,12 @@ const adapter = createAntigravityAdapter({
     }
     if (!args.includes("--print")) throw new Error("unexpected fake process purpose");
     providerPurposeStarts += 1;
+    if (scenario === "provider_spawn_failure") {
+      const error = new Error("spawn fake-agy EPERM");
+      error.code = "EPERM";
+      error.syscall = "spawn fake-agy";
+      throw error;
+    }
     const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
     processObservations.push({
       executable,

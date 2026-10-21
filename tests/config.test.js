@@ -18,6 +18,20 @@ test("Codex MCP yapılandırması DeepSeek anahtarını yalnız izinli ortam de�
   assert.doesNotMatch(codexConfiguration, /^\s*DEEPSEEK_API_KEY\s*=/mu);
 });
 
+test("Codex P2 pilot ayarı Claude pilot ayarı tanımsızken yüklenir", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-config-"));
+  const configurationPath = path.join(root, "config.json");
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const policy = JSON.parse(fs.readFileSync(path.resolve("config/policy.json"), "utf8"));
+  delete policy.orchestration.acceptancePilots.claudeSonnet;
+  policy.orchestration.acceptancePilots.codexProfileEdit.enabled = true;
+  fs.writeFileSync(configurationPath, JSON.stringify(policy), "utf8");
+  const configuration = loadConfiguration({ configurationPath });
+  assert.equal(configuration.orchestration.acceptancePilots.codexProfileEdit.enabled, true);
+  assert.equal(configuration.orchestration.acceptancePilots.claudeSonnet.enabled, false);
+  assert.equal(JSON.parse(fs.readFileSync(configurationPath, "utf8")).orchestration.acceptancePilots.claudeSonnet, undefined);
+});
+
 test("izinli kök dışındaki workspace reddedilir", () => {
   assert.throws(
     () => validateWorkspace("C:\\Windows", ["C:\\Users\\user\\Desktop\\Yazılım_Siber"]),

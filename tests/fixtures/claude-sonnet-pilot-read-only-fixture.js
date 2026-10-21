@@ -108,7 +108,7 @@ const configuration = {
 };
 const runtime = createBridgeRuntime({ configuration, adapters: { antigravity: adapter }, sleep: async () => {} });
 const handlers = createMcpToolHandlers({ runtime, trustedWorkspace: root, configuration });
-const response = await handlers.runClaudeSonnetAcceptancePilot();
+const response = await handlers.runClaudeSonnetAcceptancePilot({});
 const payload = response.structuredContent;
 const validation = validateSubagentResult(payload);
 assert.equal(validation.success, true);

@@ -302,7 +302,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     server.registerTool("run_claude_sonnet_acceptance_pilot", {
       title: "Claude Sonnet kabul pilotunu çalıştır",
       description: "Sabit, araçsız 6 × 7 kabul görevi için Claude Sonnet 4.6 modeline yalnız bir host adapter denemesi gönderir; workspace bağlamı, retry, carrier repair ve fallback kullanmaz. Antigravity CLI'nin dahili retry veya yardımcı inference davranışı ve parasal üst sınır garanti edilmez. Yalnız aktif runtime config'te açıkça etkinleştirildiğinde kaydedilir.",
-      inputSchema: {},
+      inputSchema: publicToolSchemas.runClaudeSonnetAcceptancePilot,
       annotations: externalReadOnlyExecutionAnnotations
     }, safe(handlers.runClaudeSonnetAcceptancePilot));
   }

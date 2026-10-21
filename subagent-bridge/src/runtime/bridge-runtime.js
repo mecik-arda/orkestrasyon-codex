@@ -235,6 +235,16 @@ export function hashSourceState(sourceStateEntries) {
   return crypto.createHash("sha256").update(JSON.stringify(sourceStateEntries)).digest("hex");
 }
 
+function matchesExpectedDisposableFile(disposable, changes, expectedFile) {
+  if (changes.changes.length !== 1 || changes.changes[0].relativePath !== expectedFile.relativePath || changes.changes[0].changeType !== "modified") return false;
+  try {
+    const candidatePath = path.join(disposable.workspace, ...expectedFile.relativePath.split("/"));
+    return fs.readFileSync(candidatePath).equals(expectedFile.content);
+  } catch {
+    return false;
+  }
+}
+
 export function fingerprintSourceState(trustedWorkspace, relativePaths) {
   return hashSourceState(captureSourceState(trustedWorkspace, relativePaths));
 }
@@ -1643,23 +1653,114 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
 
   async function runCodexProfileEditPilot(trustedWorkspace, abortSignal) {
     if (runtimeConfiguration.orchestration?.acceptancePilots?.codexProfileEdit?.enabled !== true) throw new Error("Codex disposable edit pilot is disabled until explicitly enabled in the active runtime configuration");
+    const fixtureRelativePath = "tests/fixtures/codex-profile-edit-pilot/value.txt";
+    const expectedSourceContent = Buffer.from("before\n", "utf8");
+    const expectedDisposableContent = Buffer.from("after\n", "utf8");
+    const sourceWorkspace = canonicalizeTrustedWorkspace(trustedWorkspace);
+    const sourceFixturePath = path.join(sourceWorkspace, ...fixtureRelativePath.split("/"));
+    let sourceFileSha256Before;
+    try {
+      const sourceContent = fs.readFileSync(sourceFixturePath);
+      sourceFileSha256Before = crypto.createHash("sha256").update(sourceContent).digest("hex");
+      if (!sourceContent.equals(expectedSourceContent)) {
+        return validateControlledEditResult({
+          status: "failed",
+          backend: "codex",
+          model: "gpt-6.1-sol",
+          requestedModel: "gpt-6.1-sol",
+          resolvedModel: "gpt-6.1-sol",
+          accessMode: "edit",
+          summary: "Codex disposable edit pilot fixture precondition failed",
+          failureClass: "fixture_precondition_failed",
+          filesChanged: [],
+          diff: "",
+          applied: false,
+          fallbacks: 0,
+          cleanupCompleted: true,
+          sourceFileSha256Before
+        }).data;
+      }
+    } catch {
+      return validateControlledEditResult({
+        status: "failed",
+        backend: "codex",
+        model: "gpt-6.1-sol",
+        requestedModel: "gpt-6.1-sol",
+        resolvedModel: "gpt-6.1-sol",
+        accessMode: "edit",
+        summary: "Codex disposable edit pilot fixture precondition failed",
+        failureClass: "fixture_precondition_failed",
+        filesChanged: [],
+        diff: "",
+        applied: false,
+        fallbacks: 0,
+        cleanupCompleted: true
+      }).data;
+    }
     const input = {
       taskId: "codex-profile-edit-pilot",
       role: "implementer",
       mode: "edit",
       objective: "Change the fixture value from before to after.",
-      files: ["tests/fixtures/codex-profile-edit-pilot/value.txt"],
+      files: [fixtureRelativePath],
       contextFiles: [],
       acceptanceCriteria: ["Change only the selected fixture value from before to after."]
     };
-    return executeControlledEdit(input, trustedWorkspace, abortSignal, {
+    const result = await executeControlledEdit(input, sourceWorkspace, abortSignal, {
       promote: false,
       attempts: [{ target: "codex", model: "gpt-6.1-sol", caller: "codex_profile_edit_pilot", providerLabel: "Codex" }],
       prompt: buildProfileEditPrompt(input),
       providerLabel: "Codex",
       timeoutMs: 60000,
-      maxOutputBytes: 65536
+      maxOutputBytes: 65536,
+      expectedDisposableFile: { relativePath: fixtureRelativePath, content: expectedDisposableContent }
     });
+    let sourceFileSha256After;
+    try {
+      sourceFileSha256After = crypto.createHash("sha256").update(fs.readFileSync(sourceFixturePath)).digest("hex");
+    } catch {
+      return validateControlledEditResult({
+        status: "failed",
+        backend: "codex",
+        model: "gpt-6.1-sol",
+        requestedModel: "gpt-6.1-sol",
+        resolvedModel: "gpt-6.1-sol",
+        accessMode: "edit",
+        summary: "Codex disposable edit pilot source fixture changed during execution",
+        failureClass: "source_workspace_changed",
+        filesChanged: [],
+        diff: "",
+        applied: false,
+        fallbacks: 0,
+        cleanupCompleted: result.cleanupCompleted,
+        sourceFileSha256Before
+      }).data;
+    }
+    if (sourceFileSha256After !== sourceFileSha256Before) {
+      return validateControlledEditResult({
+        status: "failed",
+        backend: "codex",
+        model: "gpt-6.1-sol",
+        requestedModel: "gpt-6.1-sol",
+        resolvedModel: "gpt-6.1-sol",
+        accessMode: "edit",
+        summary: "Codex disposable edit pilot source fixture changed during execution",
+        failureClass: "source_workspace_changed",
+        filesChanged: [],
+        diff: "",
+        applied: false,
+        fallbacks: 0,
+        cleanupCompleted: result.cleanupCompleted,
+        sourceFileSha256Before,
+        sourceFileSha256After
+      }).data;
+    }
+    return {
+      ...result,
+      sourceFileSha256Before,
+      sourceFileSha256After,
+      ...(result.status === "completed" ? { disposableFileSha256: crypto.createHash("sha256").update(expectedDisposableContent).digest("hex") } : {})
+    };
   }
 
   async function executeControlledEdit(input, trustedWorkspace, abortSignal, options) {
@@ -1697,6 +1798,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
           const noChanges = runtimeResult.ok && changes.filesChanged.length === 0;
           if (secretDetected) {
             finalPayload = { status: "failed", backend: runtimeResult.backend, model: runtimeResult.model, requestedModel: input.model, resolvedModel, accessMode: "edit", summary: `${attempt.providerLabel} edit output rejected by secret policy`, failureClass: "secret_detected", filesChanged: [], diff: "", applied: false, fallbacks: fallbackCount };
+            terminalFailure = true;
+          } else if (runtimeResult.ok && options.expectedDisposableFile && !matchesExpectedDisposableFile(disposable, changes, options.expectedDisposableFile)) {
+            finalPayload = { status: "failed", backend: runtimeResult.backend, model: runtimeResult.model, requestedModel: input.model, resolvedModel, accessMode: "edit", summary: `${attempt.providerLabel} edit did not match the host acceptance fixture`, failureClass: "acceptance_failed", filesChanged: [], diff: "", applied: false, fallbacks: fallbackCount, executionIdHash };
             terminalFailure = true;
           } else if (runtimeResult.ok && !noChanges) {
             if (promote && approvalRequired) {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { validateWorkspace } from "../../config.js";
 import { ANTIGRAVITY_MODEL_MAP } from "../../adapters/antigravity-adapter.js";
@@ -228,30 +229,32 @@ function requireImplementerEdit(input) {
 
 export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "codexDesktop", configuration = {} }) {
   return {
-    async runClaudeSonnetAcceptancePilot(context = {}) {
+    async runClaudeSonnetAcceptancePilot(input, context = {}) {
       if (configuration.orchestration?.acceptancePilots?.claudeSonnet?.enabled !== true) {
         throw new Error("Claude Sonnet acceptance pilot is disabled until explicitly enabled in the active runtime configuration");
       }
-      const input = {
+      parse(publicToolSchemas.runClaudeSonnetAcceptancePilot, input);
+      const pilotInput = {
         prompt: "Calculate 6 × 7. Return the required JSON carrier with its result string containing only {\"result\":42}.",
         model: "claude_sonnet",
         mode: "read_only",
         timeout_seconds: 60
       };
-      return toMcpResult(await runtime.run(createRuntimeRequest(input, "claude_sonnet", trustedWorkspace, caller, context.signal, {
+      return toMcpResult(await runtime.run(createRuntimeRequest(pilotInput, "claude_sonnet", trustedWorkspace, caller, context.signal, {
         claudeSonnetAcceptancePilot: true,
         maxOutputBytes: 65536,
         resultValidator: validateClaudeSonnetAcceptanceOutput
       })));
     },
-    async runCodexProfileEditPilot(context = {}) {
+    async runCodexProfileEditPilot(input, context = {}) {
       if (configuration.orchestration?.acceptancePilots?.codexProfileEdit?.enabled !== true) {
         throw new Error("Codex disposable edit pilot is disabled until explicitly enabled in the active runtime configuration");
       }
-      parse(publicToolSchemas.runCodexProfileEditPilot, {});
+      parse(publicToolSchemas.runCodexProfileEditPilot, input);
       const result = await runtime.runCodexProfileEditPilot(trustedWorkspace, context.signal);
       const validation = controlledEditResultSchema.safeParse(result);
-      if (!validation.success || validation.data.backend !== "codex" || validation.data.model !== "gpt-6.1-sol" || validation.data.resolvedModel !== "gpt-6.1-sol" || validation.data.applied !== false || validation.data.fallbacks !== 0 || validation.data.filesChanged.some((file) => file !== "tests/fixtures/codex-profile-edit-pilot/value.txt")) {
+      const expectedDisposableFileHash = createHash("sha256").update("after\n").digest("hex");
+      if (!validation.success || validation.data.backend !== "codex" || validation.data.model !== "gpt-6.1-sol" || validation.data.resolvedModel !== "gpt-6.1-sol" || validation.data.applied !== false || validation.data.fallbacks !== 0 || validation.data.filesChanged.some((file) => file !== "tests/fixtures/codex-profile-edit-pilot/value.txt") || (validation.data.status === "completed" && (validation.data.filesChanged.length !== 1 || !validation.data.changeSetHash || !validation.data.sourceFileSha256Before || validation.data.sourceFileSha256Before !== validation.data.sourceFileSha256After || validation.data.disposableFileSha256 !== expectedDisposableFileHash))) {
         throw new Error("Codex disposable edit pilot result failed host validation");
       }
       const payload = {
@@ -270,6 +273,9 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
         cleanupCompleted: validation.data.cleanupCompleted,
         ...(validation.data.executionIdHash ? { executionIdHash: validation.data.executionIdHash } : {}),
         ...(validation.data.changeSetHash ? { changeSetHash: validation.data.changeSetHash } : {}),
+        ...(validation.data.sourceFileSha256Before ? { sourceFileSha256Before: validation.data.sourceFileSha256Before } : {}),
+        ...(validation.data.sourceFileSha256After ? { sourceFileSha256After: validation.data.sourceFileSha256After } : {}),
+        ...(validation.data.disposableFileSha256 ? { disposableFileSha256: validation.data.disposableFileSha256 } : {}),
         ...(validation.data.metrics ? { metrics: validation.data.metrics } : {}),
         ...(validation.data.status === "completed" ? { preview: true } : {})
       };

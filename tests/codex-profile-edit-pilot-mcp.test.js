@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -48,6 +49,8 @@ function createFixtureRoot() {
 }
 
 function createSuccessResult() {
+  const sourceFileSha256 = createHash("sha256").update("before\n").digest("hex");
+  const disposableFileSha256 = createHash("sha256").update("after\n").digest("hex");
   return {
     status: "completed",
     backend: "codex",
@@ -64,6 +67,9 @@ function createSuccessResult() {
     cleanupCompleted: true,
     executionIdHash: "a".repeat(64),
     changeSetHash: "b".repeat(64),
+    sourceFileSha256Before: sourceFileSha256,
+    sourceFileSha256After: sourceFileSha256,
+    disposableFileSha256,
     preview: true
   };
 }
@@ -94,6 +100,9 @@ test("CODEX-EDIT-PILOT-MCP-02: MCP handler validates and redacts the fixed previ
   assert.equal(response.structuredContent.fallbacks, 0);
   assert.deepEqual(response.structuredContent.filesChanged, [fixturePath]);
   assert.equal(response.structuredContent.diff, "fixed-diff");
+  assert.equal(response.structuredContent.sourceFileSha256Before, createHash("sha256").update("before\n").digest("hex"));
+  assert.equal(response.structuredContent.sourceFileSha256After, response.structuredContent.sourceFileSha256Before);
+  assert.equal(response.structuredContent.disposableFileSha256, createHash("sha256").update("after\n").digest("hex"));
   assert.equal(response.structuredContent.extraField, undefined);
   const invalidHandlers = createMcpToolHandlers({
     runtime: { runCodexProfileEditPilot: async () => ({ ...createSuccessResult(), applied: true }) },
@@ -101,6 +110,38 @@ test("CODEX-EDIT-PILOT-MCP-02: MCP handler validates and redacts the fixed previ
     configuration: { orchestration: { acceptancePilots: { codexProfileEdit: { enabled: true } } } }
   });
   await assert.rejects(() => invalidHandlers.runCodexProfileEditPilot({}), /result failed host validation/u);
+  const invalidHashResults = [
+    { ...createSuccessResult(), sourceFileSha256Before: undefined },
+    { ...createSuccessResult(), disposableFileSha256: "invalid" }
+  ];
+  for (const invalidResult of invalidHashResults) {
+    const invalidHashHandlers = createMcpToolHandlers({
+      runtime: { runCodexProfileEditPilot: async () => invalidResult },
+      trustedWorkspace: "C:\\workspace",
+      configuration: { orchestration: { acceptancePilots: { codexProfileEdit: { enabled: true } } } }
+    });
+    await assert.rejects(() => invalidHashHandlers.runCodexProfileEditPilot({}), /result failed host validation/u);
+  }
+});
+
+test("CODEX-EDIT-PILOT-MCP-02A: fixed provider pilots forward the MCP cancellation context", async () => {
+  const signal = new AbortController().signal;
+  let codexSignal;
+  let claudeSignal;
+  const codexHandlers = createMcpToolHandlers({
+    runtime: { runCodexProfileEditPilot: async (_workspace, abortSignal) => { codexSignal = abortSignal; return createSuccessResult(); } },
+    trustedWorkspace: "C:\\workspace",
+    configuration: { orchestration: { acceptancePilots: { codexProfileEdit: { enabled: true } } } }
+  });
+  const claudeHandlers = createMcpToolHandlers({
+    runtime: { run: async (request) => { claudeSignal = request.abortSignal; return { ok: true, backend: "antigravity", model: "claude-sonnet-4-6" }; } },
+    trustedWorkspace: "C:\\workspace",
+    configuration: { orchestration: { acceptancePilots: { claudeSonnet: { enabled: true } } } }
+  });
+  await codexHandlers.runCodexProfileEditPilot({}, { signal });
+  await claudeHandlers.runClaudeSonnetAcceptancePilot({}, { signal });
+  assert.equal(codexSignal, signal);
+  assert.equal(claudeSignal, signal);
 });
 
 test("CODEX-EDIT-PILOT-MCP-03: actual MCP registration hides the default-off tool and enforces its strict empty schema", async () => {
@@ -185,6 +226,10 @@ test("CODEX-EDIT-PILOT-RUNTIME-01: successful pilot changes only its disposable 
   assert.equal(result.preview, true);
   assert.equal(result.fallbacks, 0);
   assert.equal(result.model, "gpt-6.1-sol");
+  assert.equal(result.sourceFileSha256Before, createHash("sha256").update("before\n").digest("hex"));
+  assert.equal(result.sourceFileSha256After, result.sourceFileSha256Before);
+  assert.equal(result.disposableFileSha256, createHash("sha256").update("after\n").digest("hex"));
+  assert.ok(result.changeSetHash);
   assert.equal(processStarts, 1);
   assert.equal(processOptions.timeoutMs, 60000);
   assert.equal(processOptions.maxOutputBytes, 65536);
@@ -242,6 +287,85 @@ test("CODEX-EDIT-PILOT-RUNTIME-03: missing fixed fixture is rejected before the 
   assert.equal(result.applied, false);
   assert.equal(result.fallbacks, 0);
   assert.equal(adapterCalls, 0);
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-04: unexpected disposable content fails host acceptance and preserves the source", async (t) => {
+  const { root, target } = createFixtureRoot();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let processStarts = 0;
+  const codexAdapter = createCodexAdapter(configuration(root), {
+    runProcess: async (_executable, args, options) => {
+      if (args.at(-1) !== "-") return { stdout: "codex 0.163.0", stderr: "", code: 0, signal: null };
+      processStarts += 1;
+      fs.writeFileSync(path.join(options.cwd, fixturePath), "unexpected\n", "utf8");
+      return {
+        stdout: `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "changed" } })}\n${JSON.stringify({ type: "turn.completed" })}\n`,
+        stderr: "",
+        code: 0,
+        signal: null,
+        durationMs: 1
+      };
+    }
+  });
+  const runtime = createBridgeRuntime({ configuration: configuration(root), adapters: { codex: codexAdapter }, sleep: async () => {} });
+  const result = await runtime.runCodexProfileEditPilot(root);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failureClass, "acceptance_failed", JSON.stringify(result));
+  assert.equal(result.applied, false);
+  assert.equal(result.cleanupCompleted, true);
+  assert.equal(result.diff, "");
+  assert.equal(processStarts, 1);
+  assert.equal(fs.readFileSync(target, "utf8"), "before\n");
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-05: changed source fixture is rejected before the adapter starts", async (t) => {
+  const { root, target } = createFixtureRoot();
+  fs.writeFileSync(target, "changed\n", "utf8");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let processStarts = 0;
+  const runtime = createBridgeRuntime({
+    configuration: configuration(root),
+    adapters: { codex: createCodexAdapter(configuration(root), { runProcess: async () => { processStarts += 1; throw new Error("provider must not run"); } }) },
+    sleep: async () => {}
+  });
+  const result = await runtime.runCodexProfileEditPilot(root);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failureClass, "fixture_precondition_failed");
+  assert.equal(result.applied, false);
+  assert.ok(result.sourceFileSha256Before);
+  assert.equal(result.sourceFileSha256After, undefined);
+  assert.equal(processStarts, 0);
+  assert.equal(fs.readFileSync(target, "utf8"), "changed\n");
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-06: source fixture mutation during the provider run fails closed", async (t) => {
+  const { root, target } = createFixtureRoot();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let processStarts = 0;
+  const codexAdapter = createCodexAdapter(configuration(root), {
+    runProcess: async (_executable, args, options) => {
+      if (args.at(-1) !== "-") return { stdout: "codex 0.163.0", stderr: "", code: 0, signal: null };
+      processStarts += 1;
+      fs.writeFileSync(path.join(options.cwd, fixturePath), "after\n", "utf8");
+      fs.writeFileSync(target, "external-change\n", "utf8");
+      return {
+        stdout: `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "changed" } })}\n${JSON.stringify({ type: "turn.completed" })}\n`,
+        stderr: "",
+        code: 0,
+        signal: null,
+        durationMs: 1
+      };
+    }
+  });
+  const runtime = createBridgeRuntime({ configuration: configuration(root), adapters: { codex: codexAdapter }, sleep: async () => {} });
+  const result = await runtime.runCodexProfileEditPilot(root);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failureClass, "source_workspace_changed");
+  assert.equal(result.applied, false);
+  assert.equal(result.fallbacks, 0);
+  assert.notEqual(result.sourceFileSha256After, result.sourceFileSha256Before);
+  assert.equal(processStarts, 1);
+  assert.equal(fs.readFileSync(target, "utf8"), "external-change\n");
 });
 
 test("CODEX-EDIT-PILOT-ADAPTER-01: pilot ignores configured extra CLI arguments and disables sandbox networking", () => {

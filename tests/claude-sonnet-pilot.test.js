@@ -5,8 +5,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { buildAntigravityArgs } from "../subagent-bridge/src/adapters/antigravity-adapter.js";
+import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createFailureSubagentResult, createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { createMcpToolHandlers, publicToolSchemas } from "../subagent-bridge/src/frontends/mcp/tools.js";
@@ -62,7 +65,7 @@ test("Claude Sonnet pilot fixes model, task, context and output cap at the host"
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   let request;
   const handlers = createMcpToolHandlers({ runtime: { run: async (value) => { request = value; return validPilotResult(value); } }, trustedWorkspace: root, configuration: { orchestration: { acceptancePilots: { claudeSonnet: { enabled: true } } } } });
-  const response = await handlers.runClaudeSonnetAcceptancePilot();
+  const response = await handlers.runClaudeSonnetAcceptancePilot({});
   assert.equal(response.isError, false);
   assert.equal(request.target, "claude_sonnet");
   assert.equal(request.model, "claude_sonnet");
@@ -72,6 +75,34 @@ test("Claude Sonnet pilot fixes model, task, context and output cap at the host"
   assert.equal(request.claudeSonnetAcceptancePilot, true);
   assert.equal(request.profile, undefined);
   assert.equal(request.prompt.includes("6 × 7"), true);
+});
+
+test("Claude Sonnet pilot strict empty input is enforced by the actual MCP client before runtime", async () => {
+  let runtimeCalls = 0;
+  const server = createSubagentMcpServer({
+    runtime: { run: async (request) => { runtimeCalls += 1; return validPilotResult(request); } },
+    trustedWorkspace: process.cwd(),
+    configuration: { orchestration: { acceptancePilots: { claudeSonnet: { enabled: true } } } }
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "claude-sonnet-pilot-contract-test", version: "1.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const { tools } = await client.listTools();
+    const pilot = tools.find((tool) => tool.name === "run_claude_sonnet_acceptance_pilot");
+    assert.ok(pilot);
+    assert.deepEqual(pilot.inputSchema.properties, {});
+    assert.deepEqual(pilot.inputSchema.required || [], []);
+    const rejected = await client.callTool({ name: "run_claude_sonnet_acceptance_pilot", arguments: { prompt: "override" } });
+    assert.equal(rejected.isError, true);
+    assert.equal(runtimeCalls, 0);
+    const accepted = await client.callTool({ name: "run_claude_sonnet_acceptance_pilot", arguments: {} });
+    assert.equal(accepted.isError, false);
+    assert.equal(runtimeCalls, 1);
+  } finally {
+    await client.close();
+  }
 });
 
 test("Claude Sonnet pilot makes at most one adapter attempt for every terminal outcome", async (t) => {

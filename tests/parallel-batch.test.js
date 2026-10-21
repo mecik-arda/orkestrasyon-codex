@@ -161,8 +161,28 @@ test("V2-BATCH: prepare validates and returns a bounded plan without starting wo
   assert.equal(runtime.executions.length, 0);
   assert.equal(result.summary.budget.isProviderInvoice, false);
   assert.match(result.summary.message, /task-one=8388608 \(host default\)/u);
+  assert.match(result.summary.message, /task-one=1 total adapter attempts across primary\/fallback routes, max 30000ms per attempt/u);
   assert.match(result.summary.message, /stdout\+stderr UTF-8 byte caps/u);
   assert.match(result.summary.message, /4096 characters per task, 8192 UTF-8 bytes per batch/u);
+});
+
+test("V2-BATCH: prepare reports policy-resolved retry and task timeout ceilings without starting a worker", async (t) => {
+  const { service, runtime, registry } = createFixture(t, {
+    configurationOverrides: {
+      reliability: { maxAttempts: 3, maxUnknownAttemptCostUsd: 0.1 },
+      codex: { timeoutMs: 30000, maxRetries: 1 }
+    }
+  });
+  const prepared = await service.prepare({
+    objective: "Inspect the timeout fixture",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{ ...baseTask("timeout-review"), model: "gpt-6.1-sol", timeoutSeconds: 10 }]
+  });
+  assert.equal(prepared.ok, true);
+  assert.match(prepared.summary.message, /timeout-review=2 total adapter attempts across primary\/fallback routes, max 10000ms per attempt/u);
+  const storedPlan = await registry.getPlan(prepared.planId);
+  assert.deepEqual(storedPlan.tasks[0].attemptCeilings, [{ backend: "codex", model: "gpt-6.1-sol", maxAttempts: 2, timeoutMs: 10000 }]);
+  assert.equal(runtime.executions.length, 0);
 });
 
 for (const processCap of [4096, 262144]) {

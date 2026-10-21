@@ -641,16 +641,26 @@ export function createParallelBatchService({
     }
     let allocationUsd = 0;
     let attemptsPerTask = 0;
+    let maxTimeoutMsPerAttempt = 0;
+    const attemptCeilings = [];
     for (const route of routes) {
-      const resolvedBudget = resolveReliabilityBudget(configuration, route.backend);
+      const requestedTimeoutMs = Number.isFinite(entry.contract.timeoutSeconds) ? entry.contract.timeoutSeconds * 1000 : undefined;
+      const resolvedBudget = resolveReliabilityBudget(configuration, route.backend, requestedTimeoutMs);
       const unknownAttemptCostUsd = resolvedBudget.maxUnknownAttemptCostUsd;
       if (!Number.isFinite(unknownAttemptCostUsd) || unknownAttemptCostUsd <= 0) {
         return { ok: false, reason: "admission_estimate_unavailable", message: "maxUnknownAttemptCostUsd is not a positive finite estimate" };
       }
       allocationUsd += unknownAttemptCostUsd * resolvedBudget.maxAttempts;
       attemptsPerTask += resolvedBudget.maxAttempts;
+      maxTimeoutMsPerAttempt = Math.max(maxTimeoutMsPerAttempt, resolvedBudget.timeoutMs);
+      attemptCeilings.push({ backend: route.backend, model: route.model, maxAttempts: resolvedBudget.maxAttempts, timeoutMs: resolvedBudget.timeoutMs });
     }
-    return { ok: true, allocationUsd: roundCost(allocationUsd), attemptsPerTask };
+    return {
+      ok: true,
+      allocationUsd: roundCost(allocationUsd),
+      attemptBounds: { maxAdapterAttempts: attemptsPerTask, maxTimeoutMsPerAttempt },
+      attemptCeilings
+    };
   }
 
   function buildTaskSummary(task) {
@@ -796,6 +806,8 @@ export function createParallelBatchService({
       const allocation = computeAllocation(entry);
       if (!allocation.ok) return allocation;
       entry.allocationUsd = allocation.allocationUsd;
+      entry.attemptBounds = allocation.attemptBounds;
+      entry.attemptCeilings = allocation.attemptCeilings;
       totalAllocationUsd += allocation.allocationUsd;
     }
     if (roundCost(totalAllocationUsd) > roundCost(input.batchMaxReservedCostUsd)) {
@@ -813,6 +825,7 @@ export function createParallelBatchService({
       tasks: taskRoutes.map((entry) => ({
         contract: entry.contract,
         allocationUsd: entry.allocationUsd,
+        attemptCeilings: entry.attemptCeilings,
         provider: providerForRoute(entry.route)
       }))
     }));
@@ -841,7 +854,8 @@ export function createParallelBatchService({
         profile: entry.contract.profile || null,
         dependsOn: entry.contract.dependsOn,
         provider: providerForRoute(entry.route),
-        allocationUsd: entry.allocationUsd
+        allocationUsd: entry.allocationUsd,
+        attemptCeilings: entry.attemptCeilings
       }))
     };
     await registry.savePlan(planRecord);
@@ -856,7 +870,8 @@ export function createParallelBatchService({
       isProviderInvoice: false
     });
     const processOutputCaps = taskRoutes.map(({ contract }) => `${contract.taskId}=${resolveProcessOutputCap(contract)} (${contract.maxOutputBytes === undefined ? "host default" : "task"})`).join(", ");
-    const planMessage = `plan prepared; aggregate process stdout+stderr UTF-8 byte caps: ${processOutputCaps}. Includes JSONL/tool events, not final answer size. Separate public summary limits: ${batchConfiguration.maxSummaryCharacters || 4096} characters per task, ${batchConfiguration.maxBatchSummaryBytes || 20480} UTF-8 bytes per batch. Short-answer instructions do not bound process output. User approval and start_parallel_batch are required.`;
+    const attemptLimits = taskRoutes.map(({ contract, attemptBounds }) => `${contract.taskId}=${attemptBounds.maxAdapterAttempts} total adapter attempts across primary/fallback routes, max ${attemptBounds.maxTimeoutMsPerAttempt}ms per attempt`).join("; ");
+    const planMessage = `plan prepared; effective per-task adapter attempt and timeout ceilings: ${attemptLimits}. Adapter attempts include retries and configured fallbacks; provider CLI internal inference/actual billing counts are not observable. Aggregate process stdout+stderr UTF-8 byte caps: ${processOutputCaps}. Includes JSONL/tool events, not final answer size. Separate public summary limits: ${batchConfiguration.maxSummaryCharacters || 4096} characters per task, ${batchConfiguration.maxBatchSummaryBytes || 20480} UTF-8 bytes per batch. Short-answer instructions do not bound process output. User approval and start_parallel_batch are required.`;
     const summaryValidation = validateParallelBatchSummary(buildSummary({
       batchId: null,
       planId,

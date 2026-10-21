@@ -6,7 +6,7 @@
 - Hedefli `tests/parallel-batch.test.js` suite'i exit 0 verdi; Windows'ta symlink/junction oluşturma engelli bir test koşulu skip edildi. `npm test` normal Windows izinleriyle geçti: 873 test, 869 passed, 4 skipped, 0 failed. `npm run verify` ve `npm run verify:ci` geçti; `git diff --check` temiz. `verify` DeepSeek health GET'ini `apiAvailable=false` raporladı; bu inference değildir. Codex CLI ve Vault readable/writable başarılı. Smoke çalıştırılmadı çünkü MCP şeması/açıklaması değişmedi.
 - İlk sandbox içi tam-suite denemesi geçici dosya rename/link izinlerinden ve timeout fixture temizliğinden başarısız oldu; testler normal Windows dosya izinleriyle yeniden çalıştırılınca suite geçti. Test tarafından üretilen geçici klasörler kaldırıldı.
 - P3 timeout planı `80b6e81248432c8a18f61eabc08054d2` / `472ed636fb67743d213a25ff435dc43cd88533d4a239aede60fe3097bb1498ce` retry tavanını önizlemede göstermediği için başlatılmadı; plan 20:54 Türkiye saatiyle sona erdi. Yeni kod canlı Hades'te değildir. Hades restart sonrası identity doğrulaması, yeni plan/hash ve o hash için ayrı başlatma onayı gerekir.
-- Bu yerel düzeltme P3 timeout kabulini veya geçişin genel tamamlanmasını kanıtlamaz. P1b, P2, P3 kalan canlı kabul kapıları ve P6 açık kalır. Bu turda provider/model inference, batch start, edit entegrasyonu, config/Vault yazımı, commit veya push yapılmadı.
+- Bu yerel düzeltme P3 timeout kabulini veya geçişin genel tamamlanmasını kanıtlamaz. P1b, P2, P3 kalan canlı kabul kapıları ve P6 açık kalır. Bu turda provider/model inference, batch start, edit entegrasyonu veya config/Vault yazımı yapılmadı. İncelenen kaynak ve doküman değişiklikleri `736b92d` commit'iyle yerel Git geçmişine alındı; push yapılmadı.
 
 ## 2026-10-21 20:49 P3 timeout önizleme düzeltmesi
 

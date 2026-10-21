@@ -12,6 +12,7 @@ const wrongTypePayloads = {
   runDeepSeek: { taskId: 1, role: "analyst", mode: "read_only", objective: "hedef", workspace: "ws", acceptanceCriteria: ["kriter"] },
   runDeepSeekEditPilot: { taskId: "t1", objective: "hedef", files: "dosya", acceptanceCriteria: ["kriter"] },
   approvePreparedEdit: { approvalRequestId: 123 },
+  rejectPreparedEdit: { approvalRequestId: 123 },
   prepareParallelBatch: { objective: "hedef", batchMaxReservedCostUsd: 1, tasks: "gorev-listesi" },
   startParallelBatch: { planId: 42, planHash: "b".repeat(64) },
   getParallelBatch: { batchId: 42 },

@@ -7,7 +7,7 @@ import { CLAUDE_MODEL_MAP, createClaudeCodeAdapter } from "../adapters/claude-co
 import { createCodexAdapter } from "../adapters/codex-adapter.js";
 import { createDeepSeekApiAdapter } from "../adapters/deepseek-api-adapter.js";
 import { buildDeepSeekEditPatchPrompt, checkDeepSeek, createDeepSeekCheckpoint, createDeepSeekRuntimeRequest, writeDeepSeekCheckpoint } from "../deepseek.js";
-import { capabilityFailureClassValues, capabilityProbeSchema, capabilityStatusValues, createFailureSubagentResult, healthResultSchema, operatingSystemErrorCodeValues, requiredSourceReviewResultSchema, subagentExecutionRequestSchema, validateControlledEditResult, validateSubagentResult, webEvidenceFailureCodeValues, workspaceReadCleanupStatusValues, workspaceReadStatusValues } from "../schemas/core-schemas.js";
+import { capabilityFailureClassValues, capabilityProbeSchema, capabilityStatusValues, createFailureSubagentResult, healthResultSchema, operatingSystemErrorCodeValues, preparedEditRejectionResultSchema, requiredSourceReviewResultSchema, subagentExecutionRequestSchema, validateControlledEditResult, validateSubagentResult, webEvidenceFailureCodeValues, workspaceReadCleanupStatusValues, workspaceReadStatusValues } from "../schemas/core-schemas.js";
 import { checkCapability } from "../services/capability-service.js";
 import { createDelegationGuard } from "../services/delegation-guard.js";
 import { createExecutionId, createProcessFailureDiagnostics } from "../services/execution-service.js";
@@ -1972,6 +1972,36 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     }
   }
 
+  async function rejectPreparedEdit(input, trustedWorkspace) {
+    let sourceWorkspace;
+    try {
+      sourceWorkspace = canonicalizeTrustedWorkspace(trustedWorkspace);
+    } catch {
+      return preparedEditRejectionResultSchema.parse({ status: "failed", outcome: "workspace_binding_unavailable" });
+    }
+    const approvalRequestId = input.approvalRequestId;
+    if (!preparedEditRegistry.peek(approvalRequestId)) return preparedEditRejectionResultSchema.parse({ status: "failed", outcome: "approval_invalid" });
+    const lockId = createExecutionId();
+    if (!await coordinator.acquire(sourceWorkspace, "edit", lockId)) return preparedEditRejectionResultSchema.parse({ status: "failed", outcome: "workspace_lock_unavailable" });
+    try {
+      const request = preparedEditRegistry.peek(approvalRequestId);
+      if (!request) return preparedEditRejectionResultSchema.parse({ status: "failed", outcome: "approval_invalid" });
+      let workspaceHash;
+      try {
+        workspaceHash = fingerprintTrustedWorkspace(sourceWorkspace);
+      } catch {
+        return preparedEditRejectionResultSchema.parse({ status: "failed", outcome: "workspace_binding_unavailable" });
+      }
+      if (workspaceHash !== request.workspaceHash) {
+        return preparedEditRejectionResultSchema.parse({ status: "failed", outcome: "workspace_binding_changed" });
+      }
+      if (!preparedEditRegistry.invalidate(approvalRequestId)) return preparedEditRejectionResultSchema.parse({ status: "failed", outcome: "approval_invalid" });
+      return preparedEditRejectionResultSchema.parse({ status: "rejected", outcome: "prepared_edit_rejected" });
+    } finally {
+      coordinator.release(lockId);
+    }
+  }
+
   async function probeCapability({ target, model, trustedWorkspace, probeWorkspaceRead = false }) {
     const probeTarget = typeof target === "string" && target.length > 0 ? target : "";
     if (!probeTarget) throw new Error("capability probe target is required");
@@ -2085,6 +2115,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     runProfileEditPilot,
     runCodexProfileEditPilot,
     approvePreparedEdit,
+    rejectPreparedEdit,
     probeCapability,
     prepareParallelBatch: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).prepare(input),
     startParallelBatch: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).start(input),

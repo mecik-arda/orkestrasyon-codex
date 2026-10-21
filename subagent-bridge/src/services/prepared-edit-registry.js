@@ -217,7 +217,9 @@ export function createPreparedEditRegistry({ ttlMs = defaultTtlMs, maxEntries = 
 
   function invalidate(approvalRequestId) {
     const entry = entries.get(approvalRequestId);
-    if (entry && entry.state === "pending") entries.delete(approvalRequestId);
+    if (!entry || entry.state !== "pending") return false;
+    entries.delete(approvalRequestId);
+    return true;
   }
 
   function release(approvalRequestId) {

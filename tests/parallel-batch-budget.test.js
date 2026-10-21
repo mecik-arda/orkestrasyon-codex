@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { createFailureSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { getCostBudgetSnapshot } from "../subagent-bridge/src/metrics.js";
 
 function createWorkspace(t) {
@@ -221,6 +222,45 @@ test("V2-BUDGET: unknown cost keeps the allocation reserved in both ledgers", as
   const snapshot = await getCostBudgetSnapshot(configuration);
   assert.equal(snapshot.dailySpentUsd, 0.1);
   assert.equal(snapshot.costMeasurement.unknownCostRuns, 1);
+});
+
+test("V2-BUDGET: timed out batch task preserves unknown reservation and blocks dependent dispatch", async (t) => {
+  const { root, workspace } = createWorkspace(t);
+  const configuration = createConfiguration(root);
+  let adapterAttempts = 0;
+  const adapter = createAdapter("codex", { canRead: true, canWrite: true, supportsSandbox: true, supportsModelSelection: true });
+  adapter.execute = async (request) => {
+    adapterAttempts += 1;
+    return createFailureSubagentResult("codex", request.model, {
+      error: "execution timed out",
+      retryable: true,
+      timedOut: true,
+      exitCode: null,
+      reason: "timeout"
+    });
+  };
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex: adapter }, sleep: async () => {} });
+  const prepared = await runtime.prepareParallelBatch({
+    objective: "Verify timeout settlement and dependency blocking",
+    batchMaxReservedCostUsd: 1,
+    tasks: [
+      task("timeout-task", "src/a.txt"),
+      task("dependent-task", "src/b.txt", { dependsOn: ["timeout-task"] })
+    ]
+  }, workspace);
+  assert.equal(prepared.ok, true);
+  const started = await runtime.startParallelBatch({ planId: prepared.planId, planHash: prepared.planHash }, workspace);
+  assert.equal(started.ok, true);
+  const summary = await waitForBatch(runtime, workspace, started.batchId, ["result_ready", "failed"]);
+  const timeoutTask = summary.tasks.find((entry) => entry.taskId === "timeout-task");
+  const dependentTask = summary.tasks.find((entry) => entry.taskId === "dependent-task");
+  assert.equal(timeoutTask.status, "failed");
+  assert.equal(timeoutTask.failureClass, "timeout");
+  assert.equal(dependentTask.status, "blocked");
+  assert.equal(dependentTask.failureClass, "dependency_not_completed");
+  assert.equal(adapterAttempts, 1);
+  assert.ok(summary.budget.unknownReservedUsd > 0);
+  assert.equal((await runtime.health()).circuits.codex.state, "closed");
 });
 
 test("V2-BUDGET: period folding keeps future UTC windows empty", async (t) => {

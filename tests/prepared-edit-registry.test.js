@@ -109,11 +109,12 @@ test("WP5B-REGISTRY-06: geçersiz kayıt ve sınıf dışı onay reddedilir", ()
 test("WP5B-REGISTRY-07: invalidate bekleyen kaydı kaldırır ve tüketilmiş kayda dokunmaz", () => {
   const registry = createPreparedEditRegistry();
   const first = registry.store(record());
-  registry.invalidate(first.approvalRequestId);
+  assert.equal(registry.invalidate(first.approvalRequestId), true);
   assert.equal(registry.peek(first.approvalRequestId), null);
+  assert.equal(registry.invalidate(first.approvalRequestId), false);
   const second = registry.store(record());
   assert.notEqual(registry.consume(second.approvalRequestId, binding()), null);
-  registry.invalidate(second.approvalRequestId);
+  assert.equal(registry.invalidate(second.approvalRequestId), false);
   assert.equal(registry.stats().entries, 1);
 });
 

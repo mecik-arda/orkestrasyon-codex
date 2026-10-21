@@ -3,7 +3,7 @@ import { validateWorkspace } from "../../config.js";
 import { ANTIGRAVITY_MODEL_MAP } from "../../adapters/antigravity-adapter.js";
 import { detectWebIntent } from "../../web-evidence.js";
 import { validateClaudeSonnetAcceptanceOutput } from "../../services/claude-sonnet-acceptance.js";
-import { controlledEditResultSchema } from "../../schemas/core-schemas.js";
+import { controlledEditResultSchema, preparedEditRejectionResultSchema } from "../../schemas/core-schemas.js";
 import {
   approveParallelIntegrationRequestSchema,
   cancelParallelBatchRequestSchema,
@@ -134,6 +134,9 @@ export const publicToolSchemas = {
     riskSignals: riskSignalsSchema.optional()
   }).strict(),
   approvePreparedEdit: z.object({
+    approvalRequestId: approvalRequestIdSchema
+  }).strict(),
+  rejectPreparedEdit: z.object({
     approvalRequestId: approvalRequestIdSchema
   }).strict(),
   prepareParallelBatch: prepareParallelBatchRequestSchema,
@@ -330,6 +333,11 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
       const parsed = parse(publicToolSchemas.approvePreparedEdit, input);
       const result = await runtime.approvePreparedEdit(parsed, trustedWorkspace);
       return { isError: result.status !== "completed", content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
+    },
+    async rejectPreparedEdit(input) {
+      const parsed = parse(publicToolSchemas.rejectPreparedEdit, input);
+      const result = preparedEditRejectionResultSchema.parse(await runtime.rejectPreparedEdit(parsed, trustedWorkspace));
+      return { isError: result.status !== "rejected", content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
     },
     async prepareParallelBatch(input) {
       const parsed = parse(publicToolSchemas.prepareParallelBatch, input);

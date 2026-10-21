@@ -10,7 +10,10 @@ import { createProviderEnvironment } from "../subagent-bridge/src/services/execu
 import { provisionDisposableWorkspace } from "../subagent-bridge/src/services/disposable-workspace.js";
 
 async function listToolNames(enableOrchestratorApproval) {
-  const runtime = { approvePreparedEdit: async () => ({ status: "failed", failureClass: "approval_invalid" }) };
+  const runtime = {
+    approvePreparedEdit: async () => ({ status: "failed", failureClass: "approval_invalid" }),
+    rejectPreparedEdit: async () => ({ status: "failed", outcome: "approval_invalid" })
+  };
   const server = createSubagentMcpServer({
     runtime,
     configuration: {},
@@ -34,12 +37,54 @@ test("WP5B-CHANNEL-01: orkestratör onay bayrağı yalnız tam değerle etkinle�
   assert.equal(isOrchestratorApprovalEnabled(), typeof process.env.SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL === "string");
 });
 
-test("WP5B-CHANNEL-02: approve_prepared_edit aracı yalnız bayrak açıkken kaydedilir", async () => {
+test("WP5B-CHANNEL-02: hazırlanmış edit karar araçları yalnız bayrak açıkken kaydedilir", async () => {
   const disabledTools = await listToolNames(false);
   assert.equal(disabledTools.includes("approve_prepared_edit"), false);
+  assert.equal(disabledTools.includes("reject_prepared_edit"), false);
   const enabledTools = await listToolNames(true);
   assert.equal(enabledTools.includes("approve_prepared_edit"), true);
+  assert.equal(enabledTools.includes("reject_prepared_edit"), true);
   assert.equal(enabledTools.includes("run_deepseek_subagent"), true);
+});
+
+test("WP5B-CHANNEL-05: reject_prepared_edit gerçek MCP strict şemasını ve yanıt sözleşmesini uygular", async () => {
+  let rejectionCalls = 0;
+  const server = createSubagentMcpServer({
+    runtime: {
+      approvePreparedEdit: async () => ({ status: "failed", failureClass: "approval_invalid" }),
+      rejectPreparedEdit: async () => {
+        rejectionCalls += 1;
+        return { status: "rejected", outcome: "prepared_edit_rejected" };
+      }
+    },
+    configuration: {},
+    trustedWorkspace: os.tmpdir(),
+    enableOrchestratorApproval: true
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "prepared-edit-reject-contract-test", version: "1.0.0" });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  try {
+    const { tools } = await client.listTools();
+    const rejectionTool = tools.find((tool) => tool.name === "reject_prepared_edit");
+    assert.ok(rejectionTool);
+    assert.equal(rejectionTool.inputSchema.additionalProperties, false);
+    const invalidArguments = await client.callTool({
+      name: "reject_prepared_edit",
+      arguments: { approvalRequestId: "a".repeat(64), unexpected: true }
+    });
+    assert.equal(invalidArguments.isError, true);
+    assert.equal(rejectionCalls, 0);
+    const accepted = await client.callTool({
+      name: "reject_prepared_edit",
+      arguments: { approvalRequestId: "a".repeat(64) }
+    });
+    assert.equal(accepted.isError, false);
+    assert.deepEqual(accepted.structuredContent, { status: "rejected", outcome: "prepared_edit_rejected" });
+    assert.equal(rejectionCalls, 1);
+  } finally {
+    await client.close();
+  }
 });
 
 test("WP5B-CHANNEL-03: sağlayıcı ortamı approval bayrağını ve config override değişkenlerini taşımaz", () => {

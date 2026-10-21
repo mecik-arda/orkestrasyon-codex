@@ -369,6 +369,14 @@ export const controlledEditResultSchema = z.object({
   if (result.approvalExpiresAt && !result.approvalRequestId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalExpiresAt"], message: "approval expiration requires an approval request id" });
 });
 
+export const preparedEditRejectionResultSchema = z.object({
+  status: z.enum(["rejected", "failed"]),
+  outcome: z.enum(["prepared_edit_rejected", "approval_invalid", "workspace_lock_unavailable", "workspace_binding_unavailable", "workspace_binding_changed"])
+}).strict().superRefine((result, context) => {
+  if (result.status === "rejected" && result.outcome !== "prepared_edit_rejected") context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcome"], message: "rejected status requires rejected outcome" });
+  if (result.status === "failed" && result.outcome === "prepared_edit_rejected") context.addIssue({ code: z.ZodIssueCode.custom, path: ["outcome"], message: "failed status cannot report rejected outcome" });
+});
+
 export const capabilitySchema = z.object({
   canRead: z.boolean(),
   canWrite: z.boolean(),

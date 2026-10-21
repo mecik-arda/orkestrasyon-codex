@@ -241,6 +241,72 @@ test("PILOT-PROFILE-08: hazirlanan yeni dosya acik onaydan once kaynakta olusmaz
   assert.equal(fs.readFileSync(createdPath, "utf8"), "created\n");
 });
 
+test("PILOT-PROFILE-11: hazirlanan edit acik redle silinir ve kaynak degismez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "profile-edit-rejected-"));
+  const otherWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "profile-edit-reject-other-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(otherWorkspace, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  const createdPath = path.join(root, "src", "new-value.txt");
+  let providerExecutions = 0;
+  const runtime = createBridgeRuntime({
+    configuration: configuration(root, { create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false } }),
+    adapters: {
+      codex: createFakeAdapter("codex", async (request) => {
+        providerExecutions += 1;
+        fs.writeFileSync(path.join(request.workspace, "src", "new-value.txt"), "created\n", "utf8");
+        return createSuccessSubagentResult("codex", request.model, { result: "Created selected file", durationMs: 5 });
+      })
+    },
+    sleep: async () => {},
+    orchestratorApprovalEnabled: true
+  });
+
+  const preview = await runtime.runProfileEdit(pilotInput({ profile: "create_profile", files: ["src/new-value.txt"] }), root);
+  assert.equal(preview.failureClass, "approval_required");
+  assert.equal(preview.applied, false);
+  assert.equal(fs.existsSync(createdPath), false);
+  assert.equal(providerExecutions, 1);
+
+  const wrongWorkspaceRejection = await runtime.rejectPreparedEdit({ approvalRequestId: preview.approvalRequestId }, otherWorkspace);
+  assert.deepEqual(wrongWorkspaceRejection, { status: "failed", outcome: "workspace_binding_changed" });
+  assert.equal(fs.existsSync(createdPath), false);
+
+  const rejected = await runtime.rejectPreparedEdit({ approvalRequestId: preview.approvalRequestId }, root);
+
+  assert.deepEqual(rejected, { status: "rejected", outcome: "prepared_edit_rejected" });
+  assert.equal(fs.existsSync(createdPath), false);
+  assert.equal(providerExecutions, 1);
+  const staleApproval = await runtime.approvePreparedEdit({ approvalRequestId: preview.approvalRequestId }, root);
+  assert.equal(staleApproval.failureClass, "approval_invalid");
+  assert.equal(fs.existsSync(createdPath), false);
+  assert.equal(providerExecutions, 1);
+});
+
+test("PILOT-PROFILE-12: red yolu workspace hatasinda sabit tanı döndürür ve yol sızdırmaz", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "profile-edit-reject-workspace-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const missingWorkspace = path.join(root, "missing-workspace");
+  let providerExecutions = 0;
+  const runtime = createBridgeRuntime({
+    configuration: configuration(root, {}),
+    adapters: {
+      codex: createFakeAdapter("codex", async () => {
+        providerExecutions += 1;
+        return createSuccessSubagentResult("codex", "gpt-6.1-sol", { result: "unexpected", durationMs: 1 });
+      })
+    },
+    sleep: async () => {},
+    orchestratorApprovalEnabled: true
+  });
+
+  const result = await runtime.rejectPreparedEdit({ approvalRequestId: "a".repeat(64) }, missingWorkspace);
+
+  assert.deepEqual(result, { status: "failed", outcome: "workspace_binding_unavailable" });
+  assert.equal(JSON.stringify(result).includes(missingWorkspace), false);
+  assert.equal(providerExecutions, 0);
+});
+
 test("PILOT-PROFILE-09: hazirlanan degisikligin kaynak durumu degisince eski onay reddedilir", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "profile-edit-stale-approval-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

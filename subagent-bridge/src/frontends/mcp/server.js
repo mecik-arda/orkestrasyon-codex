@@ -371,6 +371,12 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
       inputSchema: publicToolInputShape(publicToolSchemas.approvePreparedEdit),
       annotations: executionAnnotations
     }, safe(handlers.approvePreparedEdit));
+    server.registerTool("reject_prepared_edit", {
+      title: "Hazırlanmış edit değişikliğini reddet",
+      description: "Bekleyen edit onayını aynı trusted workspace bağlamında iptal edip saklanan değişikliği siler; sağlayıcı çağırmaz ve çalışma alanındaki dosyalara dokunmaz.",
+      inputSchema: publicToolSchemas.rejectPreparedEdit,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false }
+    }, safe(handlers.rejectPreparedEdit));
   }
 
   if (configuration.parallelBatch?.enabled === true) {

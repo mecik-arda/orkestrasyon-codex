@@ -1,5 +1,12 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-10-21 21:06 canlı timeout preview farkı
+
+- Etkin `hades://workspace/identity/v1` resource'u iki beklenen workspace hash'ini döndürdü. Yerel `.codex/config.toml` Hades server entrypoint'i bu checkout'taki `subagent-bridge/src/server.js` olarak gösteriyor; bu config satırı tek başına çalışan process command line'ını kanıtlamaz.
+- `prepare_parallel_batch` ile yalnız yeni plan hazırlandı; worker/provider başlatılmadı. Plan `b3284edee0464000559171e40b743bf7`, hash `27eb4af85c0867e43ef873e5137e0c85201c10b81733382c1cf608c9c7f36f0b`, expiry 2026-10-21 21:15:57 Türkiye saati. Bir read-only Codex/gpt-6.1-sol task, 10s timeout, 1048576 byte process output, $0.20 tahmini allocation ve $0.75 batch-local cap. Tahsis gerçek fatura değildir; çalıştırma ve provider rezervi yoktur.
+- Canlı plan message'i process output ve public summary sınırlarını gösterdi fakat yerel `736b92d` kodunun eklemesi gereken effective total adapter attempts / timeout alanlarını göstermedi. Bu, etkin davranışın yerel fix ile aynı olmadığını kanıtlar. Kimlik hash'leri runtime source revision'ını kanıtlamaz; restart eksikliği ile alternatif launch context henüz ayırt edilmedi. Plan eksik preview nedeniyle başlatılmamalı ve eski hash'e onay taşınmamalı.
+- Hades doğru checkout'taki server entrypoint'i yeniden yükledikten sonra identity, araç envanteri ve yeni `prepare_parallel_batch` mesajı salt-okunur doğrulanmalı; yeni plan/hash için ayrıca başlatma onayı alınmalı. P1b, P2 approval/stale/recovery ve entegrasyon, P3 canlı timeout/unknown/restart/expired-plan/edit entegrasyonu ve P6 açık kalır.
+
 ## 2026-10-21 21:02 fallback preview regresyonu
 
 - Sol incelemesinin belirttiği iki test boşluğu kapatıldı: sahte profile primary+fallback rotaları plan önizlemesinde iki toplam adapter attempt olarak gösteriliyor; fallback modelinin değişmesi aynı task contract altında immutable plan hash'ini değiştiriyor. Test worker başlatmıyor.

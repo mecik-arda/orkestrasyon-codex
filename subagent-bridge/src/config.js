@@ -7,7 +7,7 @@ import { planRuntimeStateMigration } from "./runtime-state-migration.js";
 
 const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(moduleDirectory, "..", "..");
-export const currentConfigurationVersion = 2;
+export const currentConfigurationVersion = 3;
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
@@ -42,7 +42,7 @@ export function createDefaultStatePaths(root) {
   };
 }
 
-function migrateConfiguration(rawConfiguration) {
+export function migrateConfiguration(rawConfiguration) {
   const sourceVersion = rawConfiguration.configVersion ?? 1;
   if (!Number.isInteger(sourceVersion) || sourceVersion < 1 || sourceVersion > currentConfigurationVersion) {
     throw new Error(`Unsupported configuration version: ${sourceVersion}`);
@@ -65,6 +65,39 @@ function migrateConfiguration(rawConfiguration) {
       }
     };
   }
+  if (sourceVersion <= 2) {
+    const { openCodeModel, openCodeFlashModel, ...deepseek } = configuration.deepseek || {};
+    const { glm, kimi, qwen, ...currentConfiguration } = configuration;
+    const taskProfiles = Object.fromEntries(Object.entries(currentConfiguration.orchestration?.taskProfiles || {})
+      .filter(([, profile]) => !["opencode", "glm", "kimi", "qwen"].includes(profile.target))
+      .map(([name, profile]) => [name, {
+        ...profile,
+        fallbackTargets: profile.fallbackTargets?.filter((fallback) => !["opencode", "glm", "kimi", "qwen"].includes(fallback.target))
+      }]))
+    const profileByRoute = Object.fromEntries(Object.entries(currentConfiguration.orchestration?.providerAdmission?.profileByRoute || {})
+      .filter(([route]) => !/^(?:opencode|glm|kimi|qwen):/u.test(route)));
+    const profileConcurrency = Object.fromEntries(Object.entries(currentConfiguration.orchestration?.providerAdmission?.profileConcurrency || {})
+      .filter(([profile]) => !/^(?:opencode|glm|kimi|qwen):/u.test(profile)));
+    const providerConcurrency = Object.fromEntries(Object.entries(currentConfiguration.parallelBatch?.providerConcurrency || {})
+      .filter(([provider]) => !["opencode", "glm", "kimi", "qwen"].includes(provider)));
+    const { opencodeOutputCapability, opencodeOutputTokens, opencodeSteps, ...parallelBatch } = currentConfiguration.parallelBatch || {};
+    if (parallelBatch.allowedTargets) parallelBatch.allowedTargets = parallelBatch.allowedTargets.filter((target) => !["opencode", "glm", "kimi", "qwen"].includes(target));
+    configuration = {
+      ...currentConfiguration,
+      configVersion: 3,
+      deepseek,
+      orchestration: {
+        ...currentConfiguration.orchestration,
+        taskProfiles,
+        providerAdmission: currentConfiguration.orchestration?.providerAdmission
+          ? { ...currentConfiguration.orchestration.providerAdmission, profileByRoute, profileConcurrency }
+          : currentConfiguration.orchestration?.providerAdmission
+      },
+      parallelBatch: currentConfiguration.parallelBatch
+        ? { ...parallelBatch, providerConcurrency }
+        : currentConfiguration.parallelBatch
+    };
+  }
   return { configuration, sourceVersion, migrated: sourceVersion !== currentConfigurationVersion };
 }
 
@@ -74,8 +107,6 @@ const configurationSchema = z.object({
   agentRules: z.string().min(1),
   skills: z.object({ root: z.string().min(1), allowed: z.array(z.string().min(1)).min(1) }).strict(),
   deepseek: z.object({
-    openCodeModel: z.string().min(1),
-    openCodeFlashModel: z.string().min(1),
     apiBaseUrl: z.literal("https://api.deepseek.com").optional(),
     apiModel: z.literal("deepseek-flash").optional(),
     pilotBudgetUsd: z.number().positive().max(1).optional(),
@@ -90,24 +121,6 @@ const configurationSchema = z.object({
     requireGitRepository: z.boolean(),
     deniedRoots: z.array(z.string().min(1))
   }).strict(),
-  glm: z.object({
-    openCodeModel: z.string().min(1),
-    openCodeHighSpeedModel: z.string().min(1),
-    openCode53Model: z.string().min(1).optional(),
-    openCode53FlashModel: z.string().min(1).optional(),
-    timeoutMs: z.number().int().positive(),
-    deniedRoots: z.array(z.string().min(1))
-  }).strict().optional(),
-  kimi: z.object({
-    models: z.record(z.string().min(1), z.string().min(1)),
-    timeoutMs: z.number().int().positive(),
-    deniedRoots: z.array(z.string().min(1))
-  }).strict().optional(),
-  qwen: z.object({
-    models: z.record(z.string().min(1), z.string().min(1)),
-    timeoutMs: z.number().int().positive(),
-    deniedRoots: z.array(z.string().min(1))
-  }).strict().optional(),
   workspacePolicy: z.object({
     antigravityDeniedRoots: z.array(z.string().min(1))
   }).strict().optional(),
@@ -191,6 +204,9 @@ const configurationSchema = z.object({
       maxEntryBytes: z.number().int().positive(),
       maxEntries: z.number().int().positive().optional()
     }).strict(),
+    acceptancePilots: z.object({
+      claudeSonnet: z.object({ enabled: z.boolean() }).strict()
+    }).strict().optional(),
     slo: z.object({
       windowDays: z.number().int().positive().max(90),
       minimumRuns: z.number().int().positive(),
@@ -219,16 +235,30 @@ const configurationSchema = z.object({
     maxArtifactBytes: z.number().int().positive().optional(),
     maxArtifactTotalBytes: z.number().int().positive().optional(),
     allowedTargets: z.array(z.string().min(1).max(64)).min(1).max(20).optional(),
-    opencodeOutputCapability: z.enum(["available", "unavailable"]).optional(),
-    opencodeOutputTokens: z.number().int().positive().max(32768).optional(),
-    opencodeSteps: z.number().int().positive().max(50).optional(),
     codexNetworkOffCapability: z.enum(["available", "unavailable"]).optional(),
     autoOpenTerminalDashboard: z.boolean().optional(),
     worktreeRoot: z.string().min(1).optional(),
     verificationCommands: z.array(z.string().min(1).max(200)).max(20).optional(),
     orphanGraceMs: z.number().int().positive().optional()
   }).strict().optional()
-}).strict();
+}).strict().superRefine((configuration, context) => {
+  const retiredTargets = new Set(["opencode", "glm", "kimi", "qwen"]);
+  for (const [profileName, profile] of Object.entries(configuration.orchestration.taskProfiles)) {
+    if (retiredTargets.has(profile.target)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["orchestration", "taskProfiles", profileName, "target"], message: "retired provider target is not supported" });
+    }
+    for (const [fallbackIndex, fallback] of (profile.fallbackTargets || []).entries()) {
+      if (retiredTargets.has(fallback.target)) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: ["orchestration", "taskProfiles", profileName, "fallbackTargets", fallbackIndex, "target"], message: "retired provider target is not supported" });
+      }
+    }
+  }
+  for (const [targetIndex, target] of (configuration.parallelBatch?.allowedTargets || []).entries()) {
+    if (retiredTargets.has(target)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["parallelBatch", "allowedTargets", targetIndex], message: "retired provider target is not supported" });
+    }
+  }
+});
 
 export function validateConfiguration(rawConfiguration) {
   return configurationSchema.safeParse(rawConfiguration);
@@ -250,9 +280,6 @@ export function loadConfiguration(options = {}) {
       .map((rootPath) => [normalizeForComparison(resolveForComparison(rootPath)), rootPath])
   ).values()];
   const deepseekDeniedRootPaths = resolveDeniedRootPaths(configuration.deepseek.deniedRoots);
-  const glmDeniedRootPaths = configuration.glm
-    ? resolveDeniedRootPaths(configuration.glm.deniedRoots)
-    : [];
   const antigravityDeniedRootPaths = resolveDeniedRootPaths(configuration.workspacePolicy?.antigravityDeniedRoots || []);
   return {
     ...configuration,
@@ -274,12 +301,6 @@ export function loadConfiguration(options = {}) {
       maxOutputTokens: configuration.deepseek.maxOutputTokens ?? 2048,
       deniedRootPaths: deepseekDeniedRootPaths
     },
-    glm: configuration.glm
-      ? {
-          ...configuration.glm,
-          deniedRootPaths: glmDeniedRootPaths
-        }
-      : configuration.glm,
     workspacePolicy: {
       ...(configuration.workspacePolicy || {}),
       antigravityDeniedRootPaths
@@ -298,6 +319,12 @@ export function loadConfiguration(options = {}) {
     observability: configuration.observability,
     orchestration: {
       ...(configuration.orchestration || {}),
+      acceptancePilots: {
+        ...(configuration.orchestration?.acceptancePilots || {}),
+        claudeSonnet: {
+          enabled: configuration.orchestration?.acceptancePilots?.claudeSonnet?.enabled === true
+        }
+      },
       providerAdmission: {
         defaultConcurrency: configuration.orchestration?.providerAdmission?.defaultConcurrency ?? 2,
         profileConcurrency: configuration.orchestration?.providerAdmission?.profileConcurrency || {},
@@ -324,9 +351,6 @@ export function loadConfiguration(options = {}) {
       maxArtifactBytes: configuration.parallelBatch?.maxArtifactBytes ?? 1048576,
       maxArtifactTotalBytes: configuration.parallelBatch?.maxArtifactTotalBytes ?? 52428800,
       allowedTargets: configuration.parallelBatch?.allowedTargets || ["codex", "claude_code", "native_claude", "antigravity"],
-      opencodeOutputCapability: configuration.parallelBatch?.opencodeOutputCapability || "unavailable",
-      opencodeOutputTokens: configuration.parallelBatch?.opencodeOutputTokens ?? 2048,
-      opencodeSteps: configuration.parallelBatch?.opencodeSteps ?? 8,
       codexNetworkOffCapability: configuration.parallelBatch?.codexNetworkOffCapability || "unavailable",
       autoOpenTerminalDashboard: configuration.parallelBatch?.autoOpenTerminalDashboard === true,
       worktreeRoot: configuration.parallelBatch?.worktreeRoot
@@ -433,12 +457,6 @@ const agentConfigSchema = z.object({
   defaultMode: agentModeSchema.optional(),
   allowedModes: z.array(agentModeSchema).min(1).max(2).optional(),
   allowNonGitWorkspace: z.boolean().optional(),
-  deepSeekReadOnlyAgent: z.string().min(1).max(64).optional(),
-  deepSeekEditAgent: z.string().min(1).max(64).optional(),
-  glmEditAgent: z.string().min(1).max(64).optional(),
-  kimiEditAgent: z.string().min(1).max(64).optional(),
-  qwenEditAgent: z.string().min(1).max(64).optional(),
-  editAgent: z.string().min(1).max(64).optional(),
   allowedModels: z.array(z.string().min(1).max(160)).min(1).max(50).optional()
 }).strict().superRefine((value, context) => {
   if (value.defaultMode && value.allowedModes && !value.allowedModes.includes(value.defaultMode)) {
@@ -448,7 +466,13 @@ const agentConfigSchema = z.object({
 
 const agentsConfigRootSchema = z.object({
   agents: z.record(z.string().min(1).max(64), agentConfigSchema)
-}).strict();
+}).strict().superRefine((value, context) => {
+  for (const retiredAgent of ["opencode", "glm", "kimi", "qwen"]) {
+    if (Object.hasOwn(value.agents, retiredAgent)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["agents", retiredAgent], message: "retired provider agent is not supported" });
+    }
+  }
+});
 
 export function validateAgentsConfig(rawAgentsConfig) {
   return agentsConfigRootSchema.safeParse(rawAgentsConfig);
@@ -457,40 +481,14 @@ export function validateAgentsConfig(rawAgentsConfig) {
 export function loadAgentsConfig(options = {}) {
   const agentsPath = options.agentsPath || process.env.SUBAGENT_BRIDGE_AGENTS_CONFIG || getPersonalBridgeLayout().agentsPath;
   const raw = readJson(agentsPath);
-  const validation = validateAgentsConfig(raw);
+  const agents = Object.fromEntries(Object.entries(raw.agents || {})
+    .filter(([name]) => !["opencode", "glm", "kimi", "qwen"].includes(name)));
+  const validation = validateAgentsConfig({ ...raw, agents });
   if (!validation.success) {
     const issues = validation.error.issues.map(i => `${i.path.join(".")}: ${i.message}`).join("; ");
     throw new Error(`Invalid config/agents.json: ${issues}`);
   }
   return validation.data;
-}
-
-function collectOpenCodeTargetModels(configuration) {
-  const models = [];
-  const profiles = configuration.orchestration?.taskProfiles || {};
-  for (const profile of Object.values(profiles)) {
-    const entries = [profile, ...(profile.fallbackTargets || [])];
-    for (const entry of entries) {
-      if (entry && entry.target === "opencode" && typeof entry.model === "string" && entry.model.length > 0) {
-        models.push(entry.model);
-      }
-    }
-  }
-  return models;
-}
-
-export function assertOpenCodeModelsAllowed(configuration, opencodeAgent) {
-  const allowedModels = opencodeAgent?.allowedModels;
-  if (!Array.isArray(allowedModels) || allowedModels.length === 0) return;
-  const requiredModels = new Set([
-    configuration.deepseek?.openCodeModel,
-    configuration.deepseek?.openCodeFlashModel,
-    ...collectOpenCodeTargetModels(configuration)
-  ].filter((model) => typeof model === "string" && model.length > 0));
-  const unlistedModels = [...requiredModels].filter((model) => !allowedModels.includes(model));
-  if (unlistedModels.length > 0) {
-    throw new Error(`opencode model policy rejects unlisted models: ${unlistedModels.join(", ")}`);
-  }
 }
 
 export function loadRuntimeConfiguration(options = {}) {
@@ -502,15 +500,12 @@ export function loadRuntimeConfiguration(options = {}) {
   if (collisions.length > 0) {
     throw new Error(`agents.json backend name collides with policy key: ${collisions.join(", ")}`);
   }
-  if (agents.agents.opencode?.enabled !== false) assertOpenCodeModelsAllowed(configuration, agents.agents.opencode);
   return {
     ...configuration,
     ...agents.agents,
     parallelBatch: {
       ...configuration.parallelBatch,
-      allowedTargets: agents.agents.opencode?.enabled === false
-        ? configuration.parallelBatch.allowedTargets.filter((target) => target !== "opencode")
-        : configuration.parallelBatch.allowedTargets
+      allowedTargets: configuration.parallelBatch.allowedTargets.filter((target) => !["opencode", "glm", "kimi", "qwen"].includes(target))
     }
   };
 }

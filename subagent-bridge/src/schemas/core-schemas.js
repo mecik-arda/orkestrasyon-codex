@@ -5,6 +5,7 @@ export const failureStageValues = [
   "mcp_preflight",
   "process_spawn",
   "provider_admission",
+  "workspace_setup",
   "sandbox_setup",
   "workspace_read",
   "settings_lock",
@@ -281,6 +282,8 @@ export const subagentResultSchema = z.object({
     signal: z.string().nullable().optional(),
     diagnostics: attemptDiagnosticsSchema.optional(),
     webReadStatus: z.enum(webReadStatusValues).optional(),
+    telemetryWriteStatus: z.enum(["written", "failed"]).optional(),
+    telemetryWriteFailureClass: z.enum(["none", "permission_denied", "lock_unavailable", "storage_unavailable", "io_error"]).optional(),
     costBudget: z.object({
       period: z.enum(["daily", "monthly"]),
       limitUsd: z.number().min(0),
@@ -338,8 +341,7 @@ export const controlledEditResultSchema = z.object({
   cleanupCompleted: z.boolean(),
   executionIdHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   changeSetHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  approvalClass: z.enum(["low_impact", "new_file", "multiple_files", "policy_config", "external_service", "irreversible", "space_bunny_edit"]).optional(),
-  sourceApprovalClass: z.enum(["low_impact", "new_file", "multiple_files", "policy_config", "external_service", "irreversible"]).optional(),
+  approvalClass: z.enum(["low_impact", "new_file", "multiple_files", "policy_config", "external_service", "irreversible"]).optional(),
   approvalRequired: z.boolean().optional(),
   approvalRequestId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   approvalExpiresAt: z.string().datetime().optional(),
@@ -362,9 +364,7 @@ export const controlledEditResultSchema = z.object({
   if (result.failureClass === "approval_required" && !validApprovalPending) context.addIssue({ code: z.ZodIssueCode.custom, path: ["failureClass"], message: "approval-required result must be pending and unapplied" });
   if (result.approvalRequired === true && !validPreview && !validApprovalPending) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequired"], message: "approval-required result must await approval or be a preview" });
   if (result.approvalRequired === true && (!result.executionIdHash || !result.changeSetHash || !result.approvalClass || result.approvalClass === "low_impact")) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequired"], message: "approval-required result must include a high-impact binding" });
-  if (result.approvalClass === "space_bunny_edit" && (result.backend !== "opencode" || result.model !== "opencode/space-bunny-free" || result.resolvedModel !== "opencode/space-bunny-free" || !["low_impact", "new_file", "multiple_files"].includes(result.sourceApprovalClass))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalClass"], message: "Space Bunny approval requires its exact route, model, and an allowed source class" });
-  if (result.approvalClass !== "space_bunny_edit" && result.sourceApprovalClass !== undefined) context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceApprovalClass"], message: "source approval class is reserved for Space Bunny edits" });
-  if (result.approvalRequestId && (!validApprovalPending || result.preview === true || !["new_file", "multiple_files", "space_bunny_edit"].includes(result.approvalClass))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequestId"], message: "approval request id requires an orchestrator-approvable pending result" });
+  if (result.approvalRequestId && (!validApprovalPending || result.preview === true || !["new_file", "multiple_files"].includes(result.approvalClass))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequestId"], message: "approval request id requires an orchestrator-approvable pending result" });
   if (result.approvalRequestId && !result.approvalExpiresAt) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalExpiresAt"], message: "approval request id requires an expiration" });
   if (result.approvalExpiresAt && !result.approvalRequestId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalExpiresAt"], message: "approval expiration requires an approval request id" });
 });
@@ -393,6 +393,8 @@ export const subagentExecutionRequestSchema = z.object({
   webReadTrace: z.boolean().optional(),
   maxOutputBytes: z.number().int().min(1024).max(8388608).optional(),
   maxOutputTokens: z.number().int().min(1).max(32768).optional(),
+  claudeSonnetAcceptancePilot: z.literal(true).optional(),
+  noWorkspaceContext: z.boolean().optional(),
   timeoutMs: z.number().int().min(1000)
 }).strict();
 

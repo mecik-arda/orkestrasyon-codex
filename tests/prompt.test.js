@@ -1,7 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
 import { buildDeepSeekPrompt, buildDeepSeekSchemaRepairPrompt } from "../subagent-bridge/src/deepseek.js";
 
 test("DeepSeek promptu salt okunur görev sözleşmesini içerir", () => {
@@ -55,11 +53,4 @@ test("DeepSeek required reviewer prompt demands manifest-bound line references",
   assert.match(prompt, /manifest-relative path/);
   assert.match(prompt, /lineStart/);
   assert.match(repairPrompt, /references/);
-});
-
-test("Orchestrator named provider failure için host fallback yapmaz", () => {
-  const prompt = fs.readFileSync(path.join(process.cwd(), ".opencode", "agent", "orchestrator.md"), "utf8");
-  assert.match(prompt, /Report named-provider failure with its canonical reason/);
-  assert.match(prompt, /do not substitute another provider or self-review for explicitly requested independent verification/i);
-  assert.match(prompt, /unless the user requests a fallback/);
 });

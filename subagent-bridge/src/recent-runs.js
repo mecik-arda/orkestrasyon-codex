@@ -176,21 +176,41 @@ function isPathInside(candidatePath, rootPath) {
 }
 
 function selectMetricFiles(metricsDirectory, limits) {
-  if (!fs.existsSync(metricsDirectory)) return { files: [], truncated: false };
-  const rootStatus = fs.lstatSync(metricsDirectory);
-  if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) return { files: [], truncated: false };
-  const canonicalRoot = fs.realpathSync(metricsDirectory);
+  if (!fs.existsSync(metricsDirectory)) return { files: [], truncated: false, sourceStatus: "missing", droppedFileCount: 0 };
+  let rootStatus;
+  let canonicalRoot;
+  try {
+    rootStatus = fs.lstatSync(metricsDirectory);
+    if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) return { files: [], truncated: false, sourceStatus: "unsafe", droppedFileCount: 0 };
+    canonicalRoot = fs.realpathSync(metricsDirectory);
+  } catch {
+    return { files: [], truncated: false, sourceStatus: "unreadable", droppedFileCount: 0 };
+  }
   const candidates = [];
-  for (const entry of fs.readdirSync(metricsDirectory, { withFileTypes: true })) {
+  let droppedFileCount = 0;
+  let entries;
+  try {
+    entries = fs.readdirSync(metricsDirectory, { withFileTypes: true });
+  } catch {
+    return { files: [], truncated: false, sourceStatus: "unreadable", droppedFileCount: 0 };
+  }
+  for (const entry of entries) {
     if (!/-runs(?:-[a-zA-Z0-9-]+)?\.jsonl$/.test(entry.name) || entry.isSymbolicLink()) continue;
     const filePath = path.join(metricsDirectory, entry.name);
     try {
       const status = fs.lstatSync(filePath);
-      if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1) continue;
+      if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1) {
+        droppedFileCount += 1;
+        continue;
+      }
       const realPath = fs.realpathSync(filePath);
-      if (!isPathInside(realPath, canonicalRoot)) continue;
+      if (!isPathInside(realPath, canonicalRoot)) {
+        droppedFileCount += 1;
+        continue;
+      }
       candidates.push({ filePath: realPath, mtimeMs: status.mtimeMs, size: status.size });
     } catch {
+      droppedFileCount += 1;
     }
   }
   candidates.sort((left, right) => right.mtimeMs - left.mtimeMs || left.filePath.localeCompare(right.filePath));
@@ -205,7 +225,7 @@ function selectMetricFiles(metricsDirectory, limits) {
     files.push(candidate);
     totalBytes += candidate.size;
   }
-  return { files, truncated };
+  return { files, truncated, sourceStatus: "available", droppedFileCount };
 }
 
 function scanMetricFiles(selection, visit, countInvalid = true) {
@@ -417,6 +437,10 @@ export function readRecentRuns(configuration, options = {}) {
   }, false);
   const prefixes = uniquePrefixes(selectedRuns.map((run) => run.fullHash));
   return {
+    sourceClass: "canonical_metrics",
+    sourceStatus: selection.sourceStatus,
+    selectedFileCount: selection.files.length,
+    droppedFileCount: selection.droppedFileCount,
     scope: "structural_metadata_only",
     integrity: "best_effort_not_cryptographically_verified",
     truncated: selection.truncated,

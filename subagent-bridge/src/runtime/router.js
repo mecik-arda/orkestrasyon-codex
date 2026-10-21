@@ -15,21 +15,6 @@ function requireModel(model, target) {
   return model.trim();
 }
 
-function rejectOpenCodeGemini(model) {
-  const normalized = model.toLocaleLowerCase("en-US");
-  if (/^gemini([_-]|$)/.test(normalized) || /^google\/gemini([_-]|$)/.test(normalized)) {
-    throw new Error("Gemini models must be routed through Antigravity");
-  }
-}
-
-function requireOpenCodeEnabled(configuration) {
-  if (configuration.opencode?.enabled === false) {
-    throw Object.assign(new Error("OpenCode-backed routes are disabled by the current provider policy"), {
-      failureClass: "provider_disabled"
-    });
-  }
-}
-
 export function resolveRuntimeRoute({ target, model, profile }, configuration = {}) {
   if (ANTIGRAVITY_DISABLED_MODEL_ALIASES.has(target)) throw disabledAntigravityModelError(target);
   if (target === "profile") {
@@ -62,25 +47,6 @@ export function resolveRuntimeRoute({ target, model, profile }, configuration = 
   }
   if (target === "native_claude" || target === "claude_code") {
     return { backend: "claude_code", model: model?.trim() || "sonnet" };
-  }
-  if (target === "glm") {
-    requireOpenCodeEnabled(configuration);
-    const selectedModel = model?.trim() || "glm_5_2";
-    return { backend: "opencode", model: selectedModel, glm: true };
-  }
-  if (target === "kimi") {
-    requireOpenCodeEnabled(configuration);
-    return { backend: "opencode", model: model?.trim() || "kimi_k2_5_instruct", catalogProvider: "kimi" };
-  }
-  if (target === "qwen") {
-    requireOpenCodeEnabled(configuration);
-    return { backend: "opencode", model: model?.trim() || "qwen3_coder_480b", catalogProvider: "qwen" };
-  }
-  if (target === "opencode") {
-    const selectedModel = requireModel(model, target);
-    rejectOpenCodeGemini(selectedModel);
-    requireOpenCodeEnabled(configuration);
-    return { backend: "opencode", model: selectedModel };
   }
   throw new Error(`unsupported runtime target: ${target}`);
 }

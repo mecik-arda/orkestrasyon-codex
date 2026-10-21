@@ -32,7 +32,7 @@ function createEditAdapter(id = "fake_editor") {
 }
 
 test("execution-service: provider ortamı ilgisiz secretları aktarmaz", () => {
-  const environment = createProviderEnvironment("opencode", {
+  const environment = createProviderEnvironment("deepseek", {
     PATH: "safe-path",
     DEEPSEEK_API_KEY: "provider-token",
     UNRELATED_SECRET: "must-not-pass",
@@ -198,7 +198,7 @@ test("AC-09: delegation depth > 1 reddedilir", () => {
   const maxDepth = getMaxDelegationDepth();
   assert.equal(maxDepth, 1);
 
-  const check0 = guard.check(0, "opencode");
+  const check0 = guard.check(0, "codexDesktop");
   assert.equal(check0.allowed, true);
   assert.equal(check0.nextDepth, 1);
 

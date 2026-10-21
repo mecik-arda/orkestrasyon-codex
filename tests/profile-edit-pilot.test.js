@@ -16,7 +16,6 @@ function configuration(root, taskProfiles) {
     },
     allowedRoots: [root],
     codex: { timeoutMs: 30000, allowedModes: ["read_only", "edit"] },
-    opencode: { timeoutMs: 30000, allowedModes: ["read_only", "edit"] },
     reliability: { maxAttempts: 1, maxSchemaRepairAttempts: 0, baseRetryDelayMs: 1, maxRetryDelayMs: 2, maxTotalDurationMs: 30000, maxRetryCostUsd: 1, maxRetryCostReserveUsd: 0.1, maxUnknownAttemptCostUsd: 0.1 },
     orchestration: {
       taskProfiles,
@@ -58,14 +57,11 @@ test("PILOT-PROFILE-01: codex profil pilotu yalniz disposable alanda onizleme ur
     fs.writeFileSync(path.join(request.workspace, "src", "value.txt"), "after\n", "utf8");
     return createSuccessSubagentResult("codex", request.model, { result: "Updated selected file", durationMs: 5 });
   });
-  const opencodeAdapter = createFakeAdapter("opencode", async () => {
-    throw new Error("fallback must not run");
-  });
   const runtime = createBridgeRuntime({
     configuration: configuration(root, {
-      luna_pilot: { target: "codex", model: "gpt-5.6-luna", mode: "edit", priority: 1, cacheable: false, fallbackTargets: [{ target: "opencode", model: "deepseek/deepseek-v4-pro" }] }
+      luna_pilot: { target: "codex", model: "gpt-5.6-luna", mode: "edit", priority: 1, cacheable: false }
     }),
-    adapters: { codex: codexAdapter, opencode: opencodeAdapter },
+    adapters: { codex: codexAdapter },
     sleep: async () => {}
   });
   const result = await runtime.runProfileEditPilot(pilotInput({ profile: "luna_pilot" }), root);

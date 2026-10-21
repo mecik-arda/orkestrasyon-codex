@@ -391,7 +391,7 @@ function buildAntigravityArgs(request, config) {
     ...execArgs,
     "--output-format", request.webReadTrace === true && request.mode === "read_only" ? "stream-json" : "json",
     "--model", resolved.model,
-    "--add-dir", request.workspace
+    ...(request.noWorkspaceContext === true ? [] : ["--add-dir", request.workspace])
   ];
 
   if (sandbox) {
@@ -677,7 +677,8 @@ function probeResponse(processResult) {
   return { failureClass: null, text: extractAntigravityResult(processResult.stdout) || "" };
 }
 
-export function createAntigravityAdapter(configuration) {
+export function createAntigravityAdapter(configuration, dependencies = {}) {
+  const executeProcess = dependencies.runProcess || runProcess;
   const adapter = createAdapter("antigravity", {
     canRead: true,
     canWrite: true,
@@ -692,7 +693,7 @@ export function createAntigravityAdapter(configuration) {
       if (options.recoverStaleSettings !== false) recoverStaleSettings();
       try {
         const { executable, execArgs } = resolveAntigravityCommand(configuration);
-        const result = await runProcess(
+        const result = await executeProcess(
           executable,
           [...execArgs, "--version"],
           { timeoutMs: 15000, maxOutputBytes: 65536, env: createProviderEnvironment("antigravity") }
@@ -879,12 +880,13 @@ export function createAntigravityAdapter(configuration) {
       let providerExecutionMs = null;
       let providerStartedAt = null;
       let readOnlyStage = "mcp_preflight";
+      let pilotWorkspace = null;
 
       if (isReadOnly) {
         try {
           const mcpTimeoutMs = Math.min(15000, requestDeadlineMs - Date.now());
           if (mcpTimeoutMs <= 0) throw createSettingsLockTimeoutError();
-          const mcpStatus = await runProcess(
+          const mcpStatus = await executeProcess(
             executable,
             [...execArgs, "mcp", "list"],
             { timeoutMs: mcpTimeoutMs, maxOutputBytes: 65536, env: createProviderEnvironment("antigravity") }
@@ -951,11 +953,31 @@ export function createAntigravityAdapter(configuration) {
       }
 
       try {
+        try {
+          pilotWorkspace = request.noWorkspaceContext === true
+            ? fs.mkdtempSync(path.join(os.tmpdir(), "hades-claude-sonnet-pilot-"))
+            : null;
+        } catch (error) {
+          const permissionFailure = error?.code === "EACCES" || error?.code === "EPERM";
+          const failureClass = permissionFailure ? "permission_denied" : "process_error";
+          const providerCode = permissionFailure ? "permission_denied" : "process_error";
+          return mapCategoryToSubagentError(
+            failureClass,
+            "temporary workspace setup failed",
+            "antigravity",
+            model.model,
+            Date.now() - startedAt,
+            0,
+            null,
+            null,
+            createAttemptDiagnostics("workspace_setup", providerCode, { osErrorCode: error?.code })
+          );
+        }
         const args = [
           ...execArgs,
           "--output-format", webReadTrace ? "stream-json" : "json",
           "--model", model.model,
-          "--add-dir", request.workspace
+          ...(request.noWorkspaceContext === true ? [] : ["--add-dir", request.workspace])
         ];
 
         if (sandbox) {
@@ -983,11 +1005,11 @@ export function createAntigravityAdapter(configuration) {
           const providerTimeoutMs = isReadOnly ? requestDeadlineMs - Date.now() : timeoutMs;
           if (providerTimeoutMs <= 0) throw createSettingsLockTimeoutError();
           providerStartedAt = Date.now();
-          const processResult = await runProcess(
+          const processResult = await executeProcess(
             executable,
             args,
             {
-              cwd: request.workspace,
+            cwd: pilotWorkspace || request.workspace,
               timeoutMs: providerTimeoutMs,
               maxOutputBytes: request.maxOutputBytes || configuration?.antigravity?.maxOutputBytes || 8388608,
               env: createProviderEnvironment("antigravity"),
@@ -998,6 +1020,7 @@ export function createAntigravityAdapter(configuration) {
           providerExecutionMs = Date.now() - providerStartedAt;
 
           activeExecutionHandles.delete(request.executionId);
+          if (pilotWorkspace) fs.rmSync(pilotWorkspace, { recursive: true, force: true });
 
           const classification = classifyAntigravityError(null, processResult.code, processResult.stdout, processResult.stderr, processResult.signal);
           if (!classification.valid) {
@@ -1081,6 +1104,7 @@ export function createAntigravityAdapter(configuration) {
           });
         } catch (error) {
           activeExecutionHandles.delete(request.executionId);
+          if (pilotWorkspace) fs.rmSync(pilotWorkspace, { recursive: true, force: true });
           if (providerExecutionMs === null && providerStartedAt !== null) providerExecutionMs = Date.now() - providerStartedAt;
 
           const aborted = error.name === "AbortError" || handle.abortController.signal.aborted;
@@ -1150,6 +1174,7 @@ export function createAntigravityAdapter(configuration) {
           );
         }
       } finally {
+        if (typeof pilotWorkspace === "string" && fs.existsSync(pilotWorkspace)) fs.rmSync(pilotWorkspace, { recursive: true, force: true });
         if (readOnlyEnforcement) {
           disableReadOnlyEnforcement(readOnlyEnforcement);
         }

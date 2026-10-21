@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 const taskClassSchema = z.enum(["candidate_generation", "sourced_analysis", "strict_schema", "controlled_edit_readiness", "critical_review"]);
-const candidateSchema = z.enum(["gemini_flash", "deepseek_pro", "luna", "terra", "sol"]);
+const candidateSchema = z.enum(["gemini_flash", "deepseek_pro", "deepseek_flash", "luna", "terra", "sol"]);
 const failureClassSchema = z.enum(["none", "schema_failure", "source_mismatch", "timeout", "permission_denied", "rate_limited", "process_error"]);
 
 const taskCandidatePolicy = {
@@ -14,15 +14,15 @@ const taskCandidatePolicy = {
 
 const liveTaskCandidatePolicy = {
   candidate_generation: ["gemini_flash"],
-  sourced_analysis: ["deepseek_pro"],
-  strict_schema: ["deepseek_pro"],
-  controlled_edit_readiness: ["deepseek_pro", "luna", "terra"],
+  sourced_analysis: ["deepseek_flash"],
+  strict_schema: ["deepseek_flash"],
+  controlled_edit_readiness: ["deepseek_flash", "luna", "terra"],
   critical_review: ["sol"]
 };
 
 const liveCandidateTargets = {
   gemini_flash: "gemini_flash",
-  deepseek_pro: "opencode",
+  deepseek_flash: "deepseek",
   luna: "codex",
   terra: "codex",
   sol: "codex"
@@ -30,7 +30,7 @@ const liveCandidateTargets = {
 
 export const liveCandidateRuntimeModels = {
   gemini_flash: "gemini_flash",
-  deepseek_pro: "deepseek/deepseek-v4-pro",
+  deepseek_flash: "deepseek_flash",
   luna: "gpt-5.6-luna",
   terra: "gpt-5.6-terra",
   sol: "gpt-5.6-sol"
@@ -38,7 +38,7 @@ export const liveCandidateRuntimeModels = {
 
 export const liveCandidateModels = {
   gemini_flash: "gemini-3.8-flash-high",
-  deepseek_pro: "deepseek/deepseek-v4-pro",
+  deepseek_flash: "deepseek-flash",
   luna: "gpt-5.6-luna",
   terra: "gpt-5.6-terra",
   sol: "gpt-5.6-sol"
@@ -261,7 +261,7 @@ export const liveModelFitDatasetSchema = z.object({
     if (task.taskClass === "controlled_edit_readiness" && task.edit === undefined) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["tasks", index, "edit"], message: "controlled edit readiness requires an edit contract" });
     }
-    if (task.taskClass === "controlled_edit_readiness" && task.candidate === "deepseek_pro" && task.profile !== undefined) {
+    if (task.taskClass === "controlled_edit_readiness" && task.candidate === "deepseek_flash" && task.profile !== undefined) {
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["tasks", index, "profile"], message: "deepseek edit readiness does not use a profile" });
     }
     if (task.taskClass === "controlled_edit_readiness" && (task.candidate === "luna" || task.candidate === "terra") && task.profile === undefined) {

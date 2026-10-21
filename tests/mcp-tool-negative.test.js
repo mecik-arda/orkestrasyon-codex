@@ -4,17 +4,12 @@ import { publicToolSchemas, storeMemorySchema } from "../subagent-bridge/src/fro
 
 const wrongTypePayloads = {
   runAntigravity: { prompt: 42, model: "gemini_flash_3_8", mode: "read_only" },
+  runClaudeSonnetAcceptancePilot: { unexpected_field_for_test: 42 },
   runClaudeCode: { prompt: 42, mode: "read_only" },
-  runOpenCode: { prompt: "soru", model: 42, mode: "read_only" },
-  runSpaceBunny: { taskId: 42, role: "analyst", mode: "read_only", objective: "hedef" },
-  runSpaceBunnyEditPilot: { taskId: "t1", objective: "hedef", files: "dosya", acceptanceCriteria: ["kriter"] },
   runCodex: { prompt: false, mode: "read_only" },
   runProfile: { prompt: "soru", profile: 42 },
   runDeepSeek: { taskId: 1, role: "analyst", mode: "read_only", objective: "hedef", workspace: "ws", acceptanceCriteria: ["kriter"] },
   runDeepSeekEditPilot: { taskId: "t1", objective: "hedef", files: "dosya", acceptanceCriteria: ["kriter"] },
-  runGlm: { taskId: 1, role: "analyst", mode: "read_only", objective: "hedef", acceptanceCriteria: ["kriter"] },
-  runGlmEditPilot: { taskId: "t1", objective: "hedef", files: ["dosya"], acceptanceCriteria: "kriter" },
-  runCatalogProvider: { taskId: "t1", role: "analyst", model: 42, mode: "read_only", objective: "hedef", acceptanceCriteria: ["kriter"] },
   approvePreparedEdit: { approvalRequestId: 123 },
   prepareParallelBatch: { objective: "hedef", batchMaxReservedCostUsd: 1, tasks: "gorev-listesi" },
   startParallelBatch: { planId: 42, planHash: "b".repeat(64) },
@@ -37,6 +32,10 @@ test("MCP-NEG-01: her public MCP şeması bilinmeyen alanı reddeder", () => {
 test("MCP-NEG-02: her public MCP şeması boş girdiyi reddeder", () => {
   for (const [name, schema] of Object.entries(publicToolSchemas)) {
     const result = schema.safeParse({});
+    if (name === "runClaudeSonnetAcceptancePilot") {
+      assert.equal(result.success, true, `${name} boş girdili sabit pilot sözleşmesini reddetti`);
+      continue;
+    }
     assert.equal(result.success, false, `${name} boş girdiyi kabul etti`);
   }
 });

@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   expectedMemoryHookProjectTarget,
   canonicalizeMemoryHookPath,
@@ -14,11 +14,6 @@ import { withMetricLock } from "../subagent-bridge/src/metrics.js";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, "..");
-const bridgeHookPath = path.join(projectRoot, "subagent-bridge", "src", "services", "memory-hook-plugin.js");
-const bridgeProviderPath = path.join(projectRoot, "subagent-bridge", "src", "services", "memory-hook.js");
-const bridgeConfigPath = path.join(projectRoot, "subagent-bridge", "src", "config.js");
-const bridgeMetricsPath = path.join(projectRoot, "subagent-bridge", "src", "metrics.js");
-const bridgeCohortPath = path.join(projectRoot, "subagent-bridge", "src", "services", "memory-hook-cohort.js");
 const clientScriptPath = path.join(projectRoot, "scripts", "memory-hook-client.js");
 const maxExistingTargetBytes = 1048576;
 
@@ -26,14 +21,13 @@ const args = process.argv.slice(2);
 const apply = args.includes("--apply");
 const globalTarget = args.includes("--global");
 const clientArgument = args.find((argument) => argument.startsWith("--client="));
-const client = clientArgument ? clientArgument.slice("--client=".length) : "opencode";
+const client = clientArgument ? clientArgument.slice("--client=".length) : "codex";
 const targetArgument = args.find((argument) => argument.startsWith("--target="));
 const projectRootArgument = args.find((argument) => argument.startsWith("--project-root="));
 const cohortArgument = args.find((argument) => argument.startsWith("--cohort="));
 const requestedCohort = cohortArgument ? cohortArgument.slice("--cohort=".length) : undefined;
 const explicitProjectRoot = projectRootArgument ? path.resolve(projectRootArgument.slice("--project-root=".length)) : null;
-const opencodeDefaultProjectRoot = client === "opencode" && !globalTarget ? explicitProjectRoot || projectRoot : null;
-const projectInstall = client === "opencode" ? !globalTarget : Boolean(explicitProjectRoot);
+const projectInstall = Boolean(explicitProjectRoot);
 const registryPath = memoryHookCohortRegistryPath();
 
 function quotePosix(value) {
@@ -61,38 +55,9 @@ function selectedRuntimeCohort() {
 }
 
 function expectedGlobalTarget(client) {
-  if (client === "opencode") return path.join(os.homedir(), ".config", "opencode", "plugins", "second-brain-memory.js");
   if (client === "codex") return path.join(os.homedir(), ".codex", "hooks.json");
   if (client === "claude") return path.join(os.homedir(), ".claude", "settings.json");
   return null;
-}
-
-function openCodePluginSource(projectCohort) {
-  const requestedCohortSource = projectCohort === undefined ? "undefined" : JSON.stringify(projectCohort);
-  return [
-    `import { createMemoryHook } from ${JSON.stringify(pathToFileURL(bridgeProviderPath).href)};`,
-    `import { createSecondBrainMemoryPlugin } from ${JSON.stringify(pathToFileURL(bridgeHookPath).href)};`,
-    `import { loadConfiguration } from ${JSON.stringify(pathToFileURL(bridgeConfigPath).href)};`,
-    `import { recordMemoryHookSession } from ${JSON.stringify(pathToFileURL(bridgeMetricsPath).href)};`,
-    `import { resolveOpenCodeProjectCohort } from ${JSON.stringify(pathToFileURL(bridgeCohortPath).href)};`,
-    "",
-    "async function logPluginStatus(client, level, message, sessionIdHash) {",
-    "  const body = { service: \"second-brain-memory\", level, message };",
-    "  if (typeof sessionIdHash === \"string\") body.extra = { sessionIdHash };",
-    "  try { await client?.app?.log?.({ body }); } catch {}",
-    "}",
-    "",
-    "export const SecondBrainMemoryPlugin = async ({ client, directory, worktree }) => {",
-    '  const enabled = process.env.SUBAGENT_SECOND_BRAIN_HOOK === "1";',
-    '  await logPluginStatus(client, enabled ? "info" : "warn", enabled ? "plugin_enabled" : "plugin_disabled");',
-    "  if (!enabled) return {};",
-    `  const projectCohort = resolveOpenCodeProjectCohort({ directory, worktree, requestedCohort: ${requestedCohortSource} }).projectCohort;`,
-    "  return createSecondBrainMemoryPlugin({ runHook: createMemoryHook(), projectCohort, onDiagnostic: async ({ status, sessionIdHash }) => { await logPluginStatus(client, \"debug\", status, sessionIdHash); }, onContextInjected: async ({ sessionId, sessionIdHash, durationMs, projectCohort }) => {",
-    '    try { const result = await recordMemoryHookSession(loadConfiguration(), { client: "opencode", sessionId, durationMs, projectCohort }); await logPluginStatus(client, "debug", result.recorded ? "session_metric_recorded" : result.conflict ? "session_attribution_conflict" : "session_metric_already_recorded", sessionIdHash); } catch { await logPluginStatus(client, "error", "session_metric_write_failed", sessionIdHash); }',
-    "  } });",
-    "};",
-    ""
-  ].join("\n");
 }
 
 function codexCommand(projectCohort) {
@@ -297,14 +262,6 @@ async function updateTarget(addition) {
       result.reason = existing.reason;
       process.exitCode = 1;
       console.log(JSON.stringify(result, null, 2));
-    } else if (client === "opencode" && existing.exists) {
-      if (existing.contents !== addition) {
-        result.reason = "existing_plugin_requires_manual_merge";
-        process.exitCode = 1;
-      } else {
-        result.reason = "already_installed";
-      }
-      console.log(JSON.stringify(result, null, 2));
     } else if (client === "codex" && existing.exists) {
       let currentConfiguration;
       try {
@@ -339,7 +296,6 @@ async function updateTarget(addition) {
       }
       console.log(JSON.stringify(result, null, 2));
       if (!apply && client === "codex") console.log(`\n${addition}`);
-      if (!apply && client === "opencode") console.log(`\n${addition}`);
     }
   };
   if (!apply) return operation();
@@ -354,7 +310,7 @@ async function updateTarget(addition) {
 }
 
 function validateInstallation(targetPath) {
-  if (!["opencode", "codex", "claude"].includes(client)) return { valid: false, reason: "unsupported_client" };
+  if (!["codex", "claude"].includes(client)) return { valid: false, reason: "unsupported_client" };
   if (globalTarget && explicitProjectRoot) return { valid: false, reason: "conflicting_scope" };
   if (requestedCohort !== undefined && ![...memoryHookNamedCohorts, "unassigned"].includes(requestedCohort)) {
     return { valid: false, reason: "invalid_cohort" };
@@ -371,11 +327,11 @@ function validateInstallation(targetPath) {
     });
     if (!validation.valid) return { valid: false, reason: validation.status === "matched" ? "target_scope_invalid" : validation.status };
   }
-  if (!explicitProjectRoot && (client !== "opencode" || globalTarget)) {
+  if (!explicitProjectRoot || globalTarget) {
     const expectedTargetPath = expectedGlobalTarget(client);
     if (!expectedTargetPath || normalizedPath(targetPath) !== normalizedPath(expectedTargetPath)) return { valid: false, reason: "target_scope_invalid" };
   }
-  const targetCheck = safeTargetStatus(targetPath, explicitProjectRoot || opencodeDefaultProjectRoot);
+  const targetCheck = safeTargetStatus(targetPath, explicitProjectRoot);
   if (!targetCheck.valid) return targetCheck;
   if (explicitProjectRoot && !memoryHookNamedCohorts.includes(requestedCohort)) {
     const expectedTargetPath = expectedMemoryHookProjectTarget(explicitProjectRoot, client);
@@ -388,12 +344,9 @@ const runtimeCohort = selectedRuntimeCohort();
 let targetPath;
 try {
   if (targetArgument) targetPath = path.resolve(targetArgument.slice("--target=".length));
-  else if (client === "claude" || client === "codex") targetPath = explicitProjectRoot
+  else targetPath = explicitProjectRoot
     ? expectedMemoryHookProjectTarget(explicitProjectRoot, client)
     : expectedGlobalTarget(client);
-  else targetPath = globalTarget
-    ? expectedGlobalTarget(client)
-    : expectedMemoryHookProjectTarget(opencodeDefaultProjectRoot, client);
 } catch {
   targetPath = null;
 }
@@ -414,7 +367,7 @@ const result = {
   written: false
 };
 
-if (!["opencode", "codex", "claude"].includes(client)) {
+  if (!["codex", "claude"].includes(client)) {
   result.reason = "unsupported_client";
   process.exitCode = 1;
   console.log(JSON.stringify(result, null, 2));
@@ -440,7 +393,7 @@ if (!["opencode", "codex", "claude"].includes(client)) {
   } else {
     let addition;
     try {
-      addition = client === "opencode" ? openCodePluginSource(runtimeCohort) : JSON.stringify(codexHookConfiguration(runtimeCohort), null, 2) + "\n";
+      addition = JSON.stringify(codexHookConfiguration(runtimeCohort), null, 2) + "\n";
     } catch {
       result.reason = "unsafe_command_path";
       process.exitCode = 1;

@@ -71,8 +71,8 @@ function buildEncapsulatedPrompt(request, guidance = {}) {
   ]);
   const prompt = [
     request.mode === "edit"
-      ? "Orkestratör, OpenCode oturumunda aktif kullanılan ana modeldir. Sen yalnız trusted workspace içinde değişiklik uygulayabilen Claude Code uzman subagent'sin."
-      : "Orkestratör, OpenCode oturumunda aktif kullanılan ana modeldir. Sen salt okunur Claude Code uzman subagent'sin.",
+      ? "Codex Desktop'a bağlı Hades oturumundaki ana orkestratör kapsamı ve son kararı yönetir. Sen yalnız trusted workspace içinde değişiklik uygulayabilen Claude Code uzman subagent'sin."
+      : "Codex Desktop'a bağlı Hades oturumundaki ana orkestratör kapsamı ve son kararı yönetir. Sen salt okunur Claude Code uzman subagent'sin.",
     "Ortak başlangıç kuralları:",
     guidance.agentRules || "",
     "Subagent çalışma sınırları:",

@@ -20,12 +20,6 @@ export function isCalendarDate(value) {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-export function resolveDeepSeekModel(configuration, model = "deepseek_pro") {
-  if (model === "deepseek_pro") return configuration.deepseek.openCodeModel;
-  if (model === "deepseek_flash") return configuration.deepseek.openCodeFlashModel;
-  throw new Error(`Desteklenmeyen DeepSeek modeli: ${model}`);
-}
-
 export function buildDeepSeekPrompt(input, guidance) {
   const requiredSourceReview = input.reviewEvidenceRequirement === "required" && input.reviewScope?.length > 0;
   const skillSections = guidance.skills.flatMap((skill) => [
@@ -63,19 +57,6 @@ export function buildDeepSeekSchemaRepairPrompt(input, guidance) {
   ].join("\n");
 }
 
-export function buildDeepSeekEditPrompt(input) {
-  return [
-    `Görev: ${input.objective}`,
-    `Düzenlenebilecek dosyalar: ${input.files.join(", ")}`,
-    `Ek bağlam dosyaları: ${input.contextFiles.length > 0 ? input.contextFiles.join(", ") : "Yok"}`,
-    "Kabul kriterleri:",
-    ...input.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`),
-    "Yalnız mevcut disposable workspace içindeki dosyaları oku ve düzenle.",
-    "Shell, task, ağ, dış dizin, secret veya başka subagent kullanma.",
-    "İstenen değişiklikleri uygula ve kısa bir tamamlanma özeti döndür."
-  ].join("\n");
-}
-
 export function buildDeepSeekEditPatchPrompt(input, fileContents) {
   return [
     `Görev: ${input.objective}`,
@@ -91,7 +72,7 @@ export function buildDeepSeekEditPatchPrompt(input, fileContents) {
   ].join("\n")
 }
 
-export function normalizeOpenCodeDeepSeekResult(value) {
+export function normalizeDeepSeekResult(value) {
   return parseDeepSeekEnvelope(value);
 }
 
@@ -111,7 +92,6 @@ export async function checkDeepSeek(configuration) {
     flashModelVersionReviewAfter: DEEPSEEK_FLASH_MODEL_VERSION_REVIEW_AFTER,
     flashModelVersionSourceUrl: DEEPSEEK_FLASH_MODEL_VERSION_SOURCE_URL,
     flashModelAvailable: health.modelAvailable,
-    proModelAvailable: false
   };
 }
 
@@ -135,7 +115,7 @@ export function createDeepSeekRuntimeRequest(configuration, input, trustedWorksp
     delegationDepth: 0,
     timeoutMs: configuration.deepseek.timeoutMs,
     abortSignal,
-    resultValidator: normalizeOpenCodeDeepSeekResult,
+    resultValidator: normalizeDeepSeekResult,
     schemaRepairPrompt: buildDeepSeekSchemaRepairPrompt(input, guidance),
     maxSchemaRepairAttempts: configuration.reliability?.maxSchemaRepairAttempts
   };
@@ -143,7 +123,7 @@ export function createDeepSeekRuntimeRequest(configuration, input, trustedWorksp
 
 export function createDeepSeekCheckpoint(input, runtimeResult) {
   const normalized = runtimeResult.ok
-    ? normalizeOpenCodeDeepSeekResult(runtimeResult.result)
+    ? normalizeDeepSeekResult(runtimeResult.result)
     : { ok: false, errorClass: runtimeResult.reason || "process_exit" };
   const result = !runtimeResult.ok
     ? createFailureResult(`Subagent execution failed (${runtimeResult.reason || "process_exit"}); no structured review result was produced.`)

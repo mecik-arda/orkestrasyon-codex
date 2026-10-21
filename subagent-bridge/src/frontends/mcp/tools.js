@@ -1,8 +1,8 @@
-import crypto from "node:crypto";
 import { z } from "zod";
 import { validateWorkspace } from "../../config.js";
 import { ANTIGRAVITY_MODEL_MAP } from "../../adapters/antigravity-adapter.js";
 import { detectWebIntent } from "../../web-evidence.js";
+import { validateClaudeSonnetAcceptanceOutput } from "../../services/claude-sonnet-acceptance.js";
 import {
   approveParallelIntegrationRequestSchema,
   cancelParallelBatchRequestSchema,
@@ -12,7 +12,6 @@ import {
   startParallelBatchRequestSchema
 } from "../../schemas/parallel-batch-schema.js";
 
-const modeSchema = z.enum(["read_only", "edit"]).default("read_only");
 const readOnlyModeSchema = z.literal("read_only").default("read_only");
 const timeoutSecondsSchema = z.number().int().min(10).max(1200).optional();
 const profileSchema = z.string().min(1).max(64);
@@ -69,6 +68,7 @@ export const storeMemorySchema = z.object({
 }).strict();
 
 export const publicToolSchemas = {
+  runClaudeSonnetAcceptancePilot: z.object({}).strict(),
   runAntigravity: z.object({
     prompt: z.string().min(1).max(60000),
     model: z.enum(["gemini_flash", "gemini_flash_3_8", "claude_sonnet"]),
@@ -86,41 +86,6 @@ export const publicToolSchemas = {
     reviewEvidenceRequirement: reviewEvidenceRequirementSchema,
     reviewScope: reviewScopeSchema
   }).strict().superRefine(refineDirectReviewScope),
-  runOpenCode: z.object({
-    prompt: z.string().min(1).max(60000),
-    model: z.string().min(1),
-    mode: readOnlyModeSchema,
-    timeout_seconds: timeoutSecondsSchema,
-    reviewEvidenceRequirement: reviewEvidenceRequirementSchema,
-    reviewScope: reviewScopeSchema
-  }).strict().superRefine(refineDirectReviewScope),
-  runSpaceBunny: z.object({
-    taskId: z.string().min(1).max(120),
-    role: z.enum(["analyst", "researcher", "reviewer", "planner", "implementer"]),
-    mode: modeSchema,
-    webResearch: z.boolean().default(false),
-    objective: z.string().min(1).max(12000),
-    files: z.array(z.string().min(1).max(500)).max(100).default([]),
-    contextFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
-    acceptanceCriteria: z.array(z.string().min(1).max(4000)).max(50).default([]),
-    timeout_seconds: timeoutSecondsSchema
-  }).strict().superRefine((value, context) => {
-    if (value.mode === "edit" && value.role !== "implementer") context.addIssue({ code: z.ZodIssueCode.custom, path: ["role"], message: "edit mode requires implementer role" });
-    if (value.mode === "edit" && value.files.length === 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ["files"], message: "edit mode requires selected target files" });
-    if (value.mode === "edit" && value.acceptanceCriteria.length === 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ["acceptanceCriteria"], message: "edit mode requires acceptance criteria" });
-    if (value.mode === "read_only" && value.role === "reviewer" && value.files.length + value.contextFiles.length === 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ["files"], message: "verified reviewer tasks require an explicit source scope" });
-    if (value.webResearch && (value.mode !== "read_only" || value.role !== "researcher")) context.addIssue({ code: z.ZodIssueCode.custom, path: ["webResearch"], message: "web research requires read-only researcher role" });
-    if (value.role === "researcher" && !value.webResearch) context.addIssue({ code: z.ZodIssueCode.custom, path: ["webResearch"], message: "researcher role requires explicit webResearch opt-in" });
-  }),
-  runSpaceBunnyEditPilot: z.object({
-    taskId: z.string().min(1).max(120),
-    role: z.literal("implementer"),
-    objective: z.string().min(1).max(12000),
-    files: z.array(z.string().min(1).max(500)).min(1).max(100),
-    contextFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
-    acceptanceCriteria: z.array(z.string().min(1).max(4000)).min(1).max(50),
-    timeout_seconds: timeoutSecondsSchema
-  }).strict(),
   runCodex: z.object({
     prompt: z.string().min(1).max(60000),
     model: z.string().min(1).max(120).default("gpt-6.1-sol"),
@@ -166,44 +131,6 @@ export const publicToolSchemas = {
     timeout_seconds: timeoutSecondsSchema,
     riskSignals: riskSignalsSchema.optional()
   }).strict(),
-  runGlm: z.object({
-    taskId: z.string().min(1).max(120),
-    role: z.enum(["analyst", "researcher", "reviewer", "planner", "implementer"]),
-    model: z.enum(["glm_5_2", "glm_5_2_highspeed", "glm_5_3", "glm_5_3_flash"]).default("glm_5_2"),
-    mode: modeSchema,
-    objective: z.string().min(1).max(12000),
-    files: z.array(z.string()).max(200).default([]),
-    contextFiles: z.array(z.string()).max(100).default([]),
-    acceptanceCriteria: z.array(z.string()).min(1).max(50),
-    timeout_seconds: timeoutSecondsSchema,
-    riskSignals: riskSignalsSchema.optional()
-  }).strict().superRefine((value, context) => {
-    if (value.mode === "read_only" && value.role === "reviewer" && value.files.length + value.contextFiles.length === 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ["files"], message: "verified reviewer tasks require at least one selected source path" });
-  }),
-  runGlmEditPilot: z.object({
-    taskId: z.string().min(1).max(120),
-    model: z.enum(["glm_5_2", "glm_5_2_highspeed", "glm_5_3", "glm_5_3_flash"]).default("glm_5_2"),
-    objective: z.string().min(1).max(12000),
-    files: z.array(z.string().min(1).max(500)).min(1).max(100),
-    contextFiles: z.array(z.string().min(1).max(500)).max(100).default([]),
-    acceptanceCriteria: z.array(z.string()).min(1).max(50),
-    timeout_seconds: timeoutSecondsSchema,
-    riskSignals: riskSignalsSchema.optional()
-  }).strict(),
-  runCatalogProvider: z.object({
-    taskId: z.string().min(1).max(120),
-    role: z.enum(["analyst", "reviewer", "planner", "implementer"]),
-    model: z.string().min(1).max(120),
-    mode: modeSchema,
-    objective: z.string().min(1).max(12000),
-    files: z.array(z.string()).max(200).default([]),
-    contextFiles: z.array(z.string()).max(100).default([]),
-    acceptanceCriteria: z.array(z.string()).min(1).max(50),
-    timeout_seconds: timeoutSecondsSchema,
-    riskSignals: riskSignalsSchema.optional()
-  }).strict().superRefine((value, context) => {
-    if (value.mode === "read_only" && value.role === "reviewer" && value.files.length + value.contextFiles.length === 0) context.addIssue({ code: z.ZodIssueCode.custom, path: ["files"], message: "verified reviewer tasks require at least one selected source path" });
-  }),
   approvePreparedEdit: z.object({
     approvalRequestId: approvalRequestIdSchema
   }).strict(),
@@ -214,7 +141,7 @@ export const publicToolSchemas = {
   cancelParallelBatch: cancelParallelBatchRequestSchema,
   approveParallelIntegration: approveParallelIntegrationRequestSchema,
   checkProviderCapability: z.object({
-    provider: z.enum(["antigravity", "codex", "claude_code", "opencode"]),
+    provider: z.enum(["antigravity", "codex", "claude_code"]),
     model: z.string().min(1).max(120).optional(),
     probeWorkspaceRead: z.boolean().default(false)
   }).strict()
@@ -294,8 +221,24 @@ function requireImplementerEdit(input) {
   if (input.mode === "edit" && input.files.length === 0) throw new Error("edit mode requires selected target files");
 }
 
-export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "openCode", configuration = {} }) {
+export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "codexDesktop", configuration = {} }) {
   return {
+    async runClaudeSonnetAcceptancePilot(context = {}) {
+      if (configuration.orchestration?.acceptancePilots?.claudeSonnet?.enabled !== true) {
+        throw new Error("Claude Sonnet acceptance pilot is disabled until explicitly enabled in the active runtime configuration");
+      }
+      const input = {
+        prompt: "Calculate 6 × 7. Return the required JSON carrier with its result string containing only {\"result\":42}.",
+        model: "claude_sonnet",
+        mode: "read_only",
+        timeout_seconds: 60
+      };
+      return toMcpResult(await runtime.run(createRuntimeRequest(input, "claude_sonnet", trustedWorkspace, caller, context.signal, {
+        claudeSonnetAcceptancePilot: true,
+        maxOutputBytes: 65536,
+        resultValidator: validateClaudeSonnetAcceptanceOutput
+      })));
+    },
     async runAntigravity(input, context = {}) {
       const parsed = parse(publicToolSchemas.runAntigravity, input);
       const workspace = resolveAntigravityWorkspace(parsed, trustedWorkspace, configuration);
@@ -312,22 +255,6 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "ope
       const parsed = parse(publicToolSchemas.runClaudeCode, input);
       return toMcpResult(await runtime.run(createRuntimeRequest(parsed, "native_claude", trustedWorkspace, caller, context.signal)));
     },
-    async runOpenCode(input, context = {}) {
-      const parsed = parse(publicToolSchemas.runOpenCode, input);
-      return toMcpResult(await runtime.run(createRuntimeRequest(parsed, "opencode", trustedWorkspace, caller, context.signal)));
-    },
-    async runSpaceBunny(input, context = {}) {
-      const parsed = parse(publicToolSchemas.runSpaceBunny, input);
-      requireImplementerEdit(parsed);
-      const reviewScope = parsed.role === "reviewer" ? [...new Set([...parsed.files, ...parsed.contextFiles])] : undefined;
-      const result = await runtime.runSpaceBunny({ ...parsed, reviewScope, reviewEvidenceRequirement: parsed.role === "reviewer" ? "required" : "best_effort" }, trustedWorkspace, context.signal);
-      return { isError: result.status ? result.status !== "completed" : result.ok === false, content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
-    },
-    async runSpaceBunnyEditPilot(input, context = {}) {
-      const parsed = parse(publicToolSchemas.runSpaceBunnyEditPilot, input);
-      const result = await runtime.runSpaceBunnyEditPilot(parsed, trustedWorkspace, context.signal);
-      return { isError: result.status !== "completed", content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
-    },
     async runCodex(input, context = {}) {
       const parsed = parse(publicToolSchemas.runCodex, input);
       return toMcpResult(await runtime.run(createRuntimeRequest(parsed, "codex", trustedWorkspace, caller, context.signal)));
@@ -340,28 +267,6 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "ope
         requireImplementerEdit({ ...parsed, mode: "edit", role: "implementer" });
         const result = await runtime.runProfileEdit({ ...parsed, objective: parsed.prompt, role: "implementer", mode: "edit", model: profile.model }, trustedWorkspace, context.signal);
         return { isError: result.status !== "completed", content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
-      }
-      if (profile.target === "glm") {
-        const glmInput = {
-          taskId: parsed.taskId || crypto.randomUUID(),
-          role: profile.mode === "edit" ? "implementer" : "analyst",
-          model: profile.model,
-          mode: profile.mode,
-          objective: parsed.prompt,
-          files: parsed.files,
-          contextFiles: parsed.contextFiles,
-          reviewScope: parsed.reviewScope,
-          reviewEvidenceRequirement: parsed.reviewEvidenceRequirement,
-          acceptanceCriteria: parsed.acceptanceCriteria.length > 0 ? parsed.acceptanceCriteria : ["Return a concise, evidence-based result."],
-          riskSignals: parsed.riskSignals
-        };
-        requireImplementerEdit(glmInput);
-        const result = await runtime.runGlm(glmInput, trustedWorkspace, context.signal);
-        return {
-          isError: result.status ? result.status !== "completed" : result.ok === false,
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-          structuredContent: result
-        };
       }
       const mode = profile.mode;
       return toMcpResult(await runtime.run(createRuntimeRequest({ ...parsed, mode }, "profile", trustedWorkspace, caller, context.signal)));
@@ -385,40 +290,6 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "ope
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         structuredContent: result
       };
-    },
-    async runGlm(input, context = {}) {
-      const parsed = parse(publicToolSchemas.runGlm, input);
-      requireImplementerEdit(parsed);
-      const reviewScope = parsed.role === "reviewer" ? [...new Set([...parsed.files, ...parsed.contextFiles])] : undefined;
-      const result = await runtime.runGlm({ ...parsed, reviewScope, reviewEvidenceRequirement: parsed.role === "reviewer" ? "required" : "best_effort" }, trustedWorkspace, context.signal);
-      return {
-        isError: result.status ? result.status !== "completed" : result.ok === false,
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
-    },
-    async runGlmEditPilot(input, context = {}) {
-      const parsed = parse(publicToolSchemas.runGlmEditPilot, input);
-      const result = await runtime.runGlmEditPilot(parsed, trustedWorkspace, context.signal);
-      return {
-        isError: result.status !== "completed",
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        structuredContent: result
-      };
-    },
-    async runKimi(input, context = {}) {
-      const parsed = parse(publicToolSchemas.runCatalogProvider, input);
-      requireImplementerEdit(parsed);
-      const reviewScope = parsed.role === "reviewer" ? [...new Set([...parsed.files, ...parsed.contextFiles])] : undefined;
-      const result = await runtime.runCatalogProvider("kimi", { ...parsed, reviewScope, reviewEvidenceRequirement: parsed.role === "reviewer" ? "required" : "best_effort" }, trustedWorkspace, context.signal);
-      return { isError: result.status ? result.status !== "completed" : result.ok === false, content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
-    },
-    async runQwen(input, context = {}) {
-      const parsed = parse(publicToolSchemas.runCatalogProvider, input);
-      requireImplementerEdit(parsed);
-      const reviewScope = parsed.role === "reviewer" ? [...new Set([...parsed.files, ...parsed.contextFiles])] : undefined;
-      const result = await runtime.runCatalogProvider("qwen", { ...parsed, reviewScope, reviewEvidenceRequirement: parsed.role === "reviewer" ? "required" : "best_effort" }, trustedWorkspace, context.signal);
-      return { isError: result.status ? result.status !== "completed" : result.ok === false, content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
     },
     async approvePreparedEdit(input) {
       const parsed = parse(publicToolSchemas.approvePreparedEdit, input);
@@ -451,7 +322,7 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "ope
     },
     async checkProviderCapability(input) {
       const parsed = parse(publicToolSchemas.checkProviderCapability, input);
-      if ((parsed.provider === "antigravity" || parsed.provider === "opencode") && !parsed.model) throw new Error("capability probe requires a model for this provider");
+      if (parsed.provider === "antigravity" && !parsed.model) throw new Error("capability probe requires a model for this provider");
       if (parsed.provider === "antigravity" && !Object.hasOwn(ANTIGRAVITY_MODEL_MAP, parsed.model)) throw new Error("capability probe model is not an Antigravity alias");
       const target = parsed.provider === "antigravity" ? parsed.model : parsed.provider === "claude_code" ? "native_claude" : parsed.provider;
       const result = await runtime.probeCapability({

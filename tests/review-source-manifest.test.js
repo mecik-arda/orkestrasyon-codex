@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createDeepSeekCheckpoint } from "../subagent-bridge/src/deepseek.js";
-import { createGlmCheckpoint } from "../subagent-bridge/src/glm.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createFailureSubagentResult, createSuccessSubagentResult, requiredSourceReviewResultSchema } from "../subagent-bridge/src/schemas/core-schemas.js";
 import {
@@ -453,7 +452,7 @@ test("RSM-REVIEW-01: required review schema accepts the provider structured-resu
   assert.equal(parsed.success, true);
 });
 
-test("RSM-07: DeepSeek and GLM wrapper results retain the host review contract", () => {
+test("RSM-07: DeepSeek wrapper results retain the host review contract", () => {
   const reviewContract = {
     version: 1,
     sourceScopeStatus: "complete",
@@ -475,9 +474,7 @@ test("RSM-07: DeepSeek and GLM wrapper results retain the host review contract",
     reviewContract
   };
   const deepSeek = createDeepSeekCheckpoint({ taskId: "test", role: "reviewer", model: "deepseek_pro" }, runtimeResult);
-  const glm = createGlmCheckpoint({ taskId: "test", role: "reviewer", model: "glm_5_2" }, runtimeResult);
   assert.deepEqual(deepSeek.reviewContract, reviewContract);
-  assert.deepEqual(glm.reviewContract, reviewContract);
 });
 
 test("RSM-08: unsupported Antigravity source transport is classified as preflight without adapter execution", async (t) => {

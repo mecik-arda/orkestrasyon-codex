@@ -7,6 +7,8 @@ import { createParallelBatchRegistry } from "../subagent-bridge/src/services/par
 import { createParallelArtifactStore } from "../subagent-bridge/src/services/parallel-artifact-store.js";
 import { createWorkspaceCoordinator } from "../subagent-bridge/src/services/workspace-coordinator.js";
 import { createParallelBatchService } from "../subagent-bridge/src/services/parallel-batch.js";
+import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { createCodexAdapter } from "../subagent-bridge/src/adapters/codex-adapter.js";
 
 function createWorkspace(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "parallel-batch-"));
@@ -43,7 +45,6 @@ function createConfiguration(root, overrides = {}) {
       }
     },
     codex: { timeoutMs: 30000, maxRetries: 0 },
-    opencode: { timeoutMs: 30000, maxRetries: 0, allowedModels: ["deepseek/deepseek-v4-pro"] },
     parallelBatch: {
       enabled: true,
       editEnabled: false,
@@ -59,10 +60,7 @@ function createConfiguration(root, overrides = {}) {
       artifactTtlMs: 60000,
       maxArtifactBytes: 65536,
       maxArtifactTotalBytes: 1048576,
-      allowedTargets: ["codex", "opencode", "antigravity", "claude_code", "native_claude"],
-      opencodeOutputCapability: "unavailable",
-      opencodeOutputTokens: 2048,
-      opencodeSteps: 8,
+      allowedTargets: ["codex", "antigravity", "claude_code", "native_claude"],
       codexNetworkOffCapability: "unavailable",
       worktreeRoot: path.join(stateRoot, "worktrees"),
       verificationCommands: [],
@@ -162,7 +160,64 @@ test("V2-BATCH: prepare validates and returns a bounded plan without starting wo
   assert.equal(result.summary.tasks.length, 2);
   assert.equal(runtime.executions.length, 0);
   assert.equal(result.summary.budget.isProviderInvoice, false);
+  assert.match(result.summary.message, /task-one=8388608 \(host default\)/u);
+  assert.match(result.summary.message, /stdout\+stderr UTF-8 byte caps/u);
+  assert.match(result.summary.message, /4096 characters per task, 8192 UTF-8 bytes per batch/u);
 });
+
+for (const processCap of [4096, 262144]) {
+  test(`V2-BATCH: real runtime and fake Codex process enforce the previewed ${processCap} byte cap`, async (t) => {
+    const events = [
+      { type: "turn.started" },
+      { type: "item.completed", item: { type: "command_execution", aggregated_output: "" } },
+      { type: "item.completed", item: { type: "agent_message", text: JSON.stringify({ status: "ok", summary: "bounded review", action_required: "none" }) } },
+      { type: "turn.completed" }
+    ];
+    const script = `const events=${JSON.stringify(events)};events[1].item.aggregated_output="x".repeat(70000);process.stdout.write(events.map(event=>JSON.stringify(event)).join("\\n")+"\\n")`;
+    let bridge;
+    let executionResult;
+    const { service, configuration, runtime } = createFixture(t, {
+      configurationOverrides: { codex: { executable: process.execPath, execArgs: ["-e", script], timeoutMs: 10000, maxRetries: 1 } },
+      handler: async (request) => {
+        executionResult = await bridge.run(request);
+        return executionResult;
+      }
+    });
+    bridge = createBridgeRuntime({ configuration, adapters: { codex: createCodexAdapter(configuration) }, sleep: async () => {} });
+    const prepared = await service.prepare({
+      objective: "Inspect the selected fixture",
+      batchMaxReservedCostUsd: 1,
+      tasks: [{ ...baseTask("bounded-review"), model: "gpt-6.1-sol", maxOutputBytes: processCap }]
+    });
+    assert.equal(prepared.ok, true);
+    assert.match(prepared.summary.message, new RegExp(`bounded-review=${processCap} \\(task\\)`, "u"));
+    assert.equal(runtime.executions.length, 0);
+    const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
+    const summary = await waitForBatch(service, started.batchId, [processCap === 4096 ? "failed" : "result_ready"]);
+    assert.equal(runtime.executions.length, 1);
+    assert.equal(runtime.executions[0].maxOutputBytes, processCap);
+    const detail = await service.getTaskDetail({ batchId: started.batchId, taskId: "bounded-review", detailRef: summary.tasks[0].detailRef });
+    const payload = JSON.parse(detail.page.content);
+    if (processCap === 4096) {
+      assert.equal(summary.tasks[0].summary, null);
+      assert.equal(summary.tasks[0].failureClass, "output_limit");
+      assert.match(summary.message, /outputLimitScope\/Stream/u);
+      assert.equal(payload.diagnostics.outputLimitBytes, processCap);
+      assert.equal(payload.diagnostics.outputLimitScope, "process");
+      assert.equal(payload.diagnostics.outputLimitStream, "stdout");
+      assert.equal(payload.diagnostics.outputBytesObserved > processCap, true);
+      assert.equal(payload.diagnostics.acceptedStdoutBytes + payload.diagnostics.acceptedStderrBytes + payload.diagnostics.rejectedChunkBytes, payload.diagnostics.outputBytesObserved);
+      assert.equal(executionResult.metrics.adapterAttempts, 1);
+      assert.equal(executionResult.metrics.retries, 0);
+      assert.equal(executionResult.metrics.attempts.length, 1);
+      assert.equal(executionResult.metrics.attempts[0].retryDecision, "stop");
+    } else {
+      assert.equal(summary.tasks[0].summary, "bounded review");
+      assert.equal(summary.tasks[0].summaryStatus, "full");
+      assert.equal(summary.tasks[0].failureClass, null);
+    }
+  });
+}
 
 test("V2-BATCH: start runs the single wave, projects bounded summaries and settles known cost", async (t) => {
   const { service } = createFixture(t);
@@ -1029,6 +1084,7 @@ test("V2-BATCH: process byte-limit failures are classified as output_limit", asy
   const summary = await waitForBatch(service, started.batchId, ["failed"]);
   assert.equal(summary.tasks[0].failureClass, "output_limit");
   assert.equal(summary.tasks[0].summaryStatus, "output_limit");
+  assert.match(summary.message, /Do not repeat the unchanged plan/u);
   const detail = await service.getTaskDetail({ batchId: started.batchId, taskId: summary.tasks[0].taskId, detailRef: summary.tasks[0].detailRef });
   const detailPayload = JSON.parse(detail.page.content);
   assert.equal(detailPayload.diagnostics.outputLimitBytes, 1024);
@@ -1046,6 +1102,22 @@ test("V2-BATCH: start requires a prepared plan and the exact plan hash", async (
   assert.equal(wrongHash.ok, false);
   assert.equal(wrongHash.reason, "plan_hash_mismatch");
   assert.equal(runtime.executions.length, 0);
+});
+
+test("V2-BATCH: expired plan is marked expired before any worker execution", async (t) => {
+  const { service, registry, runtime } = createFixture(t, {
+    configurationOverrides: { parallelBatch: { planTtlMs: 10 } }
+  });
+  const prepared = await service.prepare({ objective: "x", batchMaxReservedCostUsd: 1, tasks: [baseTask("expired-plan-task")] });
+  await new Promise((resolve) => setTimeout(resolve, Math.max(0, Date.parse(prepared.summary.expiresAt) - Date.now() + 10)));
+
+  const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
+
+  assert.equal(started.ok, false);
+  assert.equal(started.reason, "plan_expired");
+  assert.equal(runtime.executions.length, 0);
+  assert.equal((await registry.getPlan(prepared.planId)).status, "expired");
+  assert.deepEqual(await registry.listBatches(), []);
 });
 
 test("V2-BATCH: oversized summaries are truncated with an opaque detail reference", async (t) => {
@@ -1368,28 +1440,6 @@ test("V2-BATCH: task token limits fail closed when the resolved route lacks a pr
   assert.equal(outputTokenLimit.reason, "output_token_limit_unsupported");
 });
 
-test("V2-BATCH: proven OpenCode route receives its task output token cap", async (t) => {
-  const { service, runtime } = createFixture(t, {
-    configurationOverrides: {
-      parallelBatch: { opencodeOutputCapability: "available", opencodeOutputTokens: 1024 }
-    }
-  });
-  const prepared = await service.prepare({
-    objective: "Inspect a file with a bounded model response",
-    batchMaxReservedCostUsd: 1,
-    tasks: [{
-      ...baseTask("open-code-output-cap"),
-      target: "opencode",
-      model: "deepseek/deepseek-v4-pro",
-      maxOutputTokens: 512
-    }]
-  });
-  assert.equal(prepared.ok, true, JSON.stringify(prepared));
-  const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
-  await waitForBatch(service, started.batchId, ["result_ready"]);
-  assert.equal(runtime.executions[0].maxOutputTokens, 512);
-});
-
 test("V2-BATCH: per-task and default output bytes stay under the host ceiling", async (t) => {
   const { service, runtime } = createFixture(t, {
     configurationOverrides: { parallelBatch: { maxOutputBytesPerTask: 4096 } }
@@ -1408,6 +1458,7 @@ test("V2-BATCH: per-task and default output bytes stay under the host ceiling", 
     tasks: [{ ...baseTask("bounded-output"), maxOutputBytes: 2048 }]
   });
   assert.equal(prepared.ok, true);
+  assert.match(prepared.summary.message, /bounded-output=2048 \(task\)/u);
   const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
   await waitForBatch(service, started.batchId, ["result_ready"]);
   assert.equal(runtime.executions[0].maxOutputBytes, 2048);
@@ -1418,6 +1469,7 @@ test("V2-BATCH: per-task and default output bytes stay under the host ceiling", 
     tasks: [baseTask("host-default-output")]
   });
   assert.equal(defaultLimited.ok, true);
+  assert.match(defaultLimited.summary.message, /host-default-output=4096 \(host default\)/u);
   const defaultLimitedStart = await service.start({ planId: defaultLimited.planId, planHash: defaultLimited.planHash });
   await waitForBatch(service, defaultLimitedStart.batchId, ["result_ready"]);
   assert.equal(runtime.executions[1].maxOutputBytes, 4096);
@@ -1489,17 +1541,6 @@ test("V2-BATCH: unknown dependencies are rejected", async (t) => {
   });
   assert.equal(result.ok, false);
   assert.equal(result.reason, "dependency_unknown");
-});
-
-test("V2-BATCH: opencode route is fail-closed until output capability is proven", async (t) => {
-  const opencodeTask = { taskId: "task-one", role: "analyst", mode: "read_only", target: "opencode", model: "deepseek/deepseek-v4-pro", objective: "Analyze", readablePaths: ["src/a.txt"] };
-  const { service } = createFixture(t);
-  const rejected = await service.prepare({ objective: "x", batchMaxReservedCostUsd: 1, tasks: [opencodeTask] });
-  assert.equal(rejected.ok, false);
-  assert.equal(rejected.reason, "route_output_capability_unavailable");
-  const { service: proven } = createFixture(t, { configurationOverrides: { parallelBatch: { opencodeOutputCapability: "available" } } });
-  const accepted = await proven.prepare({ objective: "x", batchMaxReservedCostUsd: 1, tasks: [opencodeTask] });
-  assert.equal(accepted.ok, true);
 });
 
 test("V2-BATCH: opt-in terminal watcher launches once after batch acceptance", async (t) => {

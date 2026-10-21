@@ -22,22 +22,15 @@ function createAdmission(t, options = {}) {
   };
 }
 
-test("PROVIDER-ADMISSION-01: aynı profile ve farklı model rotaları ortak provider grubuna yönlenir", () => {
-  assert.equal(resolveProviderAdmissionProfile({ backend: "opencode", model: "deepseek/deepseek-v4-pro" }), "opencode:deepseek");
-  assert.equal(resolveProviderAdmissionProfile({ backend: "opencode", model: "deepseek/deepseek-flash" }), "opencode:deepseek");
-  assert.equal(resolveProviderAdmissionProfile({ backend: "opencode", model: "deepseek_pro" }), "opencode:deepseek");
-  assert.equal(resolveProviderAdmissionProfile({ backend: "opencode", model: "deepseek_pro" }, {
-    profileByRoute: { "opencode:deepseek_pro": "shared-primary" }
-  }), "shared-primary");
+test("PROVIDER-ADMISSION-01: doğrudan provider rotaları model kimliğini koruyarak gruplandırılır", () => {
+  assert.equal(resolveProviderAdmissionProfile({ backend: "deepseek", model: "deepseek-flash" }), "deepseek:deepseek-flash");
   assert.equal(resolveProviderAdmissionProfile({ backend: "codex", model: "gpt-6.1-sol" }), "codex:codex");
-  assert.equal(resolveProviderAdmissionProfile({ backend: "opencode", model: "deepseek/deepseek-v4-pro" }, {
-    profileByRoute: { "opencode:deepseek/deepseek-v4-pro": "shared-primary" }
-  }), "shared-primary");
+  assert.equal(resolveProviderAdmissionProfile({ backend: "unknown-provider", model: "legacy-model" }), "unknown-provider:unknown-provider");
 });
 
 test("PROVIDER-ADMISSION-02: direct/service örnekleri aynı profile limitini paylaşır", async (t) => {
   const admission = createAdmission(t, { defaultConcurrency: 2, maxQueuedPerProfile: 10 });
-  const profileId = "opencode:deepseek";
+  const profileId = "deepseek:deepseek-flash";
   const firstPromise = admission.first.acquire(profileId, "direct-one", { timeoutMs: 1000 });
   const secondPromise = admission.second.acquire(profileId, "batch-two", { timeoutMs: 1000 });
   const first = await firstPromise;

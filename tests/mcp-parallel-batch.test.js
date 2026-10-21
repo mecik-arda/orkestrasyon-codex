@@ -119,6 +119,31 @@ test("V2-MCP: server construction honors the parallel batch gate", () => {
   }));
 });
 
+test("V2-MCP: published process-output contract distinguishes raw bytes from final summaries", async () => {
+  const server = createSubagentMcpServer({
+    runtime: createStubRuntime(),
+    configuration: { parallelBatch: { enabled: true } },
+    trustedWorkspace: process.cwd()
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "batch-output-contract-test", version: "1.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const { tools } = await client.listTools();
+    const prepare = tools.find((tool) => tool.name === "prepare_parallel_batch");
+    const outputCap = prepare.inputSchema.properties.tasks.items.properties.maxOutputBytes;
+    assert.equal(outputCap.minimum, 1024);
+    assert.equal(outputCap.maximum, 8388608);
+    assert.match(outputCap.description, /stdout plus stderr UTF-8 byte cap/u);
+    assert.match(outputCap.description, /not the final answer or public summary/u);
+    assert.match(prepare.description, /maxOutputBytes ham stdout\+stderr/u);
+    assert.match(prepare.description, /output_limit/u);
+  } finally {
+    await client.close();
+  }
+});
+
 async function listRegisteredToolNames(server) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "parallel-batch-registration-test", version: "1.0.0" });

@@ -131,10 +131,16 @@ test("RUNS-04: global reader boş dizinde yazma yapmaz ve kaynak sınırını bi
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const config = configuration(root);
   const metricsDirectory = path.join(config.statePaths.logs, "metrics");
-  assert.equal(readRecentRuns(config).runCount, 0);
+  const missing = readRecentRuns(config);
+  assert.equal(missing.runCount, 0);
+  assert.equal(missing.sourceClass, "canonical_metrics");
+  assert.equal(missing.sourceStatus, "missing");
+  assert.equal(missing.selectedFileCount, 0);
+  assert.equal(missing.droppedFileCount, 0);
   assert.equal(fs.existsSync(metricsDirectory), false);
   writeJsonl(path.join(metricsDirectory, "codex-runs.jsonl"), [executionRecord()]);
   const result = readRecentRuns(config, { now: new Date("2026-08-11T13:00:00.000Z"), maxBytes: 1 });
+  assert.equal(result.sourceStatus, "available");
   assert.equal(result.truncated, true);
   assert.equal(result.runCount, 0);
 });
@@ -148,7 +154,10 @@ test("RUNS-05: hard-link metrics dosyası okunmaz", (t) => {
   fs.mkdirSync(metricsDirectory, { recursive: true });
   fs.writeFileSync(sourcePath, `${JSON.stringify(executionRecord())}\n`, "utf8");
   fs.linkSync(sourcePath, path.join(metricsDirectory, "codex-runs.jsonl"));
-  assert.equal(readRecentRuns(config, { now: new Date("2026-08-11T13:00:00.000Z") }).runCount, 0);
+  const result = readRecentRuns(config, { now: new Date("2026-08-11T13:00:00.000Z") });
+  assert.equal(result.runCount, 0);
+  assert.equal(result.sourceStatus, "available");
+  assert.equal(result.droppedFileCount, 1);
 });
 
 test("RUNS-06: mirror enable açık onay, Git ignore ve machine binding uygular", async (t) => {

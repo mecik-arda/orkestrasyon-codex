@@ -67,9 +67,7 @@ function createConfiguration(packageRoot, stateRoot) {
     antigravity: { timeoutMs: 30000, maxRetries: 1 },
     codex: { timeoutMs: 30000, maxRetries: 1 },
     claude_code: { timeoutMs: 30000, maxRetries: 1 },
-    opencode: { timeoutMs: 30000, maxRetries: 1, allowedModels: ["deepseek/deepseek-v4-pro"] },
     deepseek: {
-      openCodeModel: "deepseek/deepseek-v4-pro",
       openCodeFlashModel: "deepseek/deepseek-v4-flash",
       apiBaseUrl: "https://api.deepseek.com",
       apiModel: "deepseek-flash",
@@ -92,14 +90,7 @@ test("P0-ROUTE: canonical targets resolve to one backend", () => {
   assert.deepEqual(resolveRuntimeRoute({ target: "codex" }), { backend: "codex", model: "default" });
   assert.deepEqual(resolveRuntimeRoute({ target: "native_claude", model: "sonnet" }), { backend: "claude_code", model: "sonnet" });
   assert.deepEqual(resolveRuntimeRoute({ target: "native_claude" }), { backend: "claude_code", model: "sonnet" });
-  assert.deepEqual(resolveRuntimeRoute({ target: "opencode", model: "deepseek/deepseek-chat" }), { backend: "opencode", model: "deepseek/deepseek-chat" });
-  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "google/gemini-3-pro" }), /Antigravity/);
-  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini_flash_3_7" }), /Antigravity/);
-  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini-3.7-flash-high" }), /Antigravity/);
-  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini-3.8-flash-high" }), /Antigravity/);
-  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "gemini" }), /Antigravity/);
-  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "google/gemini" }), /Antigravity/);
-  assert.throws(() => resolveRuntimeRoute({ target: "opencode", model: "google/gemini_flash" }), /Antigravity/);
+  for (const target of ["opencode", "glm", "kimi", "qwen"]) assert.throws(() => resolveRuntimeRoute({ target } ), /unsupported runtime target/u);
   assert.equal(publicToolSchemas.runAntigravity.safeParse({ prompt: "inspect", model: "gemini_pro", mode: "read_only" }).success, false);
   assert.equal(publicToolSchemas.runAntigravity.safeParse({ prompt: "inspect", model: "gemini_flash_3_7", mode: "read_only" }).success, false);
   assert.equal(publicToolSchemas.runAntigravity.safeParse({ prompt: "inspect", model: "gemini_flash_3_8", mode: "read_only" }).success, true);
@@ -150,14 +141,10 @@ test("P0-PUBLIC: bridge-owned metadata is rejected by every public schema", () =
   const schemaCases = {
     runAntigravity: { input: { prompt: "inspect", model: "gemini_flash_3_8", mode: "read_only" }, allowedBridgeFields: ["workspace"] },
     runClaudeCode: { input: { prompt: "inspect", mode: "read_only" } },
-    runOpenCode: { input: { prompt: "inspect", model: "deepseek/deepseek-v4-pro", mode: "read_only" } },
     runCodex: { input: { prompt: "inspect", mode: "read_only" } },
     runProfile: { input: { prompt: "inspect", profile: "quick_read" } },
     runDeepSeek: { input: { taskId: "task", role: "analyst", mode: "read_only", objective: "inspect", workspace: "C:\\trusted", acceptanceCriteria: ["report"] }, allowedBridgeFields: ["workspace"] },
     runDeepSeekEditPilot: { input: { taskId: "task", objective: "change", files: ["src/value.txt"], acceptanceCriteria: ["changed"] } },
-    runGlm: { input: { taskId: "task", role: "analyst", mode: "read_only", objective: "inspect", acceptanceCriteria: ["report"] } },
-    runGlmEditPilot: { input: { taskId: "task", objective: "change", files: ["src/value.txt"], acceptanceCriteria: ["changed"] } },
-    runCatalogProvider: { input: { taskId: "task", role: "analyst", model: "kimi_k2_5_instruct", mode: "read_only", objective: "inspect", acceptanceCriteria: ["report"] } }
   };
   const bridgeFields = ["workspace", "cwd", "worktree", "projectRoot", "trustedWorkspace", "executable", "execArgs", "sandbox", "delegationDepth", "executionId", "caller", "statePaths"];
   for (const [schemaName, { input, allowedBridgeFields = [] }] of Object.entries(schemaCases)) {
@@ -272,7 +259,7 @@ test("P0-ANTIGRAVITY-EVIDENCE: genel Antigravity aracı yalnız salt okunur ça�
 test("P0-GENERIC-EDIT: genel provider araçları edit modunu runtime'a iletmez", async () => {
   const handlers = createMcpToolHandlers({ runtime: { async run() { throw new Error("unexpected execution"); } }, trustedWorkspace: "C:\\trusted" });
   await assert.rejects(() => handlers.runCodex({ prompt: "change", mode: "edit" }), /expected "read_only"/);
-  await assert.rejects(() => handlers.runOpenCode({ prompt: "change", model: "deepseek/deepseek-v4-pro", mode: "edit" }), /expected "read_only"/);
+  assert.equal(Object.hasOwn(publicToolSchemas, "runOpenCode"), false);
 });
 
 test("P0-ANTIGRAVITY-WORKSPACE: Gemini 3.8 Flash vault workspace'ini provider öncesi reddeder", async (t) => {
@@ -381,51 +368,6 @@ test("P0-RETRY: read-only transient failure retries and edit failure does not", 
   assert.equal(editResult.ok, false);
   assert.equal(editAttempts, 1);
   assert.equal(editResult.reason, "mutation_state_unknown");
-});
-
-test("P0-EMPTY-OUTPUT-RETRY: OpenCode read-only empty result retries once and preserves both attempts", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-empty-output-retry-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const configuration = createConfiguration(root, root);
-  configuration.opencode.allowedModels = ["deepseek/deepseek-flash"];
-  configuration.reliability = {
-    maxAttempts: 5,
-    maxTotalDurationMs: 60000,
-    maxRetryCostUsd: 1,
-    maxRetryCostReserveUsd: 0.1,
-    maxUnknownAttemptCostUsd: 0.1,
-    baseRetryDelayMs: 0,
-    maxRetryDelayMs: 0
-  };
-  let attempts = 0;
-  const opencode = createFakeAdapter("opencode", async (request) => {
-    attempts += 1;
-    if (attempts === 1) {
-      return {
-        ...failureResult("opencode", request.model, "no usable output", "empty_output"),
-        metrics: { retries: 0, totalCostUsd: 0.001 }
-      };
-    }
-    return successResult("opencode", request.model, "recovered final response");
-  });
-  const runtime = createBridgeRuntime({ configuration, adapters: { opencode }, sleep: async () => {} });
-  const result = await runtime.run({
-    target: "opencode",
-    model: "deepseek/deepseek-flash",
-    prompt: "inspect",
-    mode: "read_only",
-    trustedWorkspace: root,
-    caller: "parallel_batch",
-    delegationDepth: 0
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(result.result, "recovered final response");
-  assert.equal(attempts, 2);
-  assert.equal(result.metrics.retries, 1);
-  assert.deepEqual(result.metrics.attempts.map((attempt) => attempt.failureClass), ["empty_output", null]);
-  assert.deepEqual(result.metrics.attempts.map((attempt) => attempt.retryDecision), ["retry", "not_applicable"]);
-  assert.equal(result.metrics.totalCostUsd, 0.001);
 });
 
 test("P0-ANTIGRAVITY-RETRY: Antigravity retry backoff beklemesini uygular", async (t) => {
@@ -853,7 +795,7 @@ test("P0-HEALTH: runtime returns canonical adapter health", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-health-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const adapters = {};
-  for (const id of ["antigravity", "codex", "claude_code", "opencode"]) {
+  for (const id of ["antigravity", "codex", "claude_code"]) {
     const adapter = createFakeAdapter(id, async () => successResult(id, "test"));
     adapter.healthCheck = async () => ({ installed: true, version: "1.0", authValid: true, executable: id });
     adapters[id] = adapter;
@@ -861,11 +803,11 @@ test("P0-HEALTH: runtime returns canonical adapter health", async (t) => {
   const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters });
   const health = await runtime.health();
   await runtime.health();
-  assert.deepEqual(Object.keys(health.adapters).sort(), ["antigravity", "claude_code", "codex", "opencode"]);
+  assert.deepEqual(Object.keys(health.adapters).sort(), ["antigravity", "claude_code", "codex"]);
   assert.ok(Object.values(health.adapters).every((entry) => entry.health.installed));
   assert.ok(Object.hasOwn(health.circuits, "antigravity"));
   assert.ok(Object.hasOwn(health.circuits, "antigravity:gemini-3.8-flash-high"));
-  assert.ok(Object.hasOwn(health.circuits, "opencode:deepseek/deepseek-v4-pro"));
+  assert.equal(Object.keys(health.circuits).some((key) => key.startsWith("opencode:")), false);
   const healthMetricsPath = path.join(root, "logs", "metrics", "bridge-health-runs.jsonl");
   assert.equal(fs.readFileSync(healthMetricsPath, "utf8").trim().split("\n").length, 1);
 });
@@ -883,7 +825,7 @@ test("P0-COST-VISIBILITY: bütçe görünümü açık veya kapalı devreyi rapor
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cost-visibility-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const adapters = {};
-  for (const id of ["antigravity", "codex", "claude_code", "opencode"]) {
+  for (const id of ["antigravity", "codex", "claude_code"]) {
     const adapter = createFakeAdapter(id, async () => successResult(id, "test"));
     adapter.healthCheck = async () => ({ installed: true, version: "1.0", authValid: true, executable: id });
     adapters[id] = adapter;

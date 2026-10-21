@@ -20,7 +20,7 @@ function Replace-InFile([string]$Path, [string]$OldValue, [string]$NewValue) {
     $content = Read-TextFile $Path
     if ($content.Contains($OldValue)) {
         Write-TextFile $Path $content.Replace($OldValue, $NewValue)
-        Write-Host "sanitize: $($Path.Substring($Staging.Length + 1))  [$OldValue] -> [$NewValue]"
+        Write-Host "sanitize: $($Path.Substring($Staging.Length + 1))"
     }
 }
 
@@ -42,20 +42,12 @@ function Copy-FreshStaging {
         Remove-Item -LiteralPath $Staging -Recurse -Force
     }
     New-Item -ItemType Directory -Path $Staging -Force | Out-Null
-    $generatedPluginsDirectory = Join-Path $Source ".opencode\plugins"
     robocopy $Source $Staging /E /NFL /NDL /NJH /NJS /NP `
-        /XD .git node_modules memory logs state cache pilot-workspace .hades .codex $generatedPluginsDirectory `
+        /XD .git node_modules memory logs state cache pilot-workspace .hades .codex `
         /XF .git .env *.log KURULUM_RAPORU.md export-public.ps1 export-public.test.js > $null
     if ($LASTEXITCODE -ge 8) { throw "robocopy basarisiz oldu (kod $LASTEXITCODE)" }
     if (Test-Path -LiteralPath $gitBackup) {
         Move-Item -LiteralPath $gitBackup -Destination $gitDirectory -Force
-    }
-}
-
-function Rename-ExampleFiles {
-    $opencodeExample = Join-Path $Staging "opencode.jsonc.example"
-    if ((Test-Path -LiteralPath (Join-Path $Staging "opencode.jsonc")) -and -not (Test-Path -LiteralPath $opencodeExample)) {
-        Move-Item -LiteralPath (Join-Path $Staging "opencode.jsonc") -Destination $opencodeExample
     }
 }
 
@@ -98,7 +90,6 @@ function Apply-SanitizeRules {
     $escaped = @(
         @{ File = "config\agents.json"; Old = "C:\\nvm4w\\nodejs\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"; New = "claude" },
         @{ File = "config\agents.json"; Old = "C:\\Users\\user\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe"; New = "codex" },
-        @{ File = "config\agents.json"; Old = "C:\\nvm4w\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe"; New = "opencode" },
         @{ File = "config\agents.json"; Old = "C:\\Users\\user\\AppData\\Local\\agy\\bin\\agy.exe"; New = "agy" },
         @{ File = "config\policy.json"; Old = "C:\\Users\\user\\Desktop\\Yazılım_Siber"; New = "C:\\Users\\ornek\\Desktop\\Projeler" },
         @{ File = "tests\config.test.js"; Old = "C:\\Users\\user\\Desktop\\Yazılım_Siber"; New = "C:\\Users\\ornek\\Desktop\\Projeler" },
@@ -106,11 +97,7 @@ function Apply-SanitizeRules {
         @{ File = "scripts\pilot-mcp.js"; Old = 'const projectRoot = "C:\\Users\\user\\Desktop\\Yazılım_Siber\\orkestrasyon";'; New = "const projectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT || process.cwd();" },
         @{ File = "scripts\pilot-mcp.js"; Old = 'command: "C:\\nvm4w\\nodejs\\node.exe",'; New = "command: process.execPath," },
         @{ File = "scripts\start-codex.ps1"; Old = '& "C:\Users\user\.codex\.sandbox-bin\codex.exe"'; New = "& codex" },
-        @{ File = "scripts\smoke-mcp.js"; Old = '"C:\\nvm4w\\nodejs\\node.exe"'; New = "process.execPath" },
-        @{ File = "tests\glm-subagent.test.js"; Old = '"C:\\nvm4w\\nodejs\\node_modules\\opencode-ai\\bin\\opencode.exe"'; New = '"opencode"' },
-        @{ File = "opencode.jsonc.example"; Old = "C:\\nvm4w\\nodejs\\node.exe"; New = "node" },
-        @{ File = "opencode.jsonc.example"; Old = "C:\\Users\\user\\Desktop\\Yazılım_Siber\\orkestrasyon"; New = "<repo-root>" },
-        @{ File = "opencode.jsonc.example"; Old = "C:\\Users\\user\\.config\\subagent-bridge\\config.json"; New = "~/.config/subagent-bridge/config.json" }
+        @{ File = "scripts\smoke-mcp.js"; Old = '"C:\\nvm4w\\nodejs\\node.exe"'; New = "process.execPath" }
     )
     foreach ($rule in $escaped) {
         Replace-InFile (Join-Path $Staging $rule.File) $rule.Old $rule.New
@@ -179,7 +166,6 @@ function Invoke-VerificationScan {
 
 if (-not $ScanOnly) {
     Copy-FreshStaging
-    Rename-ExampleFiles
     Curate-PublicDocs
     Apply-SanitizeRules
 }

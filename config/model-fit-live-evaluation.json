@@ -30,9 +30,9 @@
     {
       "id": "live-sourced-analysis",
       "taskClass": "sourced_analysis",
-      "candidate": "deepseek_pro",
-      "target": "opencode",
-      "model": "deepseek/deepseek-v4-pro",
+      "candidate": "deepseek_flash",
+      "target": "deepseek",
+      "model": "deepseek_flash",
       "prompt": "Return exactly one JSON object with keys status (the string completed) and sourceMarker (the string LIVE-SOURCE-MARKER-9). Include no extra keys and no prose.",
       "expected": {
         "json": true,
@@ -51,9 +51,9 @@
     {
       "id": "live-strict-schema",
       "taskClass": "strict_schema",
-      "candidate": "deepseek_pro",
-      "target": "opencode",
-      "model": "deepseek/deepseek-v4-pro",
+      "candidate": "deepseek_flash",
+      "target": "deepseek",
+      "model": "deepseek_flash",
       "prompt": "Return exactly one JSON object with keys status (the string completed), summary (short string), findings (empty array), proposed_steps (empty array), risks (empty array), questions (empty array), requires_human_approval (boolean false). Use no extra keys, no Markdown, no code fences, and no prose outside JSON.",
       "expected": {
         "json": true,
@@ -76,9 +76,9 @@
     {
       "id": "live-edit-readiness-deepseek",
       "taskClass": "controlled_edit_readiness",
-      "candidate": "deepseek_pro",
-      "target": "opencode",
-      "model": "deepseek/deepseek-v4-pro",
+      "candidate": "deepseek_flash",
+      "target": "deepseek",
+      "model": "deepseek_flash",
       "prompt": "Seçili dosyaya tam olarak şu satırı ekle: export function pilotMarker() { return 1; } Mevcut fonksiyonları değiştirme.",
       "edit": {
         "files": ["pilot-workspace/src/sum.js"],

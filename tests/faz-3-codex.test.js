@@ -185,6 +185,104 @@ test("CODEX-OUTPUT-LIMIT-DIAGNOSTICS: actual collector overflow metadata is reta
   assert.equal(validateSubagentResult(result).success, true);
 });
 
+function createLargeCodexJsonlFixture(outputLength) {
+  const events = [
+    { type: "thread.started" },
+    { type: "turn.started" },
+    { type: "item.completed", item: { type: "command_execution", aggregated_output: "x".repeat(outputLength) } },
+    { type: "item.completed", item: { type: "agent_message", text: "review complete" } },
+    { type: "turn.completed" }
+  ];
+  const jsonl = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  const fixtureEvents = events.map((event) => event.type === "item.completed" && event.item.type === "command_execution"
+    ? { ...event, item: { ...event.item, aggregated_output: "" } }
+    : event);
+  const script = `const events=${JSON.stringify(fixtureEvents)};events[2].item.aggregated_output="x".repeat(${outputLength});process.stdout.write(events.map(event=>JSON.stringify(event)).join("\\n")+"\\n")`;
+  return { jsonl, script };
+}
+
+test("CODEX-BATCH-PROCESS-LIMIT: large JSONL event is bounded independently of the short final answer", async () => {
+  const fixture = createLargeCodexJsonlFixture(70000);
+  const adapter = createCodexAdapter({ codex: { executable: process.execPath, execArgs: ["-e", fixture.script] } });
+  const result = await adapter.execute({
+    executionId: "codex-batch-process-limit",
+    backend: "codex",
+    prompt: "inspect selected files",
+    model: "gpt-6.1-sol",
+    mode: "read_only",
+    workspace: process.cwd(),
+    delegationDepth: 0,
+    caller: "parallel_batch",
+    timeoutMs: 5000,
+    maxOutputBytes: 262144
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result, "review complete");
+  assert.equal(Buffer.byteLength(fixture.jsonl, "utf8") > 4096, true);
+  assert.equal(Buffer.byteLength(fixture.jsonl, "utf8") < 262144, true);
+  assert.equal(validateSubagentResult(result).success, true);
+});
+
+test("CODEX-BATCH-PROCESS-LIMIT: exceeding the process cap rejects the event stream with byte diagnostics", async () => {
+  const fixture = createLargeCodexJsonlFixture(70000);
+  const adapter = createCodexAdapter({ codex: { executable: process.execPath, execArgs: ["-e", fixture.script] } });
+  const result = await adapter.execute({
+    executionId: "codex-batch-process-overflow",
+    backend: "codex",
+    prompt: "inspect selected files",
+    model: "gpt-6.1-sol",
+    mode: "read_only",
+    workspace: process.cwd(),
+    delegationDepth: 0,
+    caller: "parallel_batch",
+    timeoutMs: 5000,
+    maxOutputBytes: 4096
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "output_limit");
+  assert.equal(result.result, null);
+  assert.equal(result.metrics.diagnostics.outputLimitBytes, 4096);
+  assert.equal(result.metrics.diagnostics.outputLimitScope, "process");
+  assert.equal(result.metrics.diagnostics.outputLimitStream, "stdout");
+  assert.equal(result.metrics.diagnostics.outputBytesObserved > 4096, true);
+  assert.equal(result.metrics.diagnostics.rejectedChunkBytes > 4096, true);
+  assert.equal(result.metrics.diagnostics.acceptedStdoutBytes + result.metrics.diagnostics.rejectedChunkBytes, result.metrics.diagnostics.outputBytesObserved);
+  assert.equal(validateSubagentResult(result).success, true);
+});
+
+test("CODEX-BATCH-UTF8: split multibyte JSONL records survive the real process adapter path", async () => {
+  const events = [
+    { type: "thread.started" },
+    { type: "turn.started" },
+    { type: "item.completed", item: { type: "agent_message", text: "sonuç 🙂" } },
+    { type: "turn.completed" }
+  ];
+  const jsonl = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+  const bytes = Buffer.from(jsonl, "utf8");
+  const emojiOffset = bytes.indexOf(Buffer.from("🙂", "utf8")) + 2;
+  const script = `const bytes=Buffer.from(${JSON.stringify(jsonl)},"utf8");process.stdout.write(bytes.subarray(0,${emojiOffset}));setTimeout(()=>process.stdout.write(bytes.subarray(${emojiOffset})),10)`;
+  const adapter = createCodexAdapter({ codex: { executable: process.execPath, execArgs: ["-e", script] } });
+  const result = await adapter.execute({
+    executionId: "codex-batch-split-utf8",
+    backend: "codex",
+    prompt: "inspect selected files",
+    model: "gpt-6.1-sol",
+    mode: "read_only",
+    workspace: process.cwd(),
+    delegationDepth: 0,
+    caller: "parallel_batch",
+    timeoutMs: 5000,
+    maxOutputBytes: 4096
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.result, "sonuç 🙂");
+  assert.equal(Buffer.byteLength(jsonl, "utf8") < 4096, true);
+  assert.equal(validateSubagentResult(result).success, true);
+});
+
 test("CX-AC-09: parseCodexOutput empty", () => {
   assert.equal(parseCodexOutput("").ok, false);
 });

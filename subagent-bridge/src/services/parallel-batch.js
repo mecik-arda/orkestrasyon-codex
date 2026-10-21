@@ -308,7 +308,7 @@ export function createParallelBatchService({
   artifactStore,
   runtime,
   trustedWorkspace,
-  caller = "openCode",
+  caller = "codexDesktop",
   worktreeManager = null,
   workspaceCoordinator = null,
   dashboardLauncher = null,
@@ -326,6 +326,7 @@ export function createParallelBatchService({
     maxQueuedPerWorkspace: configuration.orchestration?.scheduler?.maxQueuedPerWorkspace
   });
   const batchConfiguration = configuration.parallelBatch || {};
+  const resolveProcessOutputCap = (contract) => contract.maxOutputBytes ?? batchConfiguration.maxOutputBytesPerTask ?? 8388608;
   const callerHash = hashValue(String(caller));
   const workspacePathAnchor = createWorkspacePathAnchor(trustedWorkspace);
   const workspaceHash = hashValue(workspacePathAnchor.path);
@@ -388,7 +389,7 @@ export function createParallelBatchService({
   }
 
   function providerForRoute(route) {
-    return ["opencode", "antigravity"].includes(route.backend) ? `${route.backend}:${route.model}` : route.backend;
+    return ["antigravity", "deepseek"].includes(route.backend) ? `${route.backend}:${route.model}` : route.backend;
   }
 
   function acquireProviderSlot(providerKey) {
@@ -495,12 +496,7 @@ export function createParallelBatchService({
       return { ok: false, reason: "input_token_limit_unsupported", message: "this route does not expose a host-enforced input token limit; use a byte limit instead" };
     }
     if (contract.maxOutputTokens !== undefined) {
-      if (route.backend !== "opencode" || batchConfiguration.opencodeOutputCapability !== "available") {
-        return { ok: false, reason: "output_token_limit_unsupported", message: "this route has no proven host-enforced output token limit" };
-      }
-      if (contract.maxOutputTokens > (batchConfiguration.opencodeOutputTokens || 2048)) {
-        return { ok: false, reason: "output_token_limit_exceeds_host_cap", message: "task output token limit cannot exceed the proven host cap" };
-      }
+      return { ok: false, reason: "output_token_limit_unsupported", message: "this route has no proven host-enforced output token limit" };
     }
     const hostOutputBytes = batchConfiguration.maxOutputBytesPerTask || 8388608;
     if (contract.maxOutputBytes !== undefined && contract.maxOutputBytes > hostOutputBytes) {
@@ -509,16 +505,10 @@ export function createParallelBatchService({
     if (!batchConfiguration.allowedTargets?.includes(effectiveTarget) && !batchConfiguration.allowedTargets?.includes(route.backend)) {
       return { ok: false, reason: "target_not_allowed", message: `target not allowed for parallel batch: ${effectiveTarget}` };
     }
-    if (route.backend === "opencode" && batchConfiguration.opencodeOutputCapability !== "available") {
-      return { ok: false, reason: "route_output_capability_unavailable", message: "opencode output-capability is not proven on the pinned CLI" };
-    }
     if (contract.mode === "edit") {
       if (!batchConfiguration.editEnabled) return { ok: false, reason: "edit_not_enabled", message: "parallel edit batch is disabled" };
       if (route.backend === "codex" && batchConfiguration.codexNetworkOffCapability !== "available") {
         return { ok: false, reason: "edit_route_unsupported", message: "codex edit route capability is not proven" };
-      }
-      if (route.backend === "opencode" && batchConfiguration.opencodeOutputCapability !== "available") {
-        return { ok: false, reason: "edit_route_unsupported", message: "opencode edit route capability is not proven" };
       }
       if (!worktreeManager || typeof worktreeManager.createTaskWorktree !== "function" || typeof worktreeManager.collectTaskDiff !== "function" || typeof worktreeManager.runVerification !== "function" || typeof worktreeManager.prepareIntegration !== "function" || typeof worktreeManager.holdTaskDiff !== "function" || typeof worktreeManager.applyIntegration !== "function") {
         return { ok: false, reason: "edit_route_unsupported", message: "edit worktree manager is unavailable" };
@@ -712,7 +702,9 @@ export function createParallelBatchService({
           filesChanged: manifest.integration.filesChanged || []
         }
         : null,
-      message,
+      message: message || (tasks.some((task) => task.failureClass === "output_limit")
+        ? "output_limit: inspect task detail outputLimitScope/Stream and byte diagnostics before preparing a new plan; process, JSONL record and final-result limits differ from public summary limits. Do not repeat the unchanged plan; a new plan requires separate start approval."
+        : null),
       contentBytes: 0
     };
     const cap = batchConfiguration.maxBatchSummaryBytes || 20480;
@@ -847,6 +839,8 @@ export function createParallelBatchService({
       costEstimatedUsd: roundCost(totalAllocationUsd),
       isProviderInvoice: false
     });
+    const processOutputCaps = taskRoutes.map(({ contract }) => `${contract.taskId}=${resolveProcessOutputCap(contract)} (${contract.maxOutputBytes === undefined ? "host default" : "task"})`).join(", ");
+    const planMessage = `plan prepared; aggregate process stdout+stderr UTF-8 byte caps: ${processOutputCaps}. Includes JSONL/tool events, not final answer size. Separate public summary limits: ${batchConfiguration.maxSummaryCharacters || 4096} characters per task, ${batchConfiguration.maxBatchSummaryBytes || 20480} UTF-8 bytes per batch. Short-answer instructions do not bound process output. User approval and start_parallel_batch are required.`;
     const summaryValidation = validateParallelBatchSummary(buildSummary({
       batchId: null,
       planId,
@@ -873,7 +867,7 @@ export function createParallelBatchService({
         refundedUsd: 0,
         remainingUsd: roundCost(input.batchMaxReservedCostUsd - totalAllocationUsd)
       }
-    }, planRecord, "plan prepared; user approval and start_parallel_batch are required"));
+    }, planRecord, planMessage));
     if (!summaryValidation.success) {
       return { ok: false, reason: "summary_invalid", message: "batch summary contract validation failed" };
     }
@@ -1255,7 +1249,7 @@ export function createParallelBatchService({
           delegationDepth: 0,
           executionId,
           timeoutMs: Number.isFinite(contract.timeoutSeconds) ? contract.timeoutSeconds * 1000 : undefined,
-          maxOutputBytes: contract.maxOutputBytes ?? batchConfiguration.maxOutputBytesPerTask ?? 8388608,
+          maxOutputBytes: resolveProcessOutputCap(contract),
           ...(contract.maxOutputTokens !== undefined ? { maxOutputTokens: contract.maxOutputTokens } : {}),
           ...(webResearchProfile ? { webEvidenceRepairPrompt: WEB_EVIDENCE_REPAIR_PROMPT, maxWebEvidenceRepairAttempts: 1 } : {})
         });

@@ -88,7 +88,7 @@ test("CAP-PROBE-03: MCP araci model zorunlulugunu ve saglayici eslemesini uygula
     trustedWorkspace: root
   });
   await assert.rejects(() => handler.checkProviderCapability({ provider: "antigravity" }), /requires a model/);
-  await assert.rejects(() => handler.checkProviderCapability({ provider: "opencode" }), /requires a model/);
+  await assert.rejects(() => handler.checkProviderCapability({ provider: "opencode" }), /invalid public tool arguments/);
   await assert.rejects(() => handler.checkProviderCapability({ provider: "antigravity", model: "not-a-gemini" }), /not an Antigravity alias/);
   const codexProbe = await handler.checkProviderCapability({ provider: "codex", model: "gpt-5.6-sol" });
   assert.equal(codexProbe.structuredContent.provider, "codex");

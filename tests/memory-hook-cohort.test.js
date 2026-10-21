@@ -11,7 +11,6 @@ import {
   parseMemoryHookCohortRegistry,
   readMemoryHookCohortRegistry,
   resolveMemoryHookProjectCohort,
-  resolveOpenCodeProjectCohort,
   validateMemoryHookProjectInstallation
 } from "../subagent-bridge/src/services/memory-hook-cohort.js";
 
@@ -39,6 +38,7 @@ test("HOOK-COHORT-01: registry exact root eşleşmesi ve proje hedefi doğrulan�
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
   const loaded = readMemoryHookCohortRegistry({ registryPath: fixture.registryPath });
   assert.ok(loaded);
+  assert.equal(expectedMemoryHookProjectTarget(fixture.norn, "opencode"), null);
   assert.deepEqual(resolveMemoryHookProjectCohort({ projectRoots: [fixture.norn], registryPath: fixture.registryPath }), {
     projectCohort: "norn",
     status: "matched"
@@ -52,32 +52,32 @@ test("HOOK-COHORT-01: registry exact root eşleşmesi ve proje hedefi doğrulan�
   assert.deepEqual(validateMemoryHookProjectInstallation({
     projectRoot: fixture.norn,
     cohort: "norn",
-    client: "opencode",
-    targetPath: expectedMemoryHookProjectTarget(fixture.norn, "opencode"),
+    client: "codex",
+    targetPath: expectedMemoryHookProjectTarget(fixture.norn, "codex"),
     registryPath: fixture.registryPath
   }), {
     valid: true,
     status: "matched",
-    expectedTargetPath: expectedMemoryHookProjectTarget(fixture.norn, "opencode")
+    expectedTargetPath: expectedMemoryHookProjectTarget(fixture.norn, "codex")
   });
   assert.equal(validateMemoryHookProjectInstallation({
     projectRoot: fixture.norn,
     cohort: "norn",
-    client: "opencode",
+    client: "codex",
     targetPath: path.join(fixture.root, "elsewhere.js"),
     registryPath: fixture.registryPath
   }).status, "target_scope_invalid");
   const aliasedRoot = path.join(fixture.root, "norn-alias");
   fs.symlinkSync(fixture.norn, aliasedRoot, process.platform === "win32" ? "junction" : "dir");
-  const aliasedTarget = path.join(aliasedRoot, ".opencode", "plugins", "second-brain-memory.js");
+  const aliasedTarget = path.join(aliasedRoot, ".codex", "hooks.json");
   assert.equal(
     canonicalizeMemoryHookPath(aliasedTarget),
-    canonicalizeMemoryHookPath(expectedMemoryHookProjectTarget(fixture.norn, "opencode"))
+    canonicalizeMemoryHookPath(expectedMemoryHookProjectTarget(fixture.norn, "codex"))
   );
   assert.equal(validateMemoryHookProjectInstallation({
     projectRoot: fixture.norn,
     cohort: "norn",
-    client: "opencode",
+    client: "codex",
     targetPath: aliasedTarget,
     registryPath: fixture.registryPath
   }).valid, true);
@@ -94,16 +94,12 @@ test("HOOK-COHORT-02: alias kayıtları explicit olmalı ve ambiguous cohort red
   assert.equal(resolveMemoryHookProjectCohort({ projectRoots: [fixture.norn, worktree], registryPath: fixture.registryPath }).projectCohort, "norn");
   fixture.registry.projects[1].roots.push(worktree);
   assert.equal(parseMemoryHookCohortRegistry(fixture.registry), null);
-  assert.equal(resolveOpenCodeProjectCohort({
-    directory: fixture.norn,
-    worktree: fixture.dersmerkezi,
-    project: { directory: fixture.norn },
+  assert.equal(resolveMemoryHookProjectCohort({
+    projectRoots: [fixture.norn, fixture.dersmerkezi],
     registryPath: fixture.registryPath
   }).status, "root_ambiguous");
-  assert.equal(resolveOpenCodeProjectCohort({
-    directory: path.join(fixture.root, "unknown"),
-    worktree: fixture.norn,
-    project: { root: fixture.dersmerkezi },
+  assert.equal(resolveMemoryHookProjectCohort({
+    projectRoots: [path.join(fixture.root, "unknown"), fixture.norn],
     registryPath: fixture.registryPath
   }).projectCohort, "unassigned");
 });
@@ -128,12 +124,12 @@ test("HOOK-COHORT-03: bozuk, fazla büyük ve hard-link registry fail-closed olu
 test("HOOK-COHORT-04: global and project hook cohort semantics are distinct", (context) => {
   const fixture = createRegistryFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
-  assert.equal(resolveOpenCodeProjectCohort({ directory: fixture.norn, worktree: fixture.norn, registryPath: fixture.registryPath }).projectCohort, "norn");
-  assert.deepEqual(resolveOpenCodeProjectCohort({ directory: fixture.norn, worktree: fixture.norn, requestedCohort: "norn", registryPath: fixture.registryPath }), {
+  assert.equal(resolveMemoryHookProjectCohort({ projectRoots: [fixture.norn], registryPath: fixture.registryPath }).projectCohort, "norn");
+  assert.deepEqual(resolveMemoryHookProjectCohort({ projectRoots: [fixture.norn], requestedCohort: "norn", registryPath: fixture.registryPath }), {
     projectCohort: "norn",
     status: "matched"
   });
-  assert.deepEqual(resolveOpenCodeProjectCohort({ directory: fixture.norn, worktree: fixture.norn, requestedCohort: "unassigned", registryPath: fixture.registryPath }), {
+  assert.deepEqual(resolveMemoryHookProjectCohort({ projectRoots: [fixture.norn], requestedCohort: "unassigned", registryPath: fixture.registryPath }), {
     projectCohort: "unassigned",
     status: "unassigned"
   });

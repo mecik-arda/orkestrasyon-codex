@@ -71,7 +71,7 @@ if (liveIndex >= 0) {
         contextFiles: task.edit.contextFiles,
         acceptanceCriteria: task.edit.acceptanceCriteria
       };
-      const result = task.candidate === "deepseek_pro"
+      const result = task.candidate === "deepseek_flash"
         ? await runtime.runDeepSeekEditPilot({ ...pilotInput, model: task.candidate }, projectRoot)
         : await runCodexEditPilot(task, pilotInput);
       const modelBound = result.resolvedModel === liveCandidateModels[task.candidate];

@@ -280,3 +280,29 @@ test("RTD-09: tanı süreleri ve boyut kovaları attempt kaydına taşınır", a
   assert.equal(record.failureStage, "provider_execution");
   assert.equal(record.providerCode, "process_exit");
 });
+
+test("RTD-10: canonical metric yazma durumu runtime sonucunda redakte görünür", async (t) => {
+  const root = fixtureDirectory(t, "metric-write-visible");
+  const configuration = createConfiguration(root, root);
+  const antigravity = createFakeAdapter("antigravity", async (request) => successResult("antigravity", request.model));
+  const runtime = createBridgeRuntime({ configuration, adapters: { antigravity }, sleep: async () => {} });
+  const result = await runRuntime(runtime, root);
+  assert.equal(result.ok, true);
+  assert.equal(result.metrics.telemetryWriteStatus, "written");
+  assert.equal(result.metrics.telemetryWriteFailureClass, "none");
+  assert.equal(readRecentRuns(configuration).runCount, 1);
+});
+
+test("RTD-11: canonical metric yazma hatası provider sonucunu bozmaz ve güvenli sınıf taşır", async (t) => {
+  const root = fixtureDirectory(t, "metric-write-failure");
+  const configuration = createConfiguration(root, root);
+  configuration.statePaths.logs = path.join(root, "logs-file");
+  fs.writeFileSync(configuration.statePaths.logs, "occupied", "utf8");
+  const antigravity = createFakeAdapter("antigravity", async (request) => successResult("antigravity", request.model));
+  const runtime = createBridgeRuntime({ configuration, adapters: { antigravity }, sleep: async () => {} });
+  const result = await runRuntime(runtime, root);
+  assert.equal(result.ok, true);
+  assert.equal(result.metrics.telemetryWriteStatus, "failed");
+  assert.equal(result.metrics.telemetryWriteFailureClass, "io_error");
+  assert.equal(JSON.stringify(result).includes(configuration.statePaths.logs), false);
+});

@@ -10,7 +10,7 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(scriptDirectory, "..");
 const configuration = loadRuntimeConfiguration();
 const transport = new StdioClientTransport({
-  command: "C:\\nvm4w\\nodejs\\node.exe",
+  command: process.execPath,
   args: [path.join(projectRoot, "subagent-bridge", "src", "server.js")],
   cwd: projectRoot,
   env: {
@@ -29,8 +29,6 @@ const ruleAttestation = ruleAttestationSchema.safeParse(JSON.parse(ruleAttestati
 const workspaceIdentityRead = await client.readResource({ uri: WORKSPACE_IDENTITY_URI });
 const workspaceIdentity = workspaceIdentitySchema.safeParse(JSON.parse(workspaceIdentityRead.contents[0].text));
 const health = await client.callTool({ name: "check_deepseek_subagent", arguments: {} });
-const kimiHealth = await client.callTool({ name: "check_kimi_subagent", arguments: {} });
-const qwenHealth = await client.callTool({ name: "check_qwen_subagent", arguments: {} });
 const antigravityHealth = await client.callTool({ name: "check_antigravity_subagent", arguments: {} });
 const bridgeHealth = await client.callTool({ name: "check_subagent_bridge", arguments: {} });
 const workspaceLockHealth = await client.callTool({ name: "check_workspace_lock", arguments: {} });
@@ -62,8 +60,6 @@ console.log(JSON.stringify({
     limitations: workspaceIdentity.data.limitations
   } : { status: "invalid" },
   health: health.structuredContent,
-  kimiHealth: kimiHealth.structuredContent,
-  qwenHealth: qwenHealth.structuredContent,
   antigravityHealth: antigravityHealth.structuredContent,
   bridgeHealth: bridgeHealth.structuredContent,
   workspaceLockHealth: workspaceLockHealth.structuredContent,
@@ -71,7 +67,7 @@ console.log(JSON.stringify({
   memoryReview: memoryReview.structuredContent?.counts,
   memoryProbe: {
     matchedNotes: memorySearch.structuredContent?.matches?.length || 0,
-    selectedMemoryPath,
+    selectedNoteRead: Boolean(memoryRead),
     bytes: memoryRead?.structuredContent?.bytes || 0,
     sha256: memoryRead?.structuredContent?.sha256 || null
   }
@@ -80,19 +76,11 @@ console.log(JSON.stringify({
 const toolNames = new Set(tools.tools.map((tool) => tool.name));
 const expectedToolNames = [
   "check_deepseek_subagent",
-  "check_glm_subagent",
   "check_subagent_bridge",
   "check_workspace_lock",
   "check_provider_capability",
   "run_deepseek_subagent",
   "run_deepseek_edit_pilot",
-  "run_glm_subagent",
-  "run_glm_edit_pilot",
-  "check_kimi_subagent",
-  "run_kimi_subagent",
-  "check_qwen_subagent",
-  "run_qwen_subagent",
-  "run_space_bunny_subagent",
   "run_codex_subagent",
   "run_task_profile",
   "prepare_parallel_batch",
@@ -106,13 +94,8 @@ const expectedToolNames = [
   "promote_memory"
 ];
 const expectedToolsAvailable = expectedToolNames.every((toolName) => toolNames.has(toolName));
-const spaceBunnyTool = tools.tools.find((tool) => tool.name === "run_space_bunny_subagent");
-const spaceBunnyToolSchemaValid = Boolean(spaceBunnyTool?.inputSchema?.properties?.taskId
-  && spaceBunnyTool.inputSchema.properties.role
-  && spaceBunnyTool.inputSchema.properties.objective
-  && spaceBunnyTool.inputSchema.required?.includes("taskId")
-  && spaceBunnyTool.inputSchema.required?.includes("role")
-  && spaceBunnyTool.inputSchema.required?.includes("objective"));
+const retiredToolNames = ["run_opencode_subagent", "run_glm_subagent", "run_glm_edit_pilot", "check_glm_subagent", "run_kimi_subagent", "check_kimi_subagent", "run_qwen_subagent", "check_qwen_subagent", "run_space_bunny_subagent", "check_space_bunny_subagent", "run_space_bunny_edit_pilot"];
+const retiredToolsAbsent = retiredToolNames.every((toolName) => !toolNames.has(toolName));
 const orchestratorApprovalToolAbsent = !toolNames.has("approve_prepared_edit");
 const resourceMap = new Map(resources.resources.map((resource) => [resource.uri, resource]));
 const expectedResourcesAvailable = resources.resources.length === 2
@@ -131,12 +114,8 @@ const antigravityHealthValid = Boolean(antigravityHealth.structuredContent?.mode
 const deepseekApiHealthValid = health.structuredContent?.model === "deepseek-flash"
   && health.structuredContent?.modelAvailable === health.structuredContent?.available
   && [true, false, null].includes(health.structuredContent?.authenticated);
-const openCodeHealthValid = configuration.opencode?.enabled === false
-  ? kimiHealth.structuredContent?.available === false
-    && qwenHealth.structuredContent?.available === false
-    && bridgeHealth.structuredContent?.adapters?.opencode?.configuredModels?.length === 0
-  : false;
+const retiredAdapterAbsent = !Object.hasOwn(bridgeHealth.structuredContent?.adapters || {}, "opencode");
 const workspaceLockHealthValid = Number.isInteger(workspaceLockHealth.structuredContent?.localActive) && Array.isArray(workspaceLockHealth.structuredContent?.externalDiskLocks);
-if (!expectedToolsAvailable || !spaceBunnyToolSchemaValid || !orchestratorApprovalToolAbsent || !expectedResourcesAvailable || !ruleAttestationValid || !workspaceIdentityValid || !deepseekApiHealthValid || !openCodeHealthValid || !antigravityHealthValid || !bridgeHealthValid || !workspaceLockHealthValid || !memoryHealth.structuredContent?.readable || !memoryHealth.structuredContent?.writable || !memoryProbeValid) {
+if (!expectedToolsAvailable || !retiredToolsAbsent || !retiredAdapterAbsent || !orchestratorApprovalToolAbsent || !expectedResourcesAvailable || !ruleAttestationValid || !workspaceIdentityValid || !deepseekApiHealthValid || !antigravityHealthValid || !bridgeHealthValid || !workspaceLockHealthValid || !memoryHealth.structuredContent?.readable || !memoryHealth.structuredContent?.writable || !memoryProbeValid) {
   process.exitCode = 1;
 }

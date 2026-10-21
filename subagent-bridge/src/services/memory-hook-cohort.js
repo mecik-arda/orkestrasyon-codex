@@ -11,7 +11,6 @@ export const memoryHookCohortRegistryMaxProjects = 100;
 export const memoryHookCohortRegistryMaxRootsPerProject = 32;
 
 const projectHookTargets = Object.freeze({
-  opencode: path.join(".opencode", "plugins", "second-brain-memory.js"),
   codex: path.join(".codex", "hooks.json"),
   claude: path.join(".claude", "settings.local.json")
 });
@@ -167,11 +166,4 @@ export function validateMemoryHookProjectInstallation({ projectRoot, cohort, cli
   }
   const result = resolveMemoryHookProjectCohort({ projectRoots: [projectRoot], requestedCohort: cohort, registryPath });
   return { valid: result.projectCohort === cohort, status: result.status, expectedTargetPath };
-}
-
-export function resolveOpenCodeProjectCohort({ directory, worktree, requestedCohort, registryPath } = {}) {
-  const candidates = [directory, worktree].filter((candidate) => candidate !== undefined && candidate !== null && candidate !== "");
-  if (candidates.some((candidate) => typeof candidate !== "string")) return { projectCohort: "unassigned", status: "root_unmatched" };
-  const projectRoots = candidates;
-  return resolveMemoryHookProjectCohort({ projectRoots, requestedCohort, registryPath });
 }

@@ -43,7 +43,7 @@ test("WP5B-CHANNEL-02: approve_prepared_edit aracı yalnız bayrak açıkken kay
 });
 
 test("WP5B-CHANNEL-03: sağlayıcı ortamı approval bayrağını ve config override değişkenlerini taşımaz", () => {
-  const environment = createProviderEnvironment("opencode", {
+  const environment = createProviderEnvironment("deepseek", {
     PATH: "C:\\bin",
     DEEPSEEK_API_KEY: "test-key",
     SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL: "1",
@@ -61,17 +61,12 @@ test("WP5B-CHANNEL-03: sağlayıcı ortamı approval bayrağını ve config over
   assert.equal(environment.ORCHESTRATOR_CONFIG, undefined);
 });
 
-test("WP5B-CHANNEL-04: disposable OpenCode yapılandırması bridge MCP girdisini kapatır", (t) => {
+test("WP5B-CHANNEL-04: disposable workspace retired provider configuration üretmez", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "wp5b-disposable-config-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.writeFileSync(path.join(root, "value.txt"), "before\n", "utf8");
   const disposable = provisionDisposableWorkspace({ statePaths: { cache: path.join(root, "cache") } }, root, ["value.txt"], ["value.txt"]);
-  const localConfiguration = JSON.parse(fs.readFileSync(path.join(disposable.workspace, "opencode.json"), "utf8"));
-  assert.deepEqual(localConfiguration.mcp["subagent-bridge"], { enabled: false });
-  const permissions = localConfiguration.agent["deepseek-edit"].permission;
-  assert.equal(permissions.bash, "deny");
-  assert.equal(permissions.task, "deny");
-  assert.equal(permissions.question, "deny");
-  assert.equal(permissions.external_directory, "deny");
+  assert.equal(fs.existsSync(path.join(disposable.workspace, "opencode.json")), false);
+  assert.equal(fs.existsSync(path.join(disposable.workspace, "opencode.jsonc")), false);
   disposable.cleanup();
 });

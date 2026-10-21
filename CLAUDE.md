@@ -1,6 +1,6 @@
 # Native Claude Code Talimatları
 
-Bu projede ana orkestratör, OpenCode oturumunda aktif kullanılan modeldir. Claude Code yalnız native Claude görevleri için ayrı bir subagent backend'idir; DeepSeek çağrıları OpenCode provider'ı üzerinden yürütülür. GLM aboneliği pasiftir: kullanıcı açıkça yeniden etkin olduğunu belirtmedikçe hiçbir GLM modeli, profili veya fallback'i çağrılmaz. Codex Luna hızlı fiyat/performans uygulayıcı, Terra dengeli edit, Sol zor hata ayıklama ve denetim modelidir; Astra yalnız açıkça gerekçelendirilmiş durumlarda kullanılır. Antigravity capability probe'ları ve model bazlı circuit davranışı AGENTS.md ile aynıdır.
+Bu projede ana orkestratör, Hades Orchestrator MCP sunucusuna bağlı Codex masaüstü oturumudur. Claude Code native Claude görevleri için ayrı bir subagent backend'idir; DeepSeek yalnız bağımsız doğrudan API adaptörü üzerinden kullanılabilir. OpenCode tabanlı yürütme rotaları emekliye ayrılmıştır ve Codex rotalarına yönlendirilmez. Codex Luna hızlı fiyat/performans uygulayıcı, Terra dengeli edit, Sol zor hata ayıklama ve denetim modelidir; Astra yalnız açıkça gerekçelendirilmiş durumlarda kullanılır. Antigravity capability probe'ları ve model bazlı circuit davranışı AGENTS.md ile aynıdır.
 
 ## Başlangıç kuralları
 

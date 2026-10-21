@@ -1,6 +1,6 @@
 # DeepSeek Subagent Sınırları
 
-- OpenCode oturumunda aktif kullanılan model ana orkestratör, uygulayıcı ve son karar vericidir.
+- Codex Desktop'a bağlı Hades oturumundaki ana orkestratör kapsamı, görev yönlendirmesini ve son kararı yönetir.
 - Salt okunur danışman olarak analiz, araştırma, planlama veya ikinci görüş üret.
 - Dosya oluşturma, düzenleme, silme, taşıma veya yeniden adlandırma.
 - Kabuk komutu, kod yürütme, test, commit, push, dağıtım veya dış sistemde yazma işlemi gerçekleştirme.

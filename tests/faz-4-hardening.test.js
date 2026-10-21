@@ -5,7 +5,6 @@ import { appendRedactedRunMetric, createRedactedRunMetric } from "../subagent-br
 import { validateAgentsConfig, loadAgentsConfig, loadRuntimeConfiguration } from "../subagent-bridge/src/config.js";
 import { createClaudeCodeAdapter } from "../subagent-bridge/src/adapters/claude-code-adapter.js";
 import { createAntigravityAdapter } from "../subagent-bridge/src/adapters/antigravity-adapter.js";
-import { createOpenCodeAdapter } from "../subagent-bridge/src/adapters/opencode-adapter.js";
 import { createCodexAdapter } from "../subagent-bridge/src/adapters/codex-adapter.js";
 import { checkCapability } from "../subagent-bridge/src/services/capability-service.js";
 import { createDelegationGuard } from "../subagent-bridge/src/services/delegation-guard.js";
@@ -25,10 +24,9 @@ const configuration = {
 
 const claudeAdapter = createClaudeCodeAdapter(configuration);
 const agyAdapter = createAntigravityAdapter(configuration);
-const opencodeAdapter = createOpenCodeAdapter(configuration);
 const codexAdapter = createCodexAdapter(configuration);
 
-const allAdapters = [claudeAdapter, agyAdapter, opencodeAdapter, codexAdapter];
+const allAdapters = [claudeAdapter, agyAdapter, codexAdapter];
 
 test("HARDEN-01: tüm adapter AgentAdapter kontratını uygular", () => {
   for (const adapter of allAdapters) {
@@ -190,8 +188,7 @@ test("HARDEN-09: metrics backend ayrımı doğru dosyalanır", () => {
 test("HARDEN-10: agents.json valid yapılandırma kabul edilir", () => {
   const valid = validateAgentsConfig({
     agents: {
-      claude_code: { enabled: true, executable: "C:\\tools\\claude.exe", timeoutMs: 900000, maxRetries: 2, mode: "read_only" },
-      opencode: { enabled: true, executable: "C:\\tools\\opencode.exe", timeoutMs: 900000, maxRetries: 1 }
+      claude_code: { enabled: true, executable: "C:\\tools\\claude.exe", timeoutMs: 900000, maxRetries: 2, mode: "read_only" }
     }
   });
   assert.equal(valid.success, true);

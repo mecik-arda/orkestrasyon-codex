@@ -6,7 +6,6 @@ import test from "node:test";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { buildAntigravityArgs } from "../subagent-bridge/src/adapters/antigravity-adapter.js";
 import { buildEncapsulatedPrompt, resolveClaudeResultModel } from "../subagent-bridge/src/adapters/claude-code-adapter.js";
-import { buildOpenCodeArgs } from "../subagent-bridge/src/adapters/opencode-adapter.js";
 import { validateAgentsConfig } from "../subagent-bridge/src/config.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
@@ -33,10 +32,7 @@ function configuration(root) {
     antigravity: { timeoutMs: 30000, allowedModes: ["read_only", "edit"] },
     codex: { timeoutMs: 30000, allowedModes: ["read_only", "edit"] },
     claude_code: { timeoutMs: 30000, allowedModes: ["read_only"] },
-    opencode: { timeoutMs: 30000, allowedModes: ["read_only"] },
     deepseek: {
-      openCodeModel: "deepseek/deepseek-v4-pro",
-      openCodeFlashModel: "deepseek/deepseek-v4-flash",
       timeoutMs: 30000
     }
   };
@@ -134,18 +130,13 @@ test("MODE-04: provider CLI argümanları explicit access mode kullanır", () =>
   assert.deepEqual(readAgy.args.slice(readAgy.args.indexOf("--mode"), readAgy.args.indexOf("--mode") + 2), ["--mode", "plan"]);
   assert.deepEqual(editAgy.args.slice(editAgy.args.indexOf("--mode"), editAgy.args.indexOf("--mode") + 2), ["--mode", "accept-edits"]);
   assert.match(readAgy.args.at(-1), /Resolved model: gemini-3\.8-flash-high/);
-  const readOpenCode = buildOpenCodeArgs({ mode: "read_only", caller: "deepseek_opencode", workspace: "C:\\workspace", prompt: "inspect" }, { opencode: { deepSeekReadOnlyAgent: "deepseek-readonly", editAgent: "build" } }, "deepseek/deepseek-v4-pro");
-  const editOpenCode = buildOpenCodeArgs({ mode: "edit", caller: "test", workspace: "C:\\workspace", prompt: "apply" }, { opencode: { deepSeekReadOnlyAgent: "deepseek-readonly", editAgent: "controlled-edit" } }, "deepseek/deepseek-v4-pro");
-  const pilotOpenCode = buildOpenCodeArgs({ mode: "edit", caller: "deepseek_edit_pilot", workspace: "C:\\workspace", prompt: "apply" }, { opencode: { deepSeekReadOnlyAgent: "deepseek-readonly", deepSeekEditAgent: "deepseek-edit", editAgent: "controlled-edit" } }, "deepseek/deepseek-v4-pro");
-  assert.equal(readOpenCode[readOpenCode.indexOf("--agent") + 1], "deepseek-readonly");
-  assert.equal(editOpenCode[editOpenCode.indexOf("--agent") + 1], "controlled-edit");
-  assert.equal(pilotOpenCode[pilotOpenCode.indexOf("--agent") + 1], "deepseek-edit");
-  assert.match(editOpenCode.at(-1), /Access mode: edit/);
 });
 
 test("MODE-05: Claude prompt sözleşmesi access mode ile çelişmez", () => {
   const readPrompt = buildEncapsulatedPrompt({ executionId: "read", prompt: "inspect", mode: "read_only" });
   const editPrompt = buildEncapsulatedPrompt({ executionId: "edit", prompt: "apply", mode: "edit" });
+  assert.match(readPrompt, /Codex Desktop'a bağlı Hades oturumundaki ana orkestratör/);
+  assert.doesNotMatch(readPrompt, /OpenCode/);
   assert.match(readPrompt, /salt okunur/);
   assert.doesNotMatch(editPrompt, /Sen salt okunur/);
   assert.match(editPrompt, /değişiklik uygulayabilen/);

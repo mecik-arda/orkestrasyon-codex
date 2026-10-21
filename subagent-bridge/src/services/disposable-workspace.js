@@ -293,7 +293,7 @@ export function applyPreparedChanges(sourceRoot, preparedChanges, expectedStates
   return { applied: true, cleanupFailed };
 }
 
-export function provisionDisposableWorkspace(configuration, sourceWorkspace, requestedFiles, editableFiles = requestedFiles, editAgentName = "deepseek-edit") {
+export function provisionDisposableWorkspace(configuration, sourceWorkspace, requestedFiles, editableFiles = requestedFiles) {
   const sourceRoot = fs.realpathSync(sourceWorkspace);
   const relativePaths = [...new Set(requestedFiles.map(normalizeRelativePath))];
   const editablePaths = new Set(editableFiles.map(normalizeRelativePath));
@@ -341,30 +341,6 @@ export function provisionDisposableWorkspace(configuration, sourceWorkspace, req
        baselineStates.set(relativePath, sha256Hex(sourceContent));
       fs.writeFileSync(targetPath, content, { flag: "wx" });
     }
-    fs.writeFileSync(path.join(workspace, "opencode.json"), `${JSON.stringify({
-      $schema: "https://opencode.ai/config.json",
-      mcp: {
-        "subagent-bridge": { enabled: false }
-      },
-      agent: {
-        [editAgentName]: {
-          description: "Edits only files inside the disposable workspace without shell or delegation.",
-          mode: "primary",
-          permission: {
-            read: "allow",
-            glob: "allow",
-            grep: "allow",
-            list: "allow",
-            edit: "allow",
-            bash: "deny",
-            task: "deny",
-            question: "deny",
-            external_directory: "deny"
-          },
-          prompt: "Edit only files inside the current disposable workspace. Never run shell commands, delegate, access external directories, or read secrets."
-        }
-      }
-    }, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
     const baseline = readWorkspaceFiles(workspace);
     return {
       workspace,

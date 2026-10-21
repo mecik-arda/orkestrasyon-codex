@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { assertOpenCodeModelsAllowed, loadConfiguration, loadRuntimeConfiguration, validateConfiguration, validateWorkspace } from "../subagent-bridge/src/config.js";
+import { loadConfiguration, loadRuntimeConfiguration, validateAgentsConfig, validateConfiguration, validateWorkspace } from "../subagent-bridge/src/config.js";
 
 test("izinli kök içindeki workspace kabul edilir", () => {
   const root = path.resolve("C:\\Users\\user\\Desktop\\Yazılım_Siber");
@@ -99,37 +99,20 @@ test("provider rol profilleri exact model kullanır ve edit fallback policy ile 
   assert.deepEqual({ target: profiles.sol61_implementation.target, model: profiles.sol61_implementation.model, mode: profiles.sol61_implementation.mode, priority: profiles.sol61_implementation.priority, cacheable: profiles.sol61_implementation.cacheable }, { target: "codex", model: "gpt-6.1-sol", mode: "edit", priority: 4, cacheable: false });
   assert.deepEqual(profiles.sol61_implementation.fallbackTargets, [
     { target: "codex", model: "gpt-6-sol" },
-    { target: "codex", model: "gpt-5.6-sol" },
-    { target: "opencode", model: "deepseek/deepseek-v4-pro" }
+    { target: "codex", model: "gpt-5.6-sol" }
   ]);
   assert.deepEqual({ target: profiles.astra_review.target, model: profiles.astra_review.model, mode: profiles.astra_review.mode, priority: profiles.astra_review.priority, cacheable: profiles.astra_review.cacheable }, { target: "codex", model: "gpt-6-astra", mode: "read_only", priority: 14, cacheable: true });
   assert.deepEqual({ target: profiles.astra_implementation.target, model: profiles.astra_implementation.model, mode: profiles.astra_implementation.mode, priority: profiles.astra_implementation.priority, cacheable: profiles.astra_implementation.cacheable }, { target: "codex", model: "gpt-6-astra", mode: "edit", priority: 4, cacheable: false });
   assert.deepEqual(profiles.astra_implementation.fallbackTargets, [
-    { target: "codex", model: "gpt-5.6-sol" },
-    { target: "glm", model: "glm_5_2" }
+    { target: "codex", model: "gpt-5.6-sol" }
   ]);
-  assert.deepEqual({ target: profiles.deep_analysis.target, model: profiles.deep_analysis.model }, { target: "opencode", model: "deepseek/deepseek-v4-pro" });
   assert.equal(profiles.web_research.target, "gemini_flash");
   assert.equal(profiles.file_audit.target, "gemini_flash");
   assert.equal(profiles.implementation.mode, "edit");
   assert.equal(profiles.critical_implementation.mode, "edit");
   assert.equal(Object.values(profiles).filter((profile) => profile.mode === "read_only").some((profile) => profile.fallbackTargets), false);
-  assert.ok(profiles.implementation.fallbackTargets.length > 0);
-  assert.deepEqual(profiles.implementation.fallbackTargets, [
-    { target: "glm", model: "glm_5_2" },
-    { target: "opencode", model: "deepseek/deepseek-v4-pro" }
-  ]);
-  assert.equal(profiles.low_cost_glm_highspeed.model, "glm_5_2_highspeed");
-  assert.deepEqual({ target: profiles.glm53_implementation.target, model: profiles.glm53_implementation.model, mode: profiles.glm53_implementation.mode, priority: profiles.glm53_implementation.priority, cacheable: profiles.glm53_implementation.cacheable }, { target: "glm", model: "glm_5_3", mode: "edit", priority: 7, cacheable: false });
-  assert.deepEqual(profiles.glm53_implementation.fallbackTargets, [
-    { target: "opencode", model: "deepseek/deepseek-v4-pro" },
-    { target: "codex", model: "gpt-5.6-terra" }
-  ]);
-  assert.deepEqual({ target: profiles.glm53_flash_implementation.target, model: profiles.glm53_flash_implementation.model, mode: profiles.glm53_flash_implementation.mode, priority: profiles.glm53_flash_implementation.priority, cacheable: profiles.glm53_flash_implementation.cacheable }, { target: "glm", model: "glm_5_3_flash", mode: "edit", priority: 6, cacheable: false });
-  assert.deepEqual(profiles.glm53_flash_implementation.fallbackTargets, [
-    { target: "glm", model: "glm_5_2" },
-    { target: "opencode", model: "deepseek/deepseek-flash" }
-  ]);
+  assert.deepEqual(profiles.implementation.fallbackTargets, []);
+  assert.equal(Object.keys(profiles).some((name) => /glm|kimi|qwen|deepseek_pro|deep_analysis/u.test(name)), false);
   assert.deepEqual({ target: profiles.low_cost_analysis.target, model: profiles.low_cost_analysis.model, mode: profiles.low_cost_analysis.mode }, { target: "deepseek", model: "deepseek_flash", mode: "read_only" });
 });
 
@@ -154,41 +137,42 @@ test("DeepSeek API policy resmi endpoint ve bir dolar pilot tavanıyla sınırla
   assert.equal(validateConfiguration(overBudget).success, false);
 });
 
-test("deepseek-readonly agent dış dizin erişimini açıkça reddeder", () => {
-  const opencodePath = fs.existsSync(path.resolve("opencode.jsonc"))
-    ? path.resolve("opencode.jsonc")
-    : path.resolve("opencode.jsonc.example");
-  const opencodeConfiguration = JSON.parse(fs.readFileSync(opencodePath, "utf8"));
-  assert.equal(opencodeConfiguration.agent["deepseek-readonly"].permission.external_directory, "deny");
-});
-
-test("DeepSeek Flash canonical kimliğe bağlıdır ve legacy kimlik uyumluluk için korunur", () => {
+test("DeepSeek Flash canonical API kimliğine bağlıdır ve OpenCode konfigürasyonu kaldırılmıştır", () => {
   const policy = JSON.parse(fs.readFileSync(path.resolve("config/policy.json"), "utf8"));
-  assert.equal(policy.deepseek.openCodeModel, "deepseek/deepseek-v4-pro");
-  assert.equal(policy.deepseek.openCodeFlashModel, "deepseek/deepseek-flash");
+  assert.equal(policy.configVersion, 3);
+  assert.equal(policy.deepseek.apiModel, "deepseek-flash");
+  assert.equal(Object.hasOwn(policy.deepseek, "openCodeModel"), false);
   const agents = JSON.parse(fs.readFileSync(path.resolve("config/agents.json"), "utf8"));
-  const allowedModels = agents.agents.opencode.allowedModels;
-  assert.ok(allowedModels.includes("deepseek/deepseek-flash"));
-  assert.ok(allowedModels.includes("deepseek/deepseek-v4-flash"));
-  assert.equal(allowedModels.includes("deepseek/deepseek-v4.1-flash"), false);
-  assert.equal(JSON.stringify(policy).includes("deepseek-v4.1-flash"), false);
-  assert.ok(agents.agents.opencode.allowedModes.includes("read_only"));
-  assert.ok(agents.agents.opencode.allowedModes.includes("edit"));
+  assert.deepEqual(Object.keys(agents.agents).sort(), ["antigravity", "claude_code", "codex"]);
 });
 
-test("opencode model politikası profil ve deepseek modellerini yükleme sınırında doğrular", () => {
+test("eski v2 yapılandırması OpenCode hedeflerini bellek içinde çıkarır ve güncel şema strict kalır", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "config-v2-retirement-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const policy = JSON.parse(fs.readFileSync(path.resolve("config/policy.json"), "utf8"));
-  const agents = JSON.parse(fs.readFileSync(path.resolve("config/agents.json"), "utf8"));
-  assert.doesNotThrow(() => assertOpenCodeModelsAllowed(policy, agents.agents.opencode));
-  const tampered = JSON.parse(JSON.stringify(policy));
-  tampered.orchestration.taskProfiles.deep_analysis.model = "deepseek/deepseek-v4.1-flash";
-  assert.throws(() => assertOpenCodeModelsAllowed(tampered, agents.agents.opencode), /unlisted models/);
-  const tamperedFlash = JSON.parse(JSON.stringify(policy));
-  tamperedFlash.deepseek.openCodeFlashModel = "deepseek/deepseek-v4.1-flash";
-  assert.throws(() => assertOpenCodeModelsAllowed(tamperedFlash, agents.agents.opencode), /unlisted models/);
+  policy.configVersion = 2;
+  policy.deepseek.openCodeModel = "deepseek/deepseek-v4-pro";
+  policy.deepseek.openCodeFlashModel = "deepseek/deepseek-flash";
+  policy.glm = { openCodeModel: "glm-legacy" };
+  policy.orchestration.taskProfiles.deep_analysis = { target: "opencode", model: "deepseek/deepseek-v4-pro", mode: "read_only", priority: 1, cacheable: true };
+  policy.orchestration.taskProfiles.review.fallbackTargets = [{ target: "codex", model: "gpt-6-sol" }, { target: "opencode", model: "deepseek/deepseek-v4-pro" }];
+  policy.parallelBatch.providerConcurrency.opencode = 2;
+  policy.parallelBatch.opencodeOutputCapability = "unavailable";
+  const configurationPath = path.join(root, "policy.json");
+  fs.writeFileSync(configurationPath, JSON.stringify(policy), "utf8");
+  const configuration = loadConfiguration({ configurationPath });
+  assert.equal(configuration.configVersion, 3);
+  assert.equal(Object.hasOwn(configuration, "glm"), false);
+  assert.equal(Object.hasOwn(configuration.deepseek, "openCodeModel"), false);
+  assert.equal(Object.hasOwn(configuration.orchestration.taskProfiles, "deep_analysis"), false);
+  assert.deepEqual(configuration.orchestration.taskProfiles.review.fallbackTargets, [{ target: "codex", model: "gpt-6-sol" }]);
+  assert.equal(Object.hasOwn(configuration.parallelBatch.providerConcurrency, "opencode"), false);
+  assert.equal(Object.hasOwn(configuration.parallelBatch, "opencodeOutputCapability"), false);
+  assert.equal(JSON.parse(fs.readFileSync(configurationPath, "utf8")).configVersion, 2);
+  assert.equal(validateConfiguration({ ...configuration, deepseek: { ...configuration.deepseek, openCodeModel: "legacy" } }).success, false);
 });
 
-test("config v1→v2 migrate eksik alanları varsayılanlarla tamamlar", () => {
+test("config v1 migration eksik alanları tamamlar ve v3 retired route migration uygular", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "config-migrate-"));
   const policy = JSON.parse(fs.readFileSync(path.resolve("config/policy.json"), "utf8"));
   const v1Policy = { ...policy, configVersion: 1 };
@@ -197,7 +181,7 @@ test("config v1→v2 migrate eksik alanları varsayılanlarla tamamlar", () => {
   const configurationPath = path.join(root, "policy.json");
   fs.writeFileSync(configurationPath, JSON.stringify(v1Policy), "utf8");
   const configuration = loadConfiguration({ configurationPath });
-  assert.equal(configuration.configVersion, 2);
+  assert.equal(configuration.configVersion, 3);
   assert.equal(configuration.observability.maxMetricRetentionDays, 30);
   assert.equal(configuration.orchestration.scheduler.leaseHeartbeatMs, 300000);
   fs.rmSync(root, { recursive: true, force: true });

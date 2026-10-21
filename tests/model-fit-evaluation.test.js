@@ -116,9 +116,9 @@ function liveDataset(overrides = {}) {
     tasks: [{
       id: "live-schema-task",
       taskClass: "strict_schema",
-      candidate: "deepseek_pro",
-      target: "opencode",
-      model: "deepseek/deepseek-v4-pro",
+      candidate: "deepseek_flash",
+      target: "deepseek",
+      model: "deepseek_flash",
       prompt: "Return only a JSON object.",
       expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" }, allowExtraKeys: true, sourceMarker: "LIVE-MARKER-1" }
     }],
@@ -131,8 +131,8 @@ function fullLiveDataset() {
     id,
     taskClass,
     candidate,
-    target: candidate === "gemini_flash" ? "gemini_flash" : candidate === "deepseek_pro" ? "opencode" : "codex",
-    ...(candidate === "sol" ? { model: "gpt-5.6-sol" } : candidate === "deepseek_pro" ? { model: "deepseek/deepseek-v4-pro" } : candidate === "gemini_flash" ? { model: "gemini_flash" } : candidate === "luna" ? { model: "gpt-5.6-luna" } : { model: "gpt-5.6-terra" }),
+    target: candidate === "gemini_flash" ? "gemini_flash" : candidate === "deepseek_flash" ? "deepseek" : "codex",
+    ...(candidate === "sol" ? { model: "gpt-5.6-sol" } : candidate === "deepseek_flash" ? { model: "deepseek_flash" } : candidate === "gemini_flash" ? { model: "gemini_flash" } : candidate === "luna" ? { model: "gpt-5.6-luna" } : { model: "gpt-5.6-terra" }),
     prompt: "Return only a JSON object.",
     expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" }, allowExtraKeys: true },
     ...extra
@@ -141,9 +141,9 @@ function fullLiveDataset() {
   return liveDataset({
     tasks: [
       task("live-candidate-generation", "candidate_generation", "gemini_flash", { expected: { json: true, jsonKeys: ["candidates"], jsonShape: { candidates: "array" }, allowExtraKeys: true } }),
-      task("live-sourced-analysis", "sourced_analysis", "deepseek_pro", { expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" }, allowExtraKeys: true, sourceMarker: "LIVE-MARKER-1" } }),
-      task("live-strict-schema", "strict_schema", "deepseek_pro"),
-      task("live-edit-readiness", "controlled_edit_readiness", "deepseek_pro", { edit: editContract }),
+      task("live-sourced-analysis", "sourced_analysis", "deepseek_flash", { expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" }, allowExtraKeys: true, sourceMarker: "LIVE-MARKER-1" } }),
+      task("live-strict-schema", "strict_schema", "deepseek_flash"),
+      task("live-edit-readiness", "controlled_edit_readiness", "deepseek_flash", { edit: editContract }),
       task("live-edit-readiness-luna", "controlled_edit_readiness", "luna", { edit: editContract, profile: "luna_implementation" }),
       task("live-edit-readiness-terra", "controlled_edit_readiness", "terra", { edit: editContract, profile: "implementation" }),
       task("live-critical-review", "critical_review", "sol")
@@ -156,7 +156,7 @@ function resolvedModelFor(candidate) {
   if (candidate === "sol") return "gpt-5.6-sol";
   if (candidate === "luna") return "gpt-5.6-luna";
   if (candidate === "terra") return "gpt-5.6-terra";
-  return "deepseek/deepseek-v4-pro";
+  return "deepseek-flash";
 }
 
 function buildJsonOutput(task) {
@@ -232,16 +232,16 @@ test("WP3-LIVE-03: hata siniflandirmasi ve gecersiz dataset dogrulanir", async (
     tasks: [{
       id: "live-rate-limit-task",
       taskClass: "strict_schema",
-      candidate: "deepseek_pro",
-      target: "opencode",
-      model: "deepseek/deepseek-v4-pro",
+      candidate: "deepseek_flash",
+      target: "deepseek",
+      model: "deepseek_flash",
       prompt: "Return only a JSON object.",
       expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" }, failureClass: "rate_limited" }
     }]
   });
   const report = await runLiveModelFitEvaluation({
     dataset,
-    executeTask: async () => ({ output: "", resolvedModel: "deepseek/deepseek-v4-pro", failureClass: "rate_limited", durationMs: 50, costUsd: 0 })
+    executeTask: async () => ({ output: "", resolvedModel: "deepseek-flash", failureClass: "rate_limited", durationMs: 50, costUsd: 0 })
   });
   assert.equal(report.candidates[0].failureClassificationAccuracy, 1);
   assert.equal(report.candidates[0].checks.failureClassificationAccuracy, true);
@@ -348,49 +348,49 @@ test("WP3-LIVE-08: acik partial maliyet isareti toplulastirmada korunur", async 
 });
 
 test("WP3-LIVE-05: canli dataset kaynak isareti, edit sozlesmesi, aday politikasi ve json anahtarlarini zorunlu kilar", async () => {
-  const missingSource = liveDataset({ tasks: [{ id: "live-source", taskClass: "sourced_analysis", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p" }] });
+  const missingSource = liveDataset({ tasks: [{ id: "live-source", taskClass: "sourced_analysis", candidate: "deepseek_flash", target: "deepseek", model: "deepseek_flash", prompt: "p" }] });
   assert.equal(validateLiveModelFitDataset(missingSource).success, false);
-  const missingEdit = liveDataset({ tasks: [{ id: "live-edit", taskClass: "controlled_edit_readiness", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p" }] });
+  const missingEdit = liveDataset({ tasks: [{ id: "live-edit", taskClass: "controlled_edit_readiness", candidate: "deepseek_flash", target: "deepseek", model: "deepseek_flash", prompt: "p" }] });
   assert.equal(validateLiveModelFitDataset(missingEdit).success, false);
-  const missingKeys = liveDataset({ tasks: [{ id: "live-keys-missing", taskClass: "strict_schema", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p", expected: { json: true } }] });
+  const missingKeys = liveDataset({ tasks: [{ id: "live-keys-missing", taskClass: "strict_schema", candidate: "deepseek_flash", target: "deepseek", model: "deepseek_flash", prompt: "p", expected: { json: true } }] });
   assert.equal(validateLiveModelFitDataset(missingKeys).success, false);
-  const wrongCandidate = liveDataset({ tasks: [{ id: "live-wrong-candidate", taskClass: "strict_schema", candidate: "luna", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p", expected: { json: true, jsonKeys: ["status"] } }] });
+  const wrongCandidate = liveDataset({ tasks: [{ id: "live-wrong-candidate", taskClass: "strict_schema", candidate: "luna", target: "deepseek", model: "deepseek_flash", prompt: "p", expected: { json: true, jsonKeys: ["status"] } }] });
   assert.equal(validateLiveModelFitDataset(wrongCandidate).success, false);
-  const wrongBinding = liveDataset({ tasks: [{ id: "live-wrong-binding", taskClass: "candidate_generation", candidate: "gemini_flash", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p", expected: { json: true, jsonKeys: ["status"] } }] });
+  const wrongBinding = liveDataset({ tasks: [{ id: "live-wrong-binding", taskClass: "candidate_generation", candidate: "gemini_flash", target: "deepseek", model: "deepseek_flash", prompt: "p", expected: { json: true, jsonKeys: ["status"] } }] });
   assert.equal(validateLiveModelFitDataset(wrongBinding).success, false);
-  const wrongModel = liveDataset({ tasks: [{ id: "live-wrong-model", taskClass: "strict_schema", candidate: "deepseek_pro", target: "opencode", model: "openai/gpt-5.6-terra", prompt: "p", expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" } } }] });
+  const wrongModel = liveDataset({ tasks: [{ id: "live-wrong-model", taskClass: "strict_schema", candidate: "deepseek_flash", target: "deepseek", model: "openai/gpt-5.6-terra", prompt: "p", expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" } } }] });
   assert.equal(validateLiveModelFitDataset(wrongModel).success, false);
-  const flashModel = liveDataset({ tasks: [{ id: "live-flash-model", taskClass: "strict_schema", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-flash", prompt: "p", expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" } } }] });
+  const flashModel = liveDataset({ tasks: [{ id: "live-flash-model", taskClass: "strict_schema", candidate: "deepseek_flash", target: "deepseek", model: "deepseek-v4-flash", prompt: "p", expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" } } }] });
   assert.equal(validateLiveModelFitDataset(flashModel).success, false);
   const wrongSolModel = liveDataset({ tasks: [{ id: "live-wrong-sol", taskClass: "critical_review", candidate: "sol", target: "codex", model: "gpt-5.6-terra", prompt: "p", expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" } } }] });
   assert.equal(validateLiveModelFitDataset(wrongSolModel).success, false);
   const wrongGeminiModel = liveDataset({ tasks: [{ id: "live-wrong-gemini", taskClass: "candidate_generation", candidate: "gemini_flash", target: "gemini_flash", model: "gemini_pro", prompt: "p", expected: { json: true, jsonKeys: ["candidates"], jsonShape: { candidates: "array" } } }] });
   assert.equal(validateLiveModelFitDataset(wrongGeminiModel).success, false);
-  const editTask = { id: "live-edit-ok", taskClass: "controlled_edit_readiness", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p", edit: { files: ["src/a.txt"], contextFiles: [], acceptanceCriteria: ["ok"] } };
+  const editTask = { id: "live-edit-ok", taskClass: "controlled_edit_readiness", candidate: "deepseek_flash", target: "deepseek", model: "deepseek_flash", prompt: "p", edit: { files: ["src/a.txt"], contextFiles: [], acceptanceCriteria: ["ok"] } };
   assert.equal(validateLiveModelFitDataset(liveDataset({ tasks: [editTask] })).success, true);
   const lunaTask = { id: "live-edit-luna", taskClass: "controlled_edit_readiness", candidate: "luna", target: "codex", model: "gpt-5.6-luna", profile: "luna_implementation", prompt: "p", edit: { files: ["src/a.txt"], contextFiles: [], acceptanceCriteria: ["ok"] } };
   assert.equal(validateLiveModelFitDataset(liveDataset({ tasks: [lunaTask] })).success, true);
   const lunaNoProfile = { ...lunaTask, id: "live-edit-luna-no-profile", profile: undefined };
   assert.equal(validateLiveModelFitDataset(liveDataset({ tasks: [lunaNoProfile] })).success, false);
-  const profileOnRead = { id: "live-profile-read", taskClass: "strict_schema", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-pro", profile: "x", prompt: "p", expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" } } };
+  const profileOnRead = { id: "live-profile-read", taskClass: "strict_schema", candidate: "deepseek_flash", target: "deepseek", model: "deepseek_flash", profile: "x", prompt: "p", expected: { json: true, jsonKeys: ["status"], jsonShape: { status: "string" } } };
   assert.equal(validateLiveModelFitDataset(liveDataset({ tasks: [profileOnRead] })).success, false);
 
   const keyed = liveDataset({
-    tasks: [{ id: "live-keys", taskClass: "strict_schema", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p", expected: { json: true, jsonKeys: ["status", "summary"], jsonShape: { status: "string", summary: "string" } } }]
+    tasks: [{ id: "live-keys", taskClass: "strict_schema", candidate: "deepseek_flash", target: "deepseek", model: "deepseek_flash", prompt: "p", expected: { json: true, jsonKeys: ["status", "summary"], jsonShape: { status: "string", summary: "string" } } }]
   });
-  const partial = await runLiveModelFitEvaluation({ dataset: keyed, executeTask: async () => ({ output: JSON.stringify({ status: "completed" }), resolvedModel: "deepseek/deepseek-v4-pro", failureClass: "none", durationMs: 1, costUsd: 0 }) });
+  const partial = await runLiveModelFitEvaluation({ dataset: keyed, executeTask: async () => ({ output: JSON.stringify({ status: "completed" }), resolvedModel: "deepseek-flash", failureClass: "none", durationMs: 1, costUsd: 0 }) });
   assert.equal(partial.candidates[0].schemaPassRate, 0);
-  const complete = await runLiveModelFitEvaluation({ dataset: keyed, executeTask: async () => ({ output: JSON.stringify({ status: "completed", summary: "ok" }), resolvedModel: "deepseek/deepseek-v4-pro", failureClass: "none", durationMs: 1, costUsd: 0 }) });
+  const complete = await runLiveModelFitEvaluation({ dataset: keyed, executeTask: async () => ({ output: JSON.stringify({ status: "completed", summary: "ok" }), resolvedModel: "deepseek-flash", failureClass: "none", durationMs: 1, costUsd: 0 }) });
   assert.equal(complete.candidates[0].schemaPassRate, 1);
 
   const shaped = liveDataset({
-    tasks: [{ id: "live-shaped", taskClass: "strict_schema", candidate: "deepseek_pro", target: "opencode", model: "deepseek/deepseek-v4-pro", prompt: "p", expected: { json: true, jsonKeys: ["status", "count"], jsonShape: { status: "string", count: "number" }, jsonExact: { status: "completed" } } }]
+    tasks: [{ id: "live-shaped", taskClass: "strict_schema", candidate: "deepseek_flash", target: "deepseek", model: "deepseek_flash", prompt: "p", expected: { json: true, jsonKeys: ["status", "count"], jsonShape: { status: "string", count: "number" }, jsonExact: { status: "completed" } } }]
   });
-  const nullShape = await runLiveModelFitEvaluation({ dataset: shaped, executeTask: async () => ({ output: JSON.stringify({ status: "completed", count: null }), resolvedModel: "deepseek/deepseek-v4-pro", failureClass: "none", durationMs: 1, costUsd: 0 }) });
+  const nullShape = await runLiveModelFitEvaluation({ dataset: shaped, executeTask: async () => ({ output: JSON.stringify({ status: "completed", count: null }), resolvedModel: "deepseek-flash", failureClass: "none", durationMs: 1, costUsd: 0 }) });
   assert.equal(nullShape.candidates[0].schemaPassRate, 0);
-  const extraKey = await runLiveModelFitEvaluation({ dataset: shaped, executeTask: async () => ({ output: JSON.stringify({ status: "completed", count: 1, extra: true }), resolvedModel: "deepseek/deepseek-v4-pro", failureClass: "none", durationMs: 1, costUsd: 0 }) });
+  const extraKey = await runLiveModelFitEvaluation({ dataset: shaped, executeTask: async () => ({ output: JSON.stringify({ status: "completed", count: 1, extra: true }), resolvedModel: "deepseek-flash", failureClass: "none", durationMs: 1, costUsd: 0 }) });
   assert.equal(extraKey.candidates[0].schemaPassRate, 0);
-  const exactShape = await runLiveModelFitEvaluation({ dataset: shaped, executeTask: async () => ({ output: JSON.stringify({ status: "completed", count: 1 }), resolvedModel: "deepseek/deepseek-v4-pro", failureClass: "none", durationMs: 1, costUsd: 0 }) });
+  const exactShape = await runLiveModelFitEvaluation({ dataset: shaped, executeTask: async () => ({ output: JSON.stringify({ status: "completed", count: 1 }), resolvedModel: "deepseek-flash", failureClass: "none", durationMs: 1, costUsd: 0 }) });
   assert.equal(exactShape.candidates[0].schemaPassRate, 1);
-  assert.equal(exactShape.candidates[0].boundModel, "deepseek/deepseek-v4-pro");
+  assert.equal(exactShape.candidates[0].boundModel, "deepseek-flash");
 });

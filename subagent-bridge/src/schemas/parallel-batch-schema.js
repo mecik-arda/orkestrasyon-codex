@@ -63,7 +63,7 @@ export const parallelTaskContractSchema = z.object({
   maxFileBytes: z.number().int().min(1).max(524288).optional(),
   maxTotalDiffBytes: z.number().int().min(1).max(2097152).optional(),
   maxInputBytes: z.number().int().min(1).max(8388608).optional(),
-  maxOutputBytes: z.number().int().min(1024).max(8388608).optional(),
+  maxOutputBytes: z.number().int().min(1024).max(8388608).optional().describe("Aggregate raw process stdout plus stderr UTF-8 byte cap, including JSONL and tool events; not the final answer or public summary limit. Omit to use the host process-output cap. Overflow fails closed; short-answer instructions do not bound process output."),
   maxInputTokens: z.number().int().min(1).max(1000000).optional(),
   maxOutputTokens: z.number().int().min(1).max(32768).optional(),
   dependsOn: z.array(taskIdSchema).max(100).default([]),

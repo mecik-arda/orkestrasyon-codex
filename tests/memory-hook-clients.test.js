@@ -13,6 +13,12 @@ import {
   runMemoryHookClient
 } from "../subagent-bridge/src/services/memory-hook-client.js";
 
+function parseFirstJsonObject(output) {
+  const match = output.match(/^\{[\s\S]*?^\}\r?$/m);
+  assert.ok(match);
+  return JSON.parse(match[0]);
+}
+
 function fakeInput(rawText) {
   return {
     async *[Symbol.asyncIterator]() {
@@ -222,7 +228,7 @@ test("CLIENT-05: claude kurulumu yalnız birleştirilecek snippet üretir", () =
   const installerPath = path.resolve("scripts/install-memory-hook.js");
   const run = childProcess.spawnSync(process.execPath, [installerPath, "--client=claude"], { encoding: "utf8" });
   assert.equal(run.status, 0);
-  const result = JSON.parse(run.stdout.slice(run.stdout.indexOf("{"), run.stdout.lastIndexOf("}") + 1));
+  const result = parseFirstJsonObject(run.stdout);
   assert.equal(result.mode, "snippet");
   assert.equal(result.manualMergeRequired, true);
   assert.equal(result.written, false);
@@ -344,7 +350,7 @@ test("CLIENT-09: named global cohort reddedilir, project omission sabit unassign
   assert.equal(JSON.parse(globalNamed.stdout).reason, "global_named_cohort_rejected");
   const projectUnassigned = childProcess.spawnSync(process.execPath, [installerPath, "--client=codex", `--project-root=${fixture.projectRoot}`], { encoding: "utf8", env });
   assert.equal(projectUnassigned.status, 0, projectUnassigned.stderr || projectUnassigned.stdout);
-  const generated = JSON.parse(projectUnassigned.stdout.slice(projectUnassigned.stdout.indexOf("{"), projectUnassigned.stdout.indexOf("}") + 1));
+  const generated = parseFirstJsonObject(projectUnassigned.stdout);
   assert.equal(generated.runtimeCohort, "unassigned");
   const handler = JSON.parse(projectUnassigned.stdout.slice(projectUnassigned.stdout.indexOf("{\n  \"hooks\""))).hooks.UserPromptSubmit[0].hooks[0];
   assert.match(handler.command, /--cohort=unassigned/);
@@ -397,12 +403,12 @@ test("CLIENT-11: Codex global omission cwd ile dynamic çözer ve named mismatch
   assert.equal(JSON.stringify({ dynamic, mismatch, injections }).includes(fixture.projectRoot), false);
 });
 
-test("CLIENT-12: üç istemcide statik named global cohort reddedilir", (context) => {
+test("CLIENT-12: desteklenen istemcilerde statik named global cohort reddedilir", (context) => {
   const fixture = createCohortFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
   const installerPath = path.resolve("scripts/install-memory-hook.js");
   const env = { ...process.env, SUBAGENT_MEMORY_HOOK_COHORT_REGISTRY: fixture.registryPath };
-  for (const client of ["opencode", "codex", "claude"]) {
+  for (const client of ["codex", "claude"]) {
     const run = childProcess.spawnSync(process.execPath, [installerPath, `--client=${client}`, "--global", "--cohort=dersmerkezi"], { encoding: "utf8", env });
     assert.equal(run.status, 1, `${client}: ${run.stdout} ${run.stderr}`);
     assert.equal(JSON.parse(run.stdout).reason, "global_named_cohort_rejected");

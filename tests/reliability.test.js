@@ -5,7 +5,7 @@ import { resolveReliabilityBudget } from "../subagent-bridge/src/services/reliab
 import { calculateRetryDelayMs, classifyProcessFailure, isRetryableFailure } from "../subagent-bridge/src/retry.js";
 import { shouldRetry } from "../subagent-bridge/src/services/retry-service.js";
 import { parseDeepSeekEnvelope, validateDeepSeekResult } from "../subagent-bridge/src/result.js";
-import { createDeepSeekCheckpoint, DEEPSEEK_FLASH_MODEL_DOCUMENTED_VERSION, DEEPSEEK_FLASH_MODEL_VERSION_REVIEW_AFTER, DEEPSEEK_FLASH_MODEL_VERSION_SOURCE_URL, DEEPSEEK_FLASH_MODEL_VERSION_VERIFIED_AT, hasExactModelId, isCalendarDate, normalizeOpenCodeDeepSeekResult, resolveDeepSeekModel } from "../subagent-bridge/src/deepseek.js";
+import { createDeepSeekCheckpoint, DEEPSEEK_FLASH_MODEL_DOCUMENTED_VERSION, DEEPSEEK_FLASH_MODEL_VERSION_REVIEW_AFTER, DEEPSEEK_FLASH_MODEL_VERSION_SOURCE_URL, DEEPSEEK_FLASH_MODEL_VERSION_VERIFIED_AT, hasExactModelId, isCalendarDate, normalizeDeepSeekResult } from "../subagent-bridge/src/deepseek.js";
 
 function createStructuredResult(overrides = {}) {
   return {
@@ -132,21 +132,6 @@ test("yerel metrik görev kimliği ve çalışma alanı yolunu saklamaz", () => 
   assert.equal(metric.attempts.length, 1);
 });
 
-test("DeepSeek Flash seçimi canonical modele resolve edilir ve uydurma sürüm kimliği reddedilir", () => {
-  const configuration = { deepseek: { openCodeModel: "deepseek/deepseek-v4-pro", openCodeFlashModel: "deepseek/deepseek-flash" } };
-  assert.equal(resolveDeepSeekModel(configuration, "deepseek_pro"), "deepseek/deepseek-v4-pro");
-  assert.equal(resolveDeepSeekModel(configuration, "deepseek_flash"), "deepseek/deepseek-flash");
-  assert.throws(() => resolveDeepSeekModel(configuration, "deepseek_v4_1_flash"), /Desteklenmeyen/);
-  assert.throws(() => resolveDeepSeekModel(configuration, "deepseek/deepseek-v4.1-flash"), /Desteklenmeyen/);
-  assert.throws(() => resolveDeepSeekModel(configuration, "unknown"), /Desteklenmeyen/);
-});
-
-test("Legacy flash kimliğiyle yapılandırılmış köprü deepseek_flash aliasını legacy kimliğe çözer", () => {
-  const configuration = { deepseek: { openCodeModel: "deepseek/deepseek-v4-pro", openCodeFlashModel: "deepseek/deepseek-v4-flash" } };
-  assert.equal(resolveDeepSeekModel(configuration, "deepseek_flash"), "deepseek/deepseek-v4-flash");
-  assert.equal(resolveDeepSeekModel(configuration, "deepseek_pro"), "deepseek/deepseek-v4-pro");
-});
-
 test("DeepSeek Flash sürüm bildirimi gerçek takvim tarihleri ve gözden geçirme tarihiyle sınırlıdır", () => {
   assert.equal(DEEPSEEK_FLASH_MODEL_DOCUMENTED_VERSION, "DeepSeek-V4.1-Flash");
   assert.equal(isCalendarDate(DEEPSEEK_FLASH_MODEL_VERSION_VERIFIED_AT), true);
@@ -218,8 +203,8 @@ test("DeepSeek checkpoint separates operational failures from structured-output 
   assert.match(schemaFailure.result.summary, /Structured output validation failed \(output_parse_invalid\)/u);
 });
 
-test("OpenCode DeepSeek yalnız geçerli yapılandırılmış sonucu kabul eder", () => {
-  const result = normalizeOpenCodeDeepSeekResult("Kısa danışmanlık özeti");
+test("doğrudan DeepSeek API yalnız geçerli yapılandırılmış sonucu kabul eder", () => {
+  const result = normalizeDeepSeekResult("Kısa danışmanlık özeti");
   assert.equal(result.ok, false);
   assert.equal(result.errorClass, "output_parse_invalid");
 });

@@ -19,6 +19,10 @@ function createSourceFixture(sourceRoot, gitMarkerType) {
   const privateExporterTest = path.join(sourceRoot, "tests", "export-public.test.js");
   fs.mkdirSync(path.dirname(privateExporterTest), { recursive: true });
   fs.writeFileSync(privateExporterTest, "Private exporter test fixture\n", "utf8");
+  const policyPath = path.join(sourceRoot, "config", "policy.json");
+  fs.mkdirSync(path.dirname(policyPath), { recursive: true });
+  const personalWorkspacePath = String.raw`C:\Users\user\Desktop\Yazılım_Siber`;
+  fs.writeFileSync(policyPath, JSON.stringify({ workspacePath: personalWorkspacePath }), "utf8");
   for (const documentName of requiredArchitectureDocuments) {
     const documentPath = path.join(sourceRoot, "docs", "plans", "yapilanlar", documentName);
     fs.mkdirSync(path.dirname(documentPath), { recursive: true });
@@ -55,10 +59,12 @@ for (const gitMarkerType of ["file", "directory"]) {
         "-Staging",
         stagingRoot
       ], { encoding: "utf8", timeout: 120000 });
-      assert.equal(result.error, undefined, result.error?.message);
-      assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+      assert.equal(result.error, undefined, "public exporter process must start");
+      assert.equal(result.status, 0, "public exporter must exit successfully");
+      assert.equal(result.stdout.includes("Yazılım_Siber"), false);
       assert.equal(fs.statSync(path.join(stagingRoot, ".git")).isDirectory(), true);
       assert.equal(fs.readFileSync(path.join(stagingRoot, ".git", "config"), "utf8"), "staging git metadata\n");
+      assert.equal(fs.readFileSync(path.join(stagingRoot, "config", "policy.json"), "utf8").includes("C:\\\\Users\\\\ornek\\\\Desktop\\\\Projeler"), true);
       assert.equal(fs.existsSync(path.join(stagingRoot, "tests", "export-public.test.js")), false);
       for (const documentName of requiredArchitectureDocuments) {
         assert.equal(fs.existsSync(path.join(stagingRoot, "docs", "architecture", documentName)), true);

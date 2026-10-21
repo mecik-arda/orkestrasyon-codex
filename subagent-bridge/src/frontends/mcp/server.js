@@ -117,7 +117,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
   }, {
     instructions: "Frontend-neutral subagent bridge runtime için MCP frontend'i. Trusted workspace sunucu başlangıç context'i tarafından sağlanır. Paralel batch başlatıldığında get_parallel_batch ile durumu terminal duruma kadar sorgula ve kullanıcıya kısa, doğal durum güncellemeleri ver. Kullanıcı ayrı terminalde sürekli görünüm isterse batchId ile `npm run parallel:watch -- <batchId>` komutunu öner; bu salt-okunur watcher ikinci bridge süreci başlatmaz ve Ctrl+C batch'i iptal etmez. Yüzde çözümlenmiş task'lardan hesaplanır; unknown task tamamlanmış sayılmaz ve çalışan task içindeki model token ilerlemesi ölçülmez. Özel ASCII panel biçimi üretme."
   });
-  const handlers = createMcpToolHandlers({ runtime, trustedWorkspace, caller: "openCode", configuration });
+  const handlers = createMcpToolHandlers({ runtime, trustedWorkspace, caller: "codexDesktop", configuration });
   const workspaceIdentity = createWorkspaceIdentity(processCwdAtStartup, trustedWorkspace);
 
   server.registerResource(RULE_ATTESTATION_NAME, RULE_ATTESTATION_URI, {
@@ -246,7 +246,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     inputSchema: {},
     annotations: readOnlyAnnotations
   }, safe(async () => {
-    const health = await runtime.checkLegacyDeepSeek();
+    const health = await runtime.checkDeepSeek();
     const { executable, ...result } = health;
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
   }));
@@ -264,49 +264,6 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     inputSchema: publicToolInputShape(publicToolSchemas.runDeepSeekEditPilot),
     annotations: executionAnnotations
   }, safe(handlers.runDeepSeekEditPilot));
-
-  server.registerTool("check_glm_subagent", {
-    title: "GLM subagent bağlantısını kontrol et",
-    description: "OpenCode yürütücüsünü ve GLM 5.2/HighSpeed/5.3/5.3 Flash model eşlemesini secret değerlerini göstermeden kontrol eder.",
-    inputSchema: {},
-    annotations: readOnlyAnnotations
-  }, safe(async () => {
-    const health = await runtime.checkGlm();
-    const { executable, ...result } = health;
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
-  }));
-
-  server.registerTool("run_glm_subagent", {
-    title: "GLM subagent çalıştır",
-    description: "OpenCode üzerinden GLM 5.2, GLM 5.2 HighSpeed, GLM 5.3 veya GLM 5.3 Flash'ı read-only ya da kontrollü edit modunda çalıştırır. Reviewer rolü için açık files/contextFiles kapsamı zorunludur; required review katı JSON bulguları ve host manifestine göre doğrulanan path/line atıfları ister. Edit yalnız seçilmiş dosyaları disposable workspace sonrası trusted host workspace'e doğrulanmış promotion ile uygular.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runGlm),
-    annotations: executionAnnotations
-  }, safe(handlers.runGlm));
-
-  server.registerTool("run_glm_edit_pilot", {
-    title: "GLM disposable edit pilotu çalıştır",
-    description: "GLM 5.2, HighSpeed, 5.3 veya 5.3 Flash'a yalnız bridge-owned disposable workspace içinde kontrollü dosya düzenleme görevi verir; ana workspace'e değişiklik uygulamaz.",
-    inputSchema: publicToolSchemas.runGlmEditPilot.shape,
-    annotations: executionAnnotations
-  }, safe(handlers.runGlmEditPilot));
-
-  for (const [provider, handler] of [["kimi", handlers.runKimi], ["qwen", handlers.runQwen]]) {
-    server.registerTool(`check_${provider}_subagent`, {
-      title: `${provider} subagent bağlantısını kontrol et`,
-      description: `OpenCode model kataloğunda ${provider} model eşlemesini secret göstermeden kontrol eder.`,
-      inputSchema: {},
-      annotations: readOnlyAnnotations
-    }, safe(async () => {
-      const result = await runtime.checkCatalogProvider(provider);
-      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
-    }));
-    server.registerTool(`run_${provider}_subagent`, {
-      title: `${provider} subagent çalıştır`,
-      description: `OpenCode üzerinden ${provider} modelini read-only veya kontrollü edit modunda çalıştırır. Reviewer rolü için açık files/contextFiles kapsamı zorunludur; required review katı JSON bulguları ve host manifestine göre doğrulanan path/line atıfları ister.`,
-      inputSchema: publicToolInputShape(publicToolSchemas.runCatalogProvider),
-      annotations: executionAnnotations
-    }, safe(handler));
-  }
 
   server.registerTool("check_antigravity_subagent", {
     title: "Antigravity subagent bağlantısını kontrol et",
@@ -341,43 +298,21 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     annotations: executionAnnotations
   }, safe(handlers.runAntigravity));
 
+  if (configuration.orchestration?.acceptancePilots?.claudeSonnet?.enabled === true) {
+    server.registerTool("run_claude_sonnet_acceptance_pilot", {
+      title: "Claude Sonnet kabul pilotunu çalıştır",
+      description: "Sabit, araçsız 6 × 7 kabul görevi için Claude Sonnet 4.6 modeline yalnız bir host adapter denemesi gönderir; workspace bağlamı, retry, carrier repair ve fallback kullanmaz. Antigravity CLI'nin dahili retry veya yardımcı inference davranışı ve parasal üst sınır garanti edilmez. Yalnız aktif runtime config'te açıkça etkinleştirildiğinde kaydedilir.",
+      inputSchema: {},
+      annotations: externalReadOnlyExecutionAnnotations
+    }, safe(handlers.runClaudeSonnetAcceptancePilot));
+  }
+
   server.registerTool("run_claude_code_subagent", {
     title: "Claude Code subagent çalıştır",
     description: "Claude Code CLI üzerinden salt okunur veya düzenleme modunda görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır.",
     inputSchema: publicToolInputShape(publicToolSchemas.runClaudeCode),
     annotations: executionAnnotations
   }, safe(handlers.runClaudeCode));
-
-  server.registerTool("run_opencode_subagent", {
-    title: "OpenCode subagent çalıştır",
-    description: "Açıkça belirtilmiş bağımsız OpenCode provider modellerine görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır. Gemini modelleri Antigravity üzerinden çalıştırılmalıdır.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runOpenCode),
-    annotations: executionAnnotations
-  }, safe(handlers.runOpenCode));
-
-  server.registerTool("check_space_bunny_subagent", {
-    title: "Space Bunny Free kataloğunu kontrol et",
-    description: "OpenCode models.dev kataloğunu yenileyip yalnız opencode/space-bunny-free durumunu ve sıfır fiyat metadata'sını doğrular; auth veya canlı model erişimini kanıtlamaz.",
-    inputSchema: {},
-    annotations: externalReadOnlyExecutionAnnotations
-  }, safe(async () => {
-    const result = await runtime.checkSpaceBunny();
-    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };
-  }));
-
-  server.registerTool("run_space_bunny_subagent", {
-    title: "Space Bunny Free subagent çalıştır",
-    description: "Güncel durum (2026-10-13): OpenCode Free Tier, Bridge CLI üretim çağrısını HTTP 403 FreeTierError ile reddetti; bu route non-retryable permission_denied döndürür. Katalog/fiyat kontrolü canlı erişim kanıtı değildir. Erişim yolu izinli hale gelene kadar Space Bunny üretim çağrıları başarısız olur. Erişim sağlandığında sabit opencode/space-bunny-free modeliyle read-only görev, yalnız read-only researcher rolü ve OS-temp çalışma alanında webResearch, veya seçilmiş dosyalarda kontrollü edit yürütür; edit yalnız açık approve_prepared_edit ile trusted workspace'e terfi eder.",
-    inputSchema: publicToolSchemas.runSpaceBunny.innerType().shape,
-    annotations: executionAnnotations
-  }, safe(handlers.runSpaceBunny));
-
-  server.registerTool("run_space_bunny_edit_pilot", {
-    title: "Space Bunny disposable edit pilotu çalıştır",
-    description: "Space Bunny Free Bridge CLI yolu şu anda provider HTTP 403 FreeTierError nedeniyle non-retryable permission_denied ile blokludur; katalog kontrolü bu erişimi doğrulamaz. Erişim yolu izinli hale gelirse yalnız seçilmiş dosyaların bridge-owned disposable kopyasında dener ve ana workspace'e hiçbir değişiklik terfi ettirmez.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runSpaceBunnyEditPilot),
-    annotations: executionAnnotations
-  }, safe(handlers.runSpaceBunnyEditPilot));
 
   server.registerTool("run_codex_subagent", {
     title: "OpenAI Codex subagent çalıştır",
@@ -432,7 +367,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
   if (configuration.parallelBatch?.enabled === true) {
     server.registerTool("prepare_parallel_batch", {
       title: "Paralel batch planı hazırla",
-      description: "Ana orkestratörün sunduğu task DAG'ını strict şemaya göre doğrular, read-only dependency wave'lerini, dosya sahipliğini ve batch-local admission sınırlarını hesaplar, bounded özet döndürür ve hiçbir worker başlatmaz. Edit task'ları tek wave'dir. Plan kullanıcıya gösterildikten sonra ayrı bir açık onay turunda start_parallel_batch çağrılmalıdır.",
+      description: "Ana orkestratörün task DAG'ını doğrular; worker başlatmadan plan/hash, batch-local admission tahmini ve süreç çıktı sınırlarını gösterir. maxOutputBytes ham stdout+stderr toplam UTF-8 byte sınırıdır; JSONL/araç olaylarını da sayar, nihai cevap veya public özet sınırı değildir. Atlanırsa host süreç sınırı kullanılır. Kısa cevap talimatı süreç çıktısını sınırlamaz; output_limit sonrası scope/byte tanılarını inceleyip yeni plan için ayrı onay alın. Edit task'ları tek wave'dir. Plan gösterildikten sonra ayrı açık onayla start_parallel_batch çağrılmalıdır.",
       inputSchema: publicToolInputShape(publicToolSchemas.prepareParallelBatch),
       annotations: executionAnnotations
     }, safe(handlers.prepareParallelBatch));

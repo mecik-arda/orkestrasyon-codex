@@ -41,7 +41,6 @@ function configuration(root) {
       timeoutMs: 30000,
       deniedRootPaths: []
     },
-    opencode: { enabled: false, timeoutMs: 30000, maxRetries: 2, allowedModes: ["read_only"] }
   };
 }
 

@@ -1,12 +1,11 @@
 import crypto from "node:crypto";
-import { OPENCODE_MODEL_MAP } from "../adapters/opencode-adapter.js";
 
 export function resolveProviderAdmissionProfile(route, configuration = {}) {
   const backend = typeof route?.backend === "string" ? route.backend.toLocaleLowerCase("en-US") : "unknown";
   const requestedModel = typeof route?.model === "string" ? route.model.trim().toLocaleLowerCase("en-US") : "default";
-  const model = backend === "opencode" ? OPENCODE_MODEL_MAP[requestedModel] || requestedModel : requestedModel;
+  const model = requestedModel;
   const requestedRouteKey = `${backend}:${requestedModel}`;
-  const namespace = backend === "opencode" ? model.split("/")[0] || "default" : backend;
+  const namespace = backend === "deepseek" ? model : backend;
   const routeKey = `${backend}:${model}`;
   const namespaceKey = `${backend}:${namespace}`;
   return configuration.profileByRoute?.[requestedRouteKey]

@@ -5,47 +5,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
 
-test("SPACE-BUNNY-MCP-01: MCP read-only tool publishes its schema and dispatches selected model", async () => {
-  const runtimeCalls = [];
-  const runtime = {
-    runSpaceBunny: async (input) => {
-      runtimeCalls.push(input);
-      return { status: "completed", ok: true, result: "OK" };
-    }
-  };
-  const server = createSubagentMcpServer({ runtime, configuration: {}, trustedWorkspace: os.tmpdir() });
+test("retired OpenCode provider tools are not published by MCP", async () => {
+  const server = createSubagentMcpServer({ runtime: {}, configuration: {}, trustedWorkspace: os.tmpdir() });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: "space-bunny-tool-contract-test", version: "1.0.0" });
+  const client = new Client({ name: "retired-provider-contract-test", version: "1.0.0" });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
 
   try {
     const tools = await client.listTools();
-    const tool = tools.tools.find((entry) => entry.name === "run_space_bunny_subagent");
-    assert.ok(tool);
-    assert.match(tool.description, /HTTP 403 FreeTierError/);
-    assert.deepEqual(Object.keys(tool.inputSchema.properties).sort(), [
-      "acceptanceCriteria",
-      "contextFiles",
-      "files",
-      "mode",
-      "objective",
-      "role",
-      "taskId",
-      "timeout_seconds",
-      "webResearch"
-    ]);
-    assert.deepEqual([...tool.inputSchema.required].sort(), ["objective", "role", "taskId"]);
-
-    const result = await client.callTool({
-      name: "run_space_bunny_subagent",
-      arguments: { taskId: "space-bunny-contract", role: "analyst", objective: "Reply OK" }
-    });
-
-    assert.equal(result.isError, false);
-    assert.equal(result.structuredContent.result, "OK");
-    assert.equal(runtimeCalls.length, 1);
-    assert.equal(runtimeCalls[0].mode, "read_only");
-    assert.equal(runtimeCalls[0].taskId, "space-bunny-contract");
+    const retiredNames = new Set(["run_opencode_subagent", "check_glm_subagent", "run_glm_subagent", "run_glm_edit_pilot", "check_kimi_subagent", "run_kimi_subagent", "check_qwen_subagent", "run_qwen_subagent", "check_space_bunny_subagent", "run_space_bunny_subagent", "run_space_bunny_edit_pilot"]);
+    assert.equal(tools.tools.some((entry) => retiredNames.has(entry.name)), false);
   } finally {
     await client.close();
     await server.close();

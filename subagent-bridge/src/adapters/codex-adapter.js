@@ -312,7 +312,7 @@ export function createCodexAdapter(configuration) {
       const timeoutMs = request.timeoutMs || configuration?.codex?.timeoutMs || 900000;
       const command = buildCodexArgs(request, configuration);
       const streamReducer = request.caller === "parallel_batch" && request.mode === "read_only"
-        ? createJsonlOutputReducer("codex")
+        ? createJsonlOutputReducer()
         : null;
 
       const handle = createExecutionHandle(request.executionId);

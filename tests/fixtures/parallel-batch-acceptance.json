@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "left": 6,
+  "right": 7,
+  "expectedProduct": 42,
+  "label": "bounded-read-only-acceptance"
+}

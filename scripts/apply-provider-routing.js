@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateConfiguration } from "../subagent-bridge/src/config.js";
+import { migrateConfiguration, validateConfiguration } from "../subagent-bridge/src/config.js";
 import { getPersonalBridgeLayout } from "../subagent-bridge/src/personal-layout.js";
 
 const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -9,12 +9,11 @@ const templatePath = path.resolve(scriptDirectory, "..", "config", "policy.json"
 const layout = getPersonalBridgeLayout();
 const configurationPath = process.env.ORCHESTRATOR_CONFIG || layout.configPath;
 const backupDirectory = path.join(path.dirname(configurationPath), "backups");
-const current = JSON.parse(fs.readFileSync(configurationPath, "utf8"));
+const current = migrateConfiguration(JSON.parse(fs.readFileSync(configurationPath, "utf8"))).configuration;
 const template = JSON.parse(fs.readFileSync(templatePath, "utf8"));
 const candidate = {
   ...current,
-  kimi: template.kimi,
-  qwen: template.qwen,
+  configVersion: template.configVersion,
   reliability: template.reliability,
   orchestration: {
     ...current.orchestration,

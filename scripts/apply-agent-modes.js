@@ -47,9 +47,6 @@ for (const [backend, currentAgent] of Object.entries(current.agents || {})) {
   delete candidate.mode;
   if (templateAgent.deepSeekReadOnlyAgent) candidate.deepSeekReadOnlyAgent = templateAgent.deepSeekReadOnlyAgent;
   if (templateAgent.deepSeekEditAgent) candidate.deepSeekEditAgent = templateAgent.deepSeekEditAgent;
-  if (templateAgent.glmEditAgent) candidate.glmEditAgent = templateAgent.glmEditAgent;
-  if (templateAgent.kimiEditAgent) candidate.kimiEditAgent = templateAgent.kimiEditAgent;
-  if (templateAgent.qwenEditAgent) candidate.qwenEditAgent = templateAgent.qwenEditAgent;
   if (templateAgent.editAgent) candidate.editAgent = templateAgent.editAgent;
   if (templateAgent.allowedModels) candidate.allowedModels = [...new Set([...(currentAgent.allowedModels || []), ...templateAgent.allowedModels])];
   agents[backend] = candidate;

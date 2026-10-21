@@ -1,5 +1,26 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-10-21 22:22 commit ve süresi geçen P3 planı
+
+- Sol'un dosya diff'ine erişen yerel incelemesi Antigravity izin sınıflandırma düzeltmesini ve sahte CLI test kapsamını uygun buldu. Yalnız `subagent-bridge/src/adapters/antigravity-adapter.js`, `tests/claude-sonnet-pilot.test.js` ve `tests/fixtures/claude-sonnet-pilot-read-only-fixture.js` `1647ea5cf93c7cb1e08e569dafc2db4a4d172cd5` commit'ine alındı. Commit öncesi staged diff yalnız bu üç dosyaydı; secret/config/Vault/log/temporary path dahil edilmedi. İlgili doğrulamalar 22:15 ekinde yer alır ve kod commit'inden sonra kaynak değişmedi.
+- Dört doküman bu güncelleme için hâlâ unstaged; Git çalışma ağacı temiz değildir. P3 iptal planı `13a9078da5a99b15cf3812c999fe224b` / `ba4d686bf00784fb303b11e17852c454d22c9c8249e9b3b1f4d9ff6194451c26` 20:46 TRT son kullanımını geçti. Kullanıcının eski hash'e verdiği onayla başlatma yapılmadı; yeni plan için yeni hash ve ayrı onay gerekir. Provider/batch çağrısı yapılmadı.
+- P1b canlı Claude görev kabulü; P2 canlı red/stale/recovery ve ayrıca onaylı entegrasyon; P3 timeout/unknown/restart/expired-plan ve edit batch entegrasyonu; P6 nihai kapanış açık kalır. Genel geçiş tamamlanmamıştır.
+
+## 2026-10-21 22:18 canlı identity ve çağrılabilir araç kataloğu
+
+- Canlı `hades://workspace/identity/v1` iki alanı da beklenen `dc3d26eb65bfc4ef48a71103bfb33d44b73e7a1873139d2c6d7917b97248e68b` özetiyle doğruladı. Bu resource kaynak revision'ı veya host attestation sağlamaz.
+- Bu oturumun çağrılabilir Hades kataloğunda Codex disposable pilotu ve `approve_prepared_edit` var; `reject_prepared_edit`, Claude özel pilotu ve OpenCode aracı yok. Kaynak kod `reject_prepared_edit` aracını approval açıkken `approve_prepared_edit` ile aynı koşulda kaydediyor. Katalog ile yerel kaynak arasındaki farkın nedeni (yüklenmiş eski/different revision veya katalog davranışı) yalnız bu gözlemle ayırt edilemez. Ham `tools/list` yanıtı ayrıca alınmadığından bunu MCP server inventory'sinin kesin kanıtı olarak genişletme.
+- Hiçbir pilot, provider veya batch çağrılmadı. P2 canlı red kapısı doğrulanmış sayılmaz. Son Antigravity adapter değişikliği canlı kontrolden sonra yapıldı; canlı tanılama için Hades reload/restart ve ardından salt-okunur identity/katalog kontrolü gerekir.
+
+## 2026-10-21 22:15 Antigravity izin hatası tanılaması ve açık batch onayı
+
+- P1b Claude canonical geçmiş kaydı `permission_denied`, `process_spawn`, `EPERM` gösteriyordu; yeni yerel düzeltme Antigravity `EACCES`/`EPERM` kodlarını `permission_denied` yapıyor. Bu izin hatalarında gerçek spawn syscall'ı `process_spawn` aşamasını, spawn dışı syscall ise çağıranın aşamasını korur. Bu düzeltme geçmiş başarısızlığın hangi komutu, provider inference'ını veya faturalamayı içerdiğini kanıtlamaz.
+- Fake CLI testi preflight spawn reddinde provider-amaçlı başlatmanın sıfır, `--print` spawn reddinde bir olduğunu; `open` kaynaklı EPERM'in `mcp_preflight` olarak korunduğunu; redakte tanıların runtime ve recent-run telemetry'ye taşındığını doğrular. Normal Antigravity retry davranışında değişiklik yok.
+- Hedefli test 7/7; `npm test` 883 toplam, 879 geçti, 4 platform skip, 0 başarısız. `npm run verify`, `npm run verify:ci`, `npm run drill` ve `git diff --check` geçti. `drill` sandbox içindeki ilk koşuda iki circuit state beklentisini karşılamadı; normal Windows izinleriyle tekrar 10/10 geçti. İlk testte yazma hatası görünür kayda alınmadığından kesin OS nedeni bilinmiyor. Verify yalnız DeepSeek `/models` health GET yaptı ve erişilemez raporladı; provider inference/batch yok.
+- Sol'a commit uygunluğu için bir read-only çağrı yapıldı ancak model çalışma dosyalarını/diff'i göremediği için değerlendirme veremedi. Bu nedenle yeni üç dosya değişikliği commit edilmedi. Durum: `subagent-bridge/src/adapters/antigravity-adapter.js`, `tests/claude-sonnet-pilot.test.js`, `tests/fixtures/claude-sonnet-pilot-read-only-fixture.js` çalışma ağacında değişmiş; push yok.
+- Kullanıcının onayladığı P3 iptal planı `13a9078da5a99b15cf3812c999fe224b` / `ba4d686bf00784fb303b11e17852c454d22c9c8249e9b3b1f4d9ff6194451c26` 20:46 TRT'de süresi dolmuştu. Başlatma yapılmadı ve eski hash yeniden kullanılmadı. Önceki canlı batch `196762e7d7fde72c73c5932d28800326` cancel kabulünü zaten geçtiği için bu senaryo tekrarlanmayacak; başka dayanıklılık kapısı için gerekirse yeni plan/hash ve ayrı onay gerekir.
+- P1b Claude görev kabulü, P2 canlı approval/reject/stale/recovery ve ayrıca onaylı kaynak entegrasyonu, P3 timeout/unknown/restart/expired-plan/edit entegrasyonu, P6 belge kapanışı açık. Genel geçiş tamamlanmamıştır. Bu adapter kodu etkin Hades'te yüklü sayılmaz; yeni tanılamayı canlıda kullanmadan önce Hades restart/reload ve identity/envanter doğrulaması gerekir.
+
 ## 2026-10-21 22:01 P2 sabit fixture kabulü ve Claude MCP strict girdi düzeltmesi
 
 - Codex disposable pilot runtime'ı provider'dan bağımsız biçimde sabit kaynak fixture'ının tam başlangıç bytesını doğrular, yalnız disposable hedef dosyasının tam `after\n` bytesına dönüşmesini kabul eder ve kaynak fixture SHA-256 değerinin çalıştırma öncesi/sonrası değişmediğini doğrular. Strict sonuçta kaynak öncesi/sonrası ve disposable hedef hash'leri taşınır. Beklenmeyen içerik fail-closed sonuçlanır; promotion yoktur.

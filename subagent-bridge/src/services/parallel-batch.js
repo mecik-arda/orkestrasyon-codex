@@ -869,9 +869,16 @@ export function createParallelBatchService({
       costEstimatedUsd: roundCost(totalAllocationUsd),
       isProviderInvoice: false
     });
-    const processOutputCaps = taskRoutes.map(({ contract }) => `${contract.taskId}=${resolveProcessOutputCap(contract)} (${contract.maxOutputBytes === undefined ? "host default" : "task"})`).join(", ");
-    const attemptLimits = taskRoutes.map(({ contract, attemptBounds }) => `${contract.taskId}=${attemptBounds.maxAdapterAttempts} total adapter attempts across primary/fallback routes, max ${attemptBounds.maxTimeoutMsPerAttempt}ms per attempt`).join("; ");
-    const planMessage = `plan prepared; effective per-task adapter attempt and timeout ceilings: ${attemptLimits}. Adapter attempts include retries and configured fallbacks; provider CLI internal inference/actual billing counts are not observable. Aggregate process stdout+stderr UTF-8 byte caps: ${processOutputCaps}. Includes JSONL/tool events, not final answer size. Separate public summary limits: ${batchConfiguration.maxSummaryCharacters || 4096} characters per task, ${batchConfiguration.maxBatchSummaryBytes || 20480} UTF-8 bytes per batch. Short-answer instructions do not bound process output. User approval and start_parallel_batch are required.`;
+    const hostSnapshotBytes = batchConfiguration.maxReadableSnapshotBytes ?? 8388608;
+    const taskCeilings = taskRoutes.map(({ contract, attemptBounds }) => {
+      const snapshotSource = contract.maxInputBytes === undefined ? "h" : "t";
+      const outputSource = contract.maxOutputBytes === undefined ? "h" : "t";
+      const snapshotLimit = contract.mode === "read_only"
+        ? `${Math.min(hostSnapshotBytes, contract.maxInputBytes ?? hostSnapshotBytes)}${snapshotSource}`
+        : "edit-worktree";
+      return `${contract.taskId}=${attemptBounds.maxAdapterAttempts}/${attemptBounds.maxTimeoutMsPerAttempt}/${snapshotLimit}/${resolveProcessOutputCap(contract)}${outputSource}`;
+    }).join("; ");
+    const planMessage = `Per-task limits (attempts incl. retry/fallback / ms per attempt / readable snapshot UTF-8 bytes t=task or h=host, edit=Git worktree / stdout+stderr UTF-8 bytes t/h): ${taskCeilings}. CLI internal inference and billing are unobservable. Process cap includes JSONL/tool events, not final answer. Public summary cap: ${batchConfiguration.maxSummaryCharacters ?? 4096} characters/task, ${batchConfiguration.maxBatchSummaryBytes ?? 20480} UTF-8 bytes/batch. Short-answer instructions do not bound process output. User approval and start_parallel_batch required.`;
     const summaryValidation = validateParallelBatchSummary(buildSummary({
       batchId: null,
       planId,

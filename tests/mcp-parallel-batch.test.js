@@ -120,8 +120,25 @@ test("V2-MCP: server construction honors the parallel batch gate", () => {
 });
 
 test("V2-MCP: published process-output contract distinguishes raw bytes from final summaries", async () => {
+  const runtime = createStubRuntime({
+    async prepareParallelBatch() {
+      return {
+        ok: true,
+        planId: "a".repeat(32),
+        planHash: "b".repeat(64),
+        allocation: { estimatedUsd: 0.4, capUsd: 0.75 },
+        summary: {
+          planId: "a".repeat(32),
+          planHash: "b".repeat(64),
+          status: "planned",
+          message: "Per-task limits: task-one=1/30000/4096t/1048576h. CLI internal inference and billing are unobservable.",
+          contentBytes: 10
+        }
+      };
+    }
+  });
   const server = createSubagentMcpServer({
-    runtime: createStubRuntime(),
+    runtime,
     configuration: { parallelBatch: { enabled: true } },
     trustedWorkspace: process.cwd()
   });
@@ -139,6 +156,12 @@ test("V2-MCP: published process-output contract distinguishes raw bytes from fin
     assert.match(outputCap.description, /not the final answer or public summary/u);
     assert.match(prepare.description, /maxOutputBytes ham stdout\+stderr/u);
     assert.match(prepare.description, /output_limit/u);
+    const prepared = await client.callTool({
+      name: "prepare_parallel_batch",
+      arguments: { objective: "Inspect", batchMaxReservedCostUsd: 0.75, tasks: [readOnlyTask()] }
+    });
+    assert.match(prepared.structuredContent.summary.message, /Per-task limits: task-one=1\/30000\/4096t\/1048576h/u);
+    assert.match(prepared.content[0].text, /Per-task limits: task-one=1\/30000\/4096t\/1048576h/u);
   } finally {
     await client.close();
   }

@@ -149,7 +149,7 @@ test("V2-BATCH: prepare validates and returns a bounded plan without starting wo
   const result = await service.prepare({
     objective: "Inspect files",
     batchMaxReservedCostUsd: 1,
-    tasks: [baseTask("task-one"), baseTask("task-two", ["src/b.txt"])]
+    tasks: [{ ...baseTask("task-one"), maxInputBytes: 4096 }, baseTask("task-two", ["src/b.txt"])]
   });
   assert.equal(result.ok, true);
   assert.match(result.planId, /^[a-f0-9]{32}$/);
@@ -160,10 +160,33 @@ test("V2-BATCH: prepare validates and returns a bounded plan without starting wo
   assert.equal(result.summary.tasks.length, 2);
   assert.equal(runtime.executions.length, 0);
   assert.equal(result.summary.budget.isProviderInvoice, false);
-  assert.match(result.summary.message, /task-one=8388608 \(host default\)/u);
-  assert.match(result.summary.message, /task-one=1 total adapter attempts across primary\/fallback routes, max 30000ms per attempt/u);
-  assert.match(result.summary.message, /stdout\+stderr UTF-8 byte caps/u);
-  assert.match(result.summary.message, /4096 characters per task, 8192 UTF-8 bytes per batch/u);
+  assert.match(result.summary.message, /task-one=1\/30000\/4096t\/8388608h/u);
+  assert.match(result.summary.message, /task-two=1\/30000\/1048576h\/8388608h/u);
+  assert.match(result.summary.message, /attempts incl\. retry\/fallback/u);
+  assert.match(result.summary.message, /Process cap includes JSONL\/tool events, not final answer/u);
+  assert.match(result.summary.message, /4096 characters\/task, 8192 UTF-8 bytes\/batch/u);
+});
+
+test("V2-BATCH: maximum valid task identifiers keep effective ceilings within summary schema", async (t) => {
+  const { service, runtime } = createFixture(t);
+  const tasks = Array.from({ length: 5 }, (_, index) => {
+    const taskId = `${"a".repeat(62)}${String(index).padStart(2, "0")}`;
+    return {
+      ...baseTask(taskId),
+      ...(index === 0 ? { maxInputBytes: 4096 } : {}),
+      ...(index === 1 ? { maxOutputBytes: 262144 } : {})
+    };
+  });
+  const prepared = await service.prepare({
+    objective: "Inspect bounded plan preview",
+    batchMaxReservedCostUsd: 1,
+    tasks
+  });
+  assert.equal(prepared.ok, true);
+  assert.equal(prepared.summary.message.length <= 2048, true);
+  assert.match(prepared.summary.message, /a{62}00=1\/30000\/4096t\/8388608h/u);
+  assert.match(prepared.summary.message, /a{62}01=1\/30000\/1048576h\/262144t/u);
+  assert.equal(runtime.executions.length, 0);
 });
 
 test("V2-BATCH: prepare reports policy-resolved retry and task timeout ceilings without starting a worker", async (t) => {
@@ -179,7 +202,7 @@ test("V2-BATCH: prepare reports policy-resolved retry and task timeout ceilings 
     tasks: [{ ...baseTask("timeout-review"), model: "gpt-6.1-sol", timeoutSeconds: 10 }]
   });
   assert.equal(prepared.ok, true);
-  assert.match(prepared.summary.message, /timeout-review=2 total adapter attempts across primary\/fallback routes, max 10000ms per attempt/u);
+  assert.match(prepared.summary.message, /timeout-review=2\/10000\//u);
   const storedPlan = await registry.getPlan(prepared.planId);
   assert.deepEqual(storedPlan.tasks[0].attemptCeilings, [{ backend: "codex", model: "gpt-6.1-sol", maxAttempts: 2, timeoutMs: 10000 }]);
   assert.equal(runtime.executions.length, 0);
@@ -214,7 +237,7 @@ test("V2-BATCH: prepare binds profile fallback attempt ceilings to the immutable
   };
   const initial = await service.prepare({ objective: "Review fallback ceilings", batchMaxReservedCostUsd: 1, tasks: [task] });
   assert.equal(initial.ok, true);
-  assert.match(initial.summary.message, /fallback-review=2 total adapter attempts across primary\/fallback routes, max 30000ms per attempt/u);
+  assert.match(initial.summary.message, /fallback-review=2\/30000\//u);
   const initialPlan = await registry.getPlan(initial.planId);
   assert.deepEqual(initialPlan.tasks[0].attemptCeilings, [
     { backend: "codex", model: "gpt-6.1-sol", maxAttempts: 1, timeoutMs: 30000 },
@@ -224,7 +247,7 @@ test("V2-BATCH: prepare binds profile fallback attempt ceilings to the immutable
   const changedFallback = await service.prepare({ objective: "Review fallback ceilings", batchMaxReservedCostUsd: 1, tasks: [task] });
   assert.equal(changedFallback.ok, true);
   assert.notEqual(changedFallback.planHash, initial.planHash);
-  assert.match(changedFallback.summary.message, /fallback-review=2 total adapter attempts across primary\/fallback routes, max 30000ms per attempt/u);
+  assert.match(changedFallback.summary.message, /fallback-review=2\/30000\//u);
   assert.equal(runtime.executions.length, 0);
 });
 
@@ -253,7 +276,7 @@ for (const processCap of [4096, 262144]) {
       tasks: [{ ...baseTask("bounded-review"), model: "gpt-6.1-sol", maxOutputBytes: processCap }]
     });
     assert.equal(prepared.ok, true);
-    assert.match(prepared.summary.message, new RegExp(`bounded-review=${processCap} \\(task\\)`, "u"));
+    assert.match(prepared.summary.message, new RegExp(`bounded-review=2/10000/1048576h/${processCap}t`, "u"));
     assert.equal(runtime.executions.length, 0);
     const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
     const summary = await waitForBatch(service, started.batchId, [processCap === 4096 ? "failed" : "result_ready"]);
@@ -503,6 +526,7 @@ test("V2-BATCH: terminal edit batches release diffs when integration cannot star
   ];
   const prepared = await fixture.service.prepare({ objective: "Run two independent edits", batchMaxReservedCostUsd: 1, tasks });
   assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  assert.match(prepared.summary.message, /edit-one=1\/30000\/edit-worktree\/8388608h/u);
   const started = await fixture.service.start({ planId: prepared.planId, planHash: prepared.planHash });
   const summary = await waitForBatch(fixture.service, started.batchId, ["result_ready"]);
   assert.equal(summary.tasks.filter((task) => task.status === "completed").length, 1);
@@ -1698,7 +1722,7 @@ test("V2-BATCH: per-task and default output bytes stay under the host ceiling", 
     tasks: [{ ...baseTask("bounded-output"), maxOutputBytes: 2048 }]
   });
   assert.equal(prepared.ok, true);
-  assert.match(prepared.summary.message, /bounded-output=2048 \(task\)/u);
+  assert.match(prepared.summary.message, /bounded-output=1\/30000\/1048576h\/2048t/u);
   const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
   await waitForBatch(service, started.batchId, ["result_ready"]);
   assert.equal(runtime.executions[0].maxOutputBytes, 2048);
@@ -1709,7 +1733,7 @@ test("V2-BATCH: per-task and default output bytes stay under the host ceiling", 
     tasks: [baseTask("host-default-output")]
   });
   assert.equal(defaultLimited.ok, true);
-  assert.match(defaultLimited.summary.message, /host-default-output=4096 \(host default\)/u);
+  assert.match(defaultLimited.summary.message, /host-default-output=1\/30000\/1048576h\/4096h/u);
   const defaultLimitedStart = await service.start({ planId: defaultLimited.planId, planHash: defaultLimited.planHash });
   await waitForBatch(service, defaultLimitedStart.batchId, ["result_ready"]);
   assert.equal(runtime.executions[1].maxOutputBytes, 4096);

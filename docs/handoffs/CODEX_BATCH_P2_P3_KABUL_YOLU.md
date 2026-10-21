@@ -1,5 +1,7 @@
 # Codex batch P2/P3 kabul yolu
 
+Güncel kabul durumu — 2026-10-21, son Hades restart kontrolü: Önceki tekil Codex disposable provider pilotu `gpt-6.1-sol` ile `completed` ve `applied=false` raporlandı; yalnız sabit disposable fixture yolu çalıştı. Yerel onay/stale-hash/recovery fixture'ları `b4c528a` commit'inde doğrulandı (`10/10` hedefli, `npm test` 865 toplam/861 geçti/4 platform skip/0 fail, `npm run verify:ci` geçti). Bu testler canlı entegrasyon değildir. Salt-okunur DAG `70e5d365632ba7b3927ad3e2d8edcaf2` zaten başarılıdır ve yeniden başlatılmamalıdır. Canlı identity beklenen workspace hash'leriyle eşleşir; envanterde OpenCode ve Claude özel pilotu yok, Codex edit pilotu görünür. Yeni pilot çağrısı bu doküman değişiklikleri commit edilip temiz Git durumu doğrulanana dek başlatılmadı. P2 canlı approval/recovery ve ayrı diff entegrasyonu ile P3 dayanıklılık ve edit batch entegrasyonu hâlâ açıktır. Batch başlangıcına yeni plan/hash için ayrı onay, entegrasyona ayrıca diff/hash onayı gerekir.
+
 Yerel P2 approval/recovery ilerlemesi — 2026-10-21: `tests/profile-edit-pilot.test.js` geçici kaynak ve sahte adapter üzerinde açık onay öncesi değişmezliği/onay sonrası seçili dosya uygulamasını, stale kaynak durumunda onayın reddini ve recovery artefaktında fail-closed bekleyip toparlanmayı doğrular. Hedefli test 10/10; tam `npm test` 865/861/4 platform skip/0 fail; `npm run verify:ci` geçti. Bunlar yerel fixture kanıtıdır, canlı provider veya gerçek kaynak entegrasyonu değildir. P2 canlı kalan adımlar canlı disposable kabul ve ayrı diff/onaylı entegrasyondur; P3 canlı dayanıklılık batch'i ve edit batch entegrasyonu da açık kalır.
 
 Güncel canlı durum — 2026-10-21: Kullanıcının tekil onayıyla sabit `gpt-6.1-sol` Codex disposable edit pilotu bir kez çalıştı. Raporlanan sonuç tamamlandı, sabit fixture hedefi ve başarılı cleanup idi; `applied=false` kaynak repoya promotion yapılmadığını gösterir. Bu, P2'nin temel provider/disposable edit gözlemidir; onay/red, stale hash ve recovery alt kapılarını karşılamaz. Kullanıcı Hades'i yeniden başlattıktan sonra iki workspace identity özeti beklenen değerle eşleşti ve Codex/Claude özel pilot araçları envanterden kalktı. P1b Claude Sonnet görev kabulinin son sonucu `permission_denied/process_spawn/EPERM`; tam alt süreç nedeni ve gerçek inference/faturalama bilinmiyor. Önceki başarılı read-only DAG korunur ve tekrarlanmaz. Güncel test/doğrulama ve açık kararların ayrıntısı [uygulama raporundadır](../reports/CODEX_DESKTOP_GECIS_UYGULAMA_DURUMU_2026-10-18.md).
@@ -24,7 +26,11 @@ Gerçek batch servisi → runtime → Codex adapter → sahte Node süreci regre
 
 Gerekli kapılar: hedefli batch/runtime/adapter/P2 testleri, `npm test`, `npm run verify`, `npm run smoke`, `npm run verify:ci`, `git diff --check`. Verify/smoke inference başlatmaz; CLI sürümü ve DeepSeek `/models` sağlık isteği kullanabilir. Smoke Vault health/review/hedefli arama ve bir seçilmiş not okuması yapar; içerik yazmaz veya çıktıya dökmez. Yerel stdio testi etkin Desktop bağlantısı kanıtı değildir.
 
-## İlk canlı adım: küçük, gerçek read-only DAG
+## Tamamlanmış canlı adım: küçük, gerçek read-only DAG
+
+İlk DAG kabulü `70e5d365632ba7b3927ad3e2d8edcaf2` batch'iyle tamamlandı ve tekrarlanmayacaktır. Üç fixture görevi `result_ready` durumuna geldi; iki bağımsız kontrol ile dependency task'ı başarılı oldu. Bu kanıt yalnız salt-okunur DAG/dependency/izleme yoluna aittir; cancel, timeout, unknown, restart, edit veya entegrasyon dayanıklılığını kanıtlamaz. Önceki unknown rezerv kayıtları değişmez tarihsel metadata olarak korunur.
+
+Bu bölümdeki görev sözleşmesi ve limitler tamamlanmış batch'in kaydını açıklar; yeni batch hazırlama veya başlatma izni değildir.
 
 Geniş kaynak incelemesini tekrarlamak yerine yalnız `tests/fixtures/parallel-batch-acceptance.json` snapshot'ını kullanan üç görev hazırlanır. Dosya küçük ve secretsizdir. Kod veya doküman inceleme raporu istenmez.
 
@@ -44,7 +50,7 @@ Başlatma onayı sonrasında terminal duruma kadar izlenir. Üç task completed/
 
 ## Açık kalan gerçek kabul adımları
 
-1. P2: ayrıca onaylanmış disposable kaynakta seçili dosyalı Codex edit pilotu; kaynak öncesi/sonrası hash, seçilmemiş dosya koruması, path/secret reddi ve otomatik terfi olmaması. Ayrı onay/red, eski kaynak hash'i ve yarım promotion recovery senaryoları ölçülür. Mevcut kirli checkout edit batch kaynağı yapılamaz; commit olmadan temiz ilan edilemez. Temiz disposable kaynakta çalışmak mevcut `source_workspace_dirty` kapısını değiştirme yetkisi değildir.
+1. P2: Codex disposable provider edit denemesi bir kez `completed`/`applied=false` olarak raporlanmıştır; bu, approval/recovery kabulinin yerine geçmez. Yerel fixture'lar açık onay, kaynak değişiminde stale approval reddi ve recovery fail-closed davranışını doğrular. Kalan canlı alt kapılar approval/red/stale-hash/recovery davranışının gerçek kontrollü yolda kanıtı ve kullanıcı tarafından ayrıca onaylanmış tam diff/hash'in entegrasyonudur. Bu belge değişiklikleri de dahil olmak üzere çalışma ağacı temiz değildir; commit sonrası gerçek Git durumu yeniden doğrulanmadan `source_workspace_dirty` önkoşulu sağlandı sayılamaz. Kapı değiştirilemez veya aşılamaz.
 2. P3 dayanıklılık: ayrıca onaylanmış disposable read-only batch ile iptal, timeout, worker unknown, restart ve expired plan kabulü. Restart testi sırasında unknown sonuç yeniden dispatch edilmez; unknown maliyetler korunur. Başarılı DAG bu senaryoları kapatmaz.
 3. P3 edit: P2 sonrası temiz ve kapsamı onaylı kaynak, ayrı edit opt-in, task başına dosya sahipliği, izole worktree, host verification, birleşik diff/hash incelemesi ve ayrı entegrasyon onayı. Kaynak HEAD/hash değişimi onayı geçersiz kılmalı; recovery çatışması fail-closed kalmalıdır.
 4. P6: tüm canlı kanıtlar ayrı ayrı kapandıktan sonra plan/rapor uzlaştırılır. Kabul bittikten sonra batch opt-in kapanışı ve restart sonrası canlı envanter doğrulaması ayrı son adımdır. Bu görev hesap, Vault veya opt-in ayarı değiştirmez.

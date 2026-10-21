@@ -1,5 +1,13 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-10-21 P2 disposable Codex edit pilot erişimi
+
+- MCP'ye varsayılanı kapalı `run_codex_profile_edit_pilot` aracı eklendi. Araç girdisi strict ve boş nesneyle sınırlı; görev, model `gpt-6.1-sol` ve `tests/fixtures/codex-profile-edit-pilot/value.txt` hedefi host tarafından sabittir.
+- Runtime, aynı kontrollü disposable edit/toplama yolunu `promote:false` ile kullanır. 60 saniye timeout, stdout+stderr toplamı için 65536 byte cap, bir Codex adapter denemesi, sıfır runtime retry, schema repair ve fallback host değerleridir. Codex CLI için pilot çağrısında yapılandırılmış ek argümanlar kullanılmaz ve sandbox ağ erişimi kapatılır. Dosya sahipliği/toplama kontrolü izin dışı değişikliği reddeder; entegrasyon yolu çağrılmaz.
+- Sahte adapter ve geçici checkout testleri kaynak dosyanın değişmediğini, yalnız fixture'ın disposable kopyasının değiştiğini, sınır değerlerini, preflight reddini, hatada tek denemeyi, strict MCP sonucunu ve normal edit regresyonunu doğrular. Bu kanıt canlı provider/P2 kabulü değildir.
+- Bu turda provider/model veya capability çağrısı, batch, entegrasyon, Vault/config kişisel ayarı, commit/push yapılmadı. Dağıtım şablonu pilotu kapalı tutar. Etkin runtime ayarında açıkça etkinleştirme ve Hades restart gerekir; temiz kaynak ve güncel tekil canlı çalıştırma onayı ayrıca gerekir. CLI içindeki inference/faturalama sayısı host süreci sınırlarından çıkarılamaz.
+- P2 canlı edit/recovery ve entegrasyon-onayı alt kapıları, P3 dayanıklılık/edit batch ve P6 kapanışı açık kalır.
+
 ## 2026-10-21 10:22 Türkiye saati kaynak denetimi, doğrulama ve commit
 
 - Tüm mevcut tracked/untracked değişiklikler içerik ve kapsam bakımından incelendi. `scripts/apply-provider-routing.js` v2 yapılandırmayı v3 strict doğrulamasından önce migrate etmeyecek şekilde çalışıyordu; dar düzeltme ve geçici config üzerinde backup/apply testi eklendi.

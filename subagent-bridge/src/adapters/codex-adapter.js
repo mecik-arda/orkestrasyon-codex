@@ -219,19 +219,19 @@ function buildCodexArgs(request, configuration) {
   }
   const executable = configuration?.codex?.executable || "codex";
   const execArgs = configuration?.codex?.execArgs || [];
-  const allowNonGitWorkspace = request.caller === "codex_edit" || request.caller === "parallel_batch" || configuration?.codex?.allowNonGitWorkspace === true;
+  const allowNonGitWorkspace = request.caller === "codex_edit" || request.caller === "parallel_batch" || request.caller === "codex_profile_edit_pilot" || configuration?.codex?.allowNonGitWorkspace === true;
   const isGitWorkspace = typeof request.workspace === "string" && fs.existsSync(path.join(request.workspace, ".git"));
   return {
     executable,
     model: model.model,
     args: [
-      ...execArgs.filter((argument) => argument !== "--json"),
+      ...(request.caller === "codex_profile_edit_pilot" ? [] : execArgs.filter((argument) => argument !== "--json")),
       "exec",
       "--json",
       ...(allowNonGitWorkspace && !isGitWorkspace ? ["--skip-git-repo-check"] : []),
       ...(model.model ? ["--model", model.model] : []),
       "--sandbox", request.mode === "read_only" ? "read-only" : "workspace-write",
-      ...(request.caller === "parallel_batch_edit" ? ["-c", "sandbox_workspace_write.network_access=false"] : []),
+      ...(request.caller === "parallel_batch_edit" || request.caller === "codex_profile_edit_pilot" ? ["-c", "sandbox_workspace_write.network_access=false"] : []),
       "-"
     ]
   };
@@ -246,7 +246,8 @@ export function createCodexEnvironment(mode, source = process.env) {
   return environment;
 }
 
-export function createCodexAdapter(configuration) {
+export function createCodexAdapter(configuration, dependencies = {}) {
+  const executeProcess = dependencies.runProcess || runProcess;
   const adapter = createAdapter("codex", {
     canRead: true,
     canWrite: true,
@@ -262,7 +263,7 @@ export function createCodexAdapter(configuration) {
         const executable = configuration?.codex?.executable || "codex";
         const execArgs = configuration?.codex?.execArgs || [];
         const args = [...execArgs, "--version"];
-        const result = await runProcess(
+        const result = await executeProcess(
           executable,
           args,
           { timeoutMs: 15000, maxOutputBytes: 65536, env: createProviderEnvironment("codex") }
@@ -270,7 +271,7 @@ export function createCodexAdapter(configuration) {
         let authValid = false;
         if (result.code === 0) {
           try {
-            const authResult = await runProcess(
+            const authResult = await executeProcess(
               executable,
               [...execArgs, "login", "status"],
               { timeoutMs: 15000, maxOutputBytes: 65536, env: createProviderEnvironment("codex") }
@@ -319,7 +320,7 @@ export function createCodexAdapter(configuration) {
       activeExecutionHandles.set(request.executionId, handle);
 
       try {
-        const processResult = await runProcess(
+        const processResult = await executeProcess(
             command.executable,
             command.args,
           {

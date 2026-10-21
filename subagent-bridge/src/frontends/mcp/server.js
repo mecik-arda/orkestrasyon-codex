@@ -307,6 +307,15 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     }, safe(handlers.runClaudeSonnetAcceptancePilot));
   }
 
+  if (configuration.orchestration?.acceptancePilots?.codexProfileEdit?.enabled === true) {
+    server.registerTool("run_codex_profile_edit_pilot", {
+      title: "Codex disposable edit kabul pilotunu çalıştır",
+      description: "Yalnız host içindeki sabit fixture dosyasını boş, geçici çalışma alanına kopyalayıp gpt-6.1-sol ile düzenleme önizlemesi üretir. promote:false, 60 saniye timeout, 65536 byte süreç stdout+stderr sınırı, tek adapter denemesi, sıfır runtime retry/repair/fallback ve kapalı ağ host tarafından uygulanır. Kaynak workspace'e entegrasyon veya genel dosya/shell yetkisi vermez. Codex CLI içindeki görünmeyen inference/faturalama sayısı garanti edilmez.",
+      inputSchema: publicToolSchemas.runCodexProfileEditPilot,
+      annotations: externalReadOnlyExecutionAnnotations
+    }, safe(handlers.runCodexProfileEditPilot));
+  }
+
   server.registerTool("run_claude_code_subagent", {
     title: "Claude Code subagent çalıştır",
     description: "Claude Code CLI üzerinden salt okunur veya düzenleme modunda görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır.",

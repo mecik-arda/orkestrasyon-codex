@@ -205,7 +205,8 @@ const configurationSchema = z.object({
       maxEntries: z.number().int().positive().optional()
     }).strict(),
     acceptancePilots: z.object({
-      claudeSonnet: z.object({ enabled: z.boolean() }).strict()
+      claudeSonnet: z.object({ enabled: z.boolean() }).strict(),
+      codexProfileEdit: z.object({ enabled: z.boolean() }).strict().optional()
     }).strict().optional(),
     slo: z.object({
       windowDays: z.number().int().positive().max(90),
@@ -323,6 +324,9 @@ export function loadConfiguration(options = {}) {
         ...(configuration.orchestration?.acceptancePilots || {}),
         claudeSonnet: {
           enabled: configuration.orchestration?.acceptancePilots?.claudeSonnet?.enabled === true
+        },
+        codexProfileEdit: {
+          enabled: configuration.orchestration?.acceptancePilots?.codexProfileEdit?.enabled === true
         }
       },
       providerAdmission: {

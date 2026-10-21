@@ -126,6 +126,9 @@
     "acceptancePilots": {
       "claudeSonnet": {
         "enabled": false
+      },
+      "codexProfileEdit": {
+        "enabled": false
       }
     },
     "taskProfiles": {

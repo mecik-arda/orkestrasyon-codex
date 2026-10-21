@@ -3,6 +3,7 @@ import { validateWorkspace } from "../../config.js";
 import { ANTIGRAVITY_MODEL_MAP } from "../../adapters/antigravity-adapter.js";
 import { detectWebIntent } from "../../web-evidence.js";
 import { validateClaudeSonnetAcceptanceOutput } from "../../services/claude-sonnet-acceptance.js";
+import { controlledEditResultSchema } from "../../schemas/core-schemas.js";
 import {
   approveParallelIntegrationRequestSchema,
   cancelParallelBatchRequestSchema,
@@ -69,6 +70,7 @@ export const storeMemorySchema = z.object({
 
 export const publicToolSchemas = {
   runClaudeSonnetAcceptancePilot: z.object({}).strict(),
+  runCodexProfileEditPilot: z.object({}).strict(),
   runAntigravity: z.object({
     prompt: z.string().min(1).max(60000),
     model: z.enum(["gemini_flash", "gemini_flash_3_8", "claude_sonnet"]),
@@ -238,6 +240,39 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
         maxOutputBytes: 65536,
         resultValidator: validateClaudeSonnetAcceptanceOutput
       })));
+    },
+    async runCodexProfileEditPilot(context = {}) {
+      if (configuration.orchestration?.acceptancePilots?.codexProfileEdit?.enabled !== true) {
+        throw new Error("Codex disposable edit pilot is disabled until explicitly enabled in the active runtime configuration");
+      }
+      parse(publicToolSchemas.runCodexProfileEditPilot, {});
+      const result = await runtime.runCodexProfileEditPilot(trustedWorkspace, context.signal);
+      const validation = controlledEditResultSchema.safeParse(result);
+      if (!validation.success || validation.data.backend !== "codex" || validation.data.model !== "gpt-6.1-sol" || validation.data.resolvedModel !== "gpt-6.1-sol" || validation.data.applied !== false || validation.data.fallbacks !== 0 || validation.data.filesChanged.some((file) => file !== "tests/fixtures/codex-profile-edit-pilot/value.txt")) {
+        throw new Error("Codex disposable edit pilot result failed host validation");
+      }
+      const payload = {
+        status: validation.data.status,
+        backend: "codex",
+        model: "gpt-6.1-sol",
+        requestedModel: "gpt-6.1-sol",
+        resolvedModel: "gpt-6.1-sol",
+        accessMode: "edit",
+        summary: validation.data.status === "completed" ? "Codex disposable edit pilot completed" : "Codex disposable edit pilot failed",
+        failureClass: validation.data.failureClass,
+        filesChanged: validation.data.filesChanged,
+        diff: validation.data.diff,
+        applied: false,
+        fallbacks: 0,
+        cleanupCompleted: validation.data.cleanupCompleted,
+        ...(validation.data.executionIdHash ? { executionIdHash: validation.data.executionIdHash } : {}),
+        ...(validation.data.changeSetHash ? { changeSetHash: validation.data.changeSetHash } : {}),
+        ...(validation.data.metrics ? { metrics: validation.data.metrics } : {}),
+        ...(validation.data.status === "completed" ? { preview: true } : {})
+      };
+      const strictValidation = controlledEditResultSchema.safeParse(payload);
+      if (!strictValidation.success) throw new Error("Codex disposable edit pilot result failed host validation");
+      return { isError: strictValidation.data.status !== "completed", content: [{ type: "text", text: JSON.stringify(strictValidation.data, null, 2) }], structuredContent: strictValidation.data };
     },
     async runAntigravity(input, context = {}) {
       const parsed = parse(publicToolSchemas.runAntigravity, input);

@@ -5,6 +5,7 @@ import { publicToolSchemas, storeMemorySchema } from "../subagent-bridge/src/fro
 const wrongTypePayloads = {
   runAntigravity: { prompt: 42, model: "gemini_flash_3_8", mode: "read_only" },
   runClaudeSonnetAcceptancePilot: { unexpected_field_for_test: 42 },
+  runCodexProfileEditPilot: { files: ["any-file"] },
   runClaudeCode: { prompt: 42, mode: "read_only" },
   runCodex: { prompt: false, mode: "read_only" },
   runProfile: { prompt: "soru", profile: 42 },
@@ -33,6 +34,10 @@ test("MCP-NEG-02: her public MCP şeması boş girdiyi reddeder", () => {
   for (const [name, schema] of Object.entries(publicToolSchemas)) {
     const result = schema.safeParse({});
     if (name === "runClaudeSonnetAcceptancePilot") {
+      assert.equal(result.success, true, `${name} boş girdili sabit pilot sözleşmesini reddetti`);
+      continue;
+    }
+    if (name === "runCodexProfileEditPilot") {
       assert.equal(result.success, true, `${name} boş girdili sabit pilot sözleşmesini reddetti`);
       continue;
     }

@@ -816,7 +816,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
       return createRuntimeFailure(route.backend, route.model, "task profile mode does not match request");
     }
     const controlledEditPilot = input.caller === "deepseek_edit_pilot" && route.backend === "deepseek" && input.mode === "edit";
-    const controlledEditExecution = ["codex_edit", "controlled_edit", "parallel_batch_edit", "deepseek_edit", "deepseek_edit_pilot"].includes(input.caller) && input.mode === "edit";
+    const controlledEditExecution = ["codex_edit", "codex_profile_edit_pilot", "controlled_edit", "parallel_batch_edit", "deepseek_edit", "deepseek_edit_pilot"].includes(input.caller) && input.mode === "edit";
     if (input.mode === "edit" && !controlledEditExecution) return createRuntimeFailure(route.backend, route.model, "edit mode requires a controlled edit caller", { reason: "mode_not_allowed" });
     const providerModeConfiguration = controlledEditPilot
       ? { ...runtimeConfiguration[route.backend], defaultMode: "edit", allowedModes: ["edit"] }
@@ -1641,6 +1641,27 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     });
   }
 
+  async function runCodexProfileEditPilot(trustedWorkspace, abortSignal) {
+    if (runtimeConfiguration.orchestration?.acceptancePilots?.codexProfileEdit?.enabled !== true) throw new Error("Codex disposable edit pilot is disabled until explicitly enabled in the active runtime configuration");
+    const input = {
+      taskId: "codex-profile-edit-pilot",
+      role: "implementer",
+      mode: "edit",
+      objective: "Change the fixture value from before to after.",
+      files: ["tests/fixtures/codex-profile-edit-pilot/value.txt"],
+      contextFiles: [],
+      acceptanceCriteria: ["Change only the selected fixture value from before to after."]
+    };
+    return executeControlledEdit(input, trustedWorkspace, abortSignal, {
+      promote: false,
+      attempts: [{ target: "codex", model: "gpt-6.1-sol", caller: "codex_profile_edit_pilot", providerLabel: "Codex" }],
+      prompt: buildProfileEditPrompt(input),
+      providerLabel: "Codex",
+      timeoutMs: 60000,
+      maxOutputBytes: 65536
+    });
+  }
+
   async function executeControlledEdit(input, trustedWorkspace, abortSignal, options) {
     const { promote, attempts, prompt, providerLabel } = options;
     const sourceWorkspace = canonicalizeTrustedWorkspace(trustedWorkspace);
@@ -1662,7 +1683,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
         try {
           const contextFiles = input.contextFiles || [];
           disposable = provisionDisposableWorkspace(runtimeConfiguration, sourceWorkspace, [...input.files, ...contextFiles], input.files);
-          const runtimeResult = await run({ target: attempt.target, prompt, model: attempt.model, mode: "edit", trustedWorkspace: disposable.workspace, caller: attempt.caller, delegationDepth: 0, timeoutMs: input.timeout_seconds ? input.timeout_seconds * 1000 : attempt.timeoutMs || runtimeConfiguration[attempt.target]?.timeoutMs, maxSchemaRepairAttempts: 0, abortSignal });
+          const runtimeResult = await run({ target: attempt.target, prompt, model: attempt.model, mode: "edit", trustedWorkspace: disposable.workspace, caller: attempt.caller, delegationDepth: 0, timeoutMs: options.timeoutMs ?? (input.timeout_seconds ? input.timeout_seconds * 1000 : attempt.timeoutMs || runtimeConfiguration[attempt.target]?.timeoutMs), ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}), maxSchemaRepairAttempts: 0, abortSignal });
           const resolvedModel = runtimeResult.resolvedModel ?? attempt.model;
           const attemptCostUsd = runtimeResult.metrics?.totalCostUsd;
           if (Number.isFinite(attemptCostUsd)) observedCostUsd += attemptCostUsd;
@@ -2062,6 +2083,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     runDeepSeekEditPilot,
     runProfileEdit,
     runProfileEditPilot,
+    runCodexProfileEditPilot,
     approvePreparedEdit,
     probeCapability,
     prepareParallelBatch: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).prepare(input),

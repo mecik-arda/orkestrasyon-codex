@@ -1,5 +1,7 @@
 # Codex batch P2/P3 kabul yolu
 
+P2 disposable Codex edit pilotu — 2026-10-21: Yerel MCP koduna varsayılanı kapalı `run_codex_profile_edit_pilot` aracı eklendi. Boş strict girdi, host-sabit gpt-6.1-sol ve tek fixture hedefi kullanılır; `promote:false`, tek adapter denemesi, sıfır runtime retry/schema repair/fallback, 60 saniye ve 65536 stdout+stderr byte sınırı host tarafından uygulanır. Codex CLI ek yapılandırma argümanları bu yolda dışlanır ve sandbox ağı kapatılır. Sahte adapter testleri canlı P2 kabulü değildir. Canlı çalıştırma için etkin kişisel runtime config'te ayrı opt-in, kaynak-clean kapısı, Hades restart ve güncel tekil çalıştırma onayı gerekir. Kaynak dosyaya entegrasyon kapsam dışıdır ve ayrıca diff onayı ister.
+
 P1b tanı eki — 2026-10-20: Önceki Claude Sonnet pilotunda canonical kayıtta `permission_denied/process_spawn/EPERM` vardı; bu alanlar provider-purpose `agy --print` sürecinin başladığını kanıtlamaz. Özel pilot boş geçici cwd'yi provider komutundan önce oluşturuyordu; `mkdtemp` `EPERM` verebilir ve eski exception akışı bunu runtime process-spawn gibi gösterebilirdi. Geçmiş denemenin burada durduğunu kanıtlayan kayıt yoktur. Yeni yerel düzeltme bunu `workspace_setup` olarak fail-closed kaydeder ve provider-purpose başlatma sayısını sıfır tutar; gerçek Hades için restart gerekir. Bu yerel kanıt canlı Claude görev kabulü değildir.
 
 Güncelleme: 2026-10-20. Bu belge bir işletim ve kabul prosedürüdür; canlı kabulün geçtiğini bildirmez.

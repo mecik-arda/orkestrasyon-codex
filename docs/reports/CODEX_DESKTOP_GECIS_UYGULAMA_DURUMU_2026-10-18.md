@@ -1,5 +1,11 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-10-21 21:02 fallback preview regresyonu
+
+- Sol incelemesinin belirttiği iki test boşluğu kapatıldı: sahte profile primary+fallback rotaları plan önizlemesinde iki toplam adapter attempt olarak gösteriliyor; fallback modelinin değişmesi aynı task contract altında immutable plan hash'ini değiştiriyor. Test worker başlatmıyor.
+- Hedefli `tests/parallel-batch.test.js` 56 test geçti. Tam `npm test` 874 toplam, 870 passed, 4 platform skip, 0 failed ile geçti. `npm run verify`/`verify:ci` sonuçları değişen production dosyalarının önceki HEAD'ini kapsıyordu; bu yeni ek yalnız test kodu ve dokümantasyondur. Güncel `git diff --check` geçti.
+- Son canlı Hades workspace identity bu test/documentation güncellemesinden önce okundu ve beklenen hash'lerle eşleşti; identity kaynak revizyonunu kanıtlamaz. Önceki timeout planı sona erdi ve başlatılmadı. P1b, P2 kalan canlı onay/recovery ve entegrasyon, P3 timeout/unknown/restart/expired-plan/edit entegrasyonu ve P6 açık kalır.
+
 ## 2026-10-21 20:55 plan preview düzeltmesi ve doğrulama
 
 - Batch hazırlama cevabı artık her task'ın çözümlenmiş toplam adapter-attempt tavanını (primary ve izinli fallback rotaları, retry dahil) ve en büyük deneme-başı timeout'u gösteriyor. Değerler aynı `resolveReliabilityBudget` fonksiyonundan hesaplanıp plan hash girdisine ve saklanan plan metadata'sına dahil edildi. Genel runtime retry/fallback davranışı değişmedi.

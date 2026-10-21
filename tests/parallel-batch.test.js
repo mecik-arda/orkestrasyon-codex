@@ -185,6 +185,49 @@ test("V2-BATCH: prepare reports policy-resolved retry and task timeout ceilings 
   assert.equal(runtime.executions.length, 0);
 });
 
+test("V2-BATCH: prepare binds profile fallback attempt ceilings to the immutable plan hash", async (t) => {
+  const { service, runtime, registry, configuration } = createFixture(t, {
+    configurationOverrides: {
+      reliability: { maxAttempts: 3, maxUnknownAttemptCostUsd: 0.1 },
+      codex: { timeoutMs: 30000, maxRetries: 0 },
+      orchestration: {
+        taskProfiles: {
+          review_with_fallback: {
+            target: "codex",
+            model: "gpt-6.1-sol",
+            mode: "read_only",
+            priority: 1,
+            cacheable: false,
+            fallbackTargets: [{ target: "codex", model: "gpt-6-sol" }]
+          }
+        }
+      }
+    }
+  });
+  const task = {
+    taskId: "fallback-review",
+    role: "reviewer",
+    mode: "read_only",
+    profile: "review_with_fallback",
+    objective: "Review the fallback route",
+    readablePaths: ["src/a.txt"]
+  };
+  const initial = await service.prepare({ objective: "Review fallback ceilings", batchMaxReservedCostUsd: 1, tasks: [task] });
+  assert.equal(initial.ok, true);
+  assert.match(initial.summary.message, /fallback-review=2 total adapter attempts across primary\/fallback routes, max 30000ms per attempt/u);
+  const initialPlan = await registry.getPlan(initial.planId);
+  assert.deepEqual(initialPlan.tasks[0].attemptCeilings, [
+    { backend: "codex", model: "gpt-6.1-sol", maxAttempts: 1, timeoutMs: 30000 },
+    { backend: "codex", model: "gpt-6-sol", maxAttempts: 1, timeoutMs: 30000 }
+  ]);
+  configuration.orchestration.taskProfiles.review_with_fallback.fallbackTargets[0].model = "gpt-5.6-sol";
+  const changedFallback = await service.prepare({ objective: "Review fallback ceilings", batchMaxReservedCostUsd: 1, tasks: [task] });
+  assert.equal(changedFallback.ok, true);
+  assert.notEqual(changedFallback.planHash, initial.planHash);
+  assert.match(changedFallback.summary.message, /fallback-review=2 total adapter attempts across primary\/fallback routes, max 30000ms per attempt/u);
+  assert.equal(runtime.executions.length, 0);
+});
+
 for (const processCap of [4096, 262144]) {
   test(`V2-BATCH: real runtime and fake Codex process enforce the previewed ${processCap} byte cap`, async (t) => {
     const events = [

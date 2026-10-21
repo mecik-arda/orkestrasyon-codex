@@ -807,6 +807,183 @@ test("V2-BATCH: process errors remain unavailable and detail preserves only safe
   assert.equal(detail.page.content.includes("MUST_NOT_BE_STORED"), false);
 });
 
+test("V2-BATCH: pre-provider worktree failures preserve safe setup diagnostics", async (t) => {
+  let providerStarts = 0;
+  const worktreeManager = {
+    assertCleanSource: () => ({ ok: true, head: "a".repeat(40) }),
+    captureRefState: () => ({ refsHash: "b".repeat(64) }),
+    createTaskWorktree: () => ({
+      ok: false,
+      reason: "worktree_create_failed",
+      diagnostics: {
+        failureStage: "workspace_setup",
+        providerCode: "process_error",
+        osErrorCode: "EPERM",
+        processExitCode: 128,
+        hostOperation: "clone",
+        gitFailureCode: "process_start"
+      },
+      message: "raw absolute path and output must not be persisted"
+    }),
+    collectTaskDiff: () => ({ ok: false, reason: "no_changes" }),
+    runVerification: () => ({ ok: true, results: [] }),
+    prepareIntegration: () => ({ ok: false }),
+    holdTaskDiff: () => {},
+    applyIntegration: () => ({ ok: false })
+  };
+  const fixture = createFixture(t, {
+    configurationOverrides: {
+      parallelBatch: {
+        editEnabled: true,
+        codexNetworkOffCapability: "available",
+        verificationCommands: ["git diff --check"]
+      }
+    },
+    worktreeManager,
+    handler: () => {
+      providerStarts += 1;
+      return workerResult({ status: "ok", summary: "unexpected provider start", action_required: "none" });
+    }
+  });
+  const prepared = await fixture.service.prepare({
+    objective: "Exercise isolated worktree setup failure",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{
+      taskId: "worktree-setup-failure",
+      role: "implementer",
+      mode: "edit",
+      target: "codex",
+      objective: "Edit one fixture file",
+      files: ["src/a.txt"],
+      acceptanceCriteria: ["The fixture file is changed"],
+      verificationCommands: ["git diff --check"]
+    }]
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await fixture.service.start({ planId: prepared.planId, planHash: prepared.planHash });
+  const summary = await waitForBatch(fixture.service, started.batchId, ["result_ready", "failed"]);
+  const task = summary.tasks[0];
+  assert.equal(task.status, "failed");
+  assert.equal(task.failureClass, "worktree_create_failed");
+  assert.match(task.detailRef, /^[a-f0-9]{64}$/);
+  assert.equal(providerStarts, 0);
+  const detail = await fixture.service.getTaskDetail({ batchId: started.batchId, taskId: task.taskId, detailRef: task.detailRef });
+  const payload = JSON.parse(detail.page.content);
+  assert.equal(payload.diagnostics.failureStage, "workspace_setup");
+  assert.equal(payload.diagnostics.providerCode, "process_error");
+  assert.equal(payload.diagnostics.osErrorCode, "EPERM");
+  assert.equal(payload.processExitCode, 128);
+  assert.equal(payload.hostOperation, "clone");
+  assert.equal(detail.page.content.includes("raw absolute path"), false);
+  assert.equal(detail.page.content.includes("sensitive output"), false);
+});
+
+test("V2-BATCH: setup artifact failures remain unstarted and release their allocation", async (t) => {
+  let providerStarts = 0;
+  const worktreeManager = {
+    assertCleanSource: () => ({ ok: true, head: "a".repeat(40) }),
+    captureRefState: () => ({ refsHash: "b".repeat(64) }),
+    createTaskWorktree: () => ({ ok: false, reason: "worktree_create_failed", diagnostics: { failureStage: "workspace_setup", providerCode: "process_error", osErrorCode: "EPERM" } }),
+    collectTaskDiff: () => ({ ok: false, reason: "no_changes" }),
+    runVerification: () => ({ ok: true, results: [] }),
+    prepareIntegration: () => ({ ok: false }),
+    holdTaskDiff: () => {},
+    applyIntegration: () => ({ ok: false })
+  };
+  const fixture = createFixture(t, {
+    configurationOverrides: { parallelBatch: { editEnabled: true, codexNetworkOffCapability: "available", verificationCommands: ["git diff --check"] } },
+    worktreeManager,
+    handler: () => {
+      providerStarts += 1;
+      return workerResult({ status: "ok", summary: "unexpected provider start", action_required: "none" });
+    }
+  });
+  fixture.artifactStore.store = () => {
+    throw new Error("injected artifact store failure");
+  };
+  const prepared = await fixture.service.prepare({
+    objective: "Release an allocation when host setup cannot be recorded",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{ taskId: "setup-artifact-failure", role: "implementer", mode: "edit", target: "codex", objective: "Edit one fixture file", files: ["src/a.txt"], acceptanceCriteria: ["The fixture file is changed"], verificationCommands: ["git diff --check"] }]
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await fixture.service.start({ planId: prepared.planId, planHash: prepared.planHash });
+  const summary = await waitForBatch(fixture.service, started.batchId, ["result_ready", "failed"]);
+  assert.equal(summary.tasks[0].status, "failed");
+  assert.equal(summary.tasks[0].failureClass, "worktree_create_failed");
+  assert.equal(summary.tasks[0].detailRef, null);
+  assert.equal(summary.budget.unknownReservedUsd, 0);
+  assert.ok(summary.budget.refundedUsd > 0);
+  assert.equal(providerStarts, 0);
+});
+
+test("V2-BATCH: post-provider diff failures preserve host diagnostics without raw errors", async (t) => {
+  const worktreeManager = {
+    assertCleanSource: () => ({ ok: true, head: "c".repeat(40) }),
+    captureRefState: () => ({ refsHash: "d".repeat(64) }),
+    assertRefStateUnchanged: () => ({ ok: true }),
+    createTaskWorktree: () => ({ ok: true, worktreePath: "C:\\temporary\\worktree", repositoryPath: "C:\\temporary\\repo", baseCommit: "c".repeat(40) }),
+    collectTaskDiff: () => ({
+      ok: false,
+      reason: "diff_collect_failed",
+      diagnostics: {
+        failureStage: "workspace_setup",
+        providerCode: "process_error",
+        osErrorCode: "EPERM",
+        processExitCode: 128,
+        hostOperation: "index_stage",
+        gitFailureCode: "process_start"
+      },
+      message: "raw absolute path and process output must not be persisted"
+    }),
+    runVerification: () => ({ ok: true, results: [{ commandHash: "e".repeat(64), exitCode: 0, outputBytes: 0 }] }),
+    cleanupTaskWorktree: () => ({ cleaned: true }),
+    prepareIntegration: () => ({ ok: false }),
+    holdTaskDiff: () => {},
+    applyIntegration: () => ({ ok: false })
+  };
+  const fixture = createFixture(t, {
+    configurationOverrides: {
+      parallelBatch: {
+        editEnabled: true,
+        codexNetworkOffCapability: "available",
+        verificationCommands: ["git diff --check"]
+      }
+    },
+    worktreeManager
+  });
+  const prepared = await fixture.service.prepare({
+    objective: "Exercise host diff collection failure",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{
+      taskId: "diff-collection-failure",
+      role: "implementer",
+      mode: "edit",
+      target: "codex",
+      objective: "Edit one fixture file",
+      files: ["src/a.txt"],
+      acceptanceCriteria: ["The fixture file is changed"],
+      verificationCommands: ["git diff --check"]
+    }]
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await fixture.service.start({ planId: prepared.planId, planHash: prepared.planHash });
+  const summary = await waitForBatch(fixture.service, started.batchId, ["result_ready", "failed"]);
+  const task = summary.tasks[0];
+  assert.equal(task.status, "failed");
+  assert.equal(task.failureClass, "diff_collect_failed");
+  assert.equal(fixture.runtime.executions.length, 1);
+  const detail = await fixture.service.getTaskDetail({ batchId: started.batchId, taskId: task.taskId, detailRef: task.detailRef });
+  const payload = JSON.parse(detail.page.content);
+  assert.equal(payload.hostDiagnostics.failureStage, "workspace_setup");
+  assert.equal(payload.hostDiagnostics.osErrorCode, "EPERM");
+  assert.equal(payload.hostProcessExitCode, 128);
+  assert.equal(payload.hostOperation, "index_stage");
+  assert.equal(payload.gitFailureCode, "process_start");
+  assert.equal(detail.page.content.includes("raw absolute path"), false);
+  assert.equal(detail.page.content.includes("process output must not be persisted"), false);
+});
+
 test("V2-BATCH: unexpected task rejection leaves an unknown task and retains its allocation", async (t) => {
   const fixture = createFixture(t);
   fixture.artifactStore.store = () => {

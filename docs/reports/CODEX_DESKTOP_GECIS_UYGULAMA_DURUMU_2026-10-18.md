@@ -1,5 +1,39 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-10-21 20:24 Türkiye saati güncel Sol incelemesi ve düzeltmeler
+
+- Sol'un önceki read-only incelemesinde bulunan üç runtime/fixture kusuru kaynakta doğrulandı ve düzeltildi: provider öncesi worktree başarısızlığında artifact yazma hatası görevi `unknown` durumuna ve gereksiz unknown rezervine düşürebiliyordu; edit entegrasyon test yardımcısı geçici `result_ready` anında dönebiliyordu; restart fixture'ı manifest `running` işaretini gerçek `runtime.run` başlangıcı sanıyordu. Ek olarak worktree kurulum hatasında cleanup exception'ı asıl güvenli tanıyı bastırabiliyordu. Dört davranış için regresyon testleri eklendi.
+- Sol takip incelemesi bu düzeltmelerde commit engeli bulmadı. Hedefli dört batch suite'i geçti: 98 başarılı, 4 platform skip, 0 başarısız. `npm test` 872 toplam, 868 başarılı, 4 platform skip, 0 başarısız; `npm run verify` ve `npm run verify:ci` geçti; `git diff --check` temiz. `verify` DeepSeek `/models` health GET'i `unavailable` bildirdi; inference çalıştırılmadı. MCP şeması değişmediğinden smoke bu turda gerekli değildi.
+- Kısıtlı sandbox'ta ilk hedefli deneme temp atomic rename/Git subprocess EPERM nedeniyle suite'e ulaşamadı; izinli yerel test koşusunda aynı suite geçti. Bu izin hatası ürün regresyonu olarak sınıflandırılmadı.
+- Çalışma ağacındaki değişiklikler commit öncesi incelenmiştir; bu commit kaynak dosyalarını, testleri ve plan/rapor/README/handoff uzlaştırmasını kapsar. Push, provider/model çağrısı, batch, Vault yazımı veya kaynak entegrasyonu yapılmadı. Runtime kodu değiştiğinden etkin Hades bu tanıları kullanmadan önce kullanıcı restart etmeli ve canlı bağlantı identity/envanteri yeniden salt-okunur doğrulanmalıdır.
+- Bu düzeltmeler P3 yerel restart recovery kanıtını güçlendirir; canlı P1b Claude kabulini, P2 canlı approval/recovery/ayrı entegrasyonu, P3 canlı cancel/timeout/restart/edit batch entegrasyonunu veya P6 nihai kapanışını tamamlamaz. Genel geçiş tamamlanmamıştır.
+
+Canlı kullanım notu: Bu raporun son ekiyle Hades runtime kodu değişti. Yeni tanı davranışı etkin Desktop MCP'de ancak kullanıcı Hades'i yeniden başlatıp bağlantıyı tekrar doğruladıktan sonra kullanılabilir; yerel testler canlı sürüm kanıtı değildir.
+
+## 2026-10-21 20:15 Türkiye saati güncel P3 yerel restart kanıtı
+
+- Yeni sahte süreç testi gerçek bridge sürecini bir in-flight read-only batch sırasında sonlandırıp aynı kalıcı test state'ini yeni servis örneğine açtı. Yeni servis batch/task durumunu `unknown` ve `host_restart_unknown` olarak toparladı; unknown rezervi korundu ve recovery sonrası provider dispatch sayısı sıfır kaldı.
+- `npm test`: 870 toplam, 866 geçti, 4 platform testi atlandı, 0 başarısız. `npm run verify:ci` geçti. Önceki aynı runtime kaynak durumunda `npm run verify` de geçmişti; bu turdaki ek değişiklik yalnız test ve dokümantasyondur. İlk kısıtlı temp denemesi Windows `EPERM` nedeniyle test mantığına ulaşmadı; izinli yerel hedefli ve tam test tekrarları geçti.
+- Bu, yerel süreç-ölümü/recovery fixture kanıtıdır; Hades Desktop'ın canlı restart kabulü, cancel/timeout unknown kabulü veya edit batch entegrasyonu değildir. Önceki başarılı read-only DAG korunur ve tekrarlanmadı. P1b Claude görev kabulü, P2 kalan canlı onay/recovery ve ayrı kaynak entegrasyonu, P3 canlı dayanıklılık/edit entegrasyonu ve P6 kapanışı açıktır. Runtime değişikliği etkin MCP'ye yüklemek için Hades restart ve ardından salt-okunur identity/araç doğrulaması gerekir.
+
+## 2026-10-21 20:02 Türkiye saati güncel inceleme
+
+- P3 edit entegrasyon fixture'ında ilk kısıtlı sandbox sonucu `process_start`/128 idi. Hedefli test çıktısı bunun provider başlatılmadan önce geçici çalışma alanındaki Git init/clone subprocess erişiminde oluştuğunu gösterdi; bu çıktı tek başına ürün hatası kanıtı değildir. Aynı gerçek runtime → worktree → diff → onay fixture'ı izinli yerel çalıştırmada geçti.
+- Host worktree dizin hazırlama, Git setup ve diff toplama hataları artık yalnız `failureStage`, kapalı `providerCode`, allowlist `osErrorCode`, sayısal process exit code, kapalı host operation ve kapalı Git failure sınıfı ile task detail'a taşınır. Ham exception, stderr veya dosya yolu yazılmaz. Yeni sahte testler provider-öncesi hata için sıfır provider çağrısını, diff hatası için tek sahte çağrıyı ve ham metin sızıntısı olmadığını doğrular.
+- `npm test`: 868 toplam, 864 geçti, 4 platform testi atlandı, 0 başarısız. Sandbox dışındaki ilk hedefli entegrasyon tekrarında test geçti. `npm run verify` geçti; Codex CLI sürümü ve Vault okunabilir/yazılabilir sağlık durumu başarılı, DeepSeek `/models` health erişimi `unavailable` raporlandı. `npm run verify:ci` ve `git diff --check` geçti. MCP şeması değişmediğinden smoke çalıştırılmadı.
+- Test/verify süreçlerinde model inference, batch veya Vault yazımı başlatılmadı. Bu, önceki başarılı read-only DAG'i veya canlı P2 kabulini değiştirmez. P1b Claude görev kabulü, P2 approval/reject/stale-hash/recovery'nin canlı kanıtı ve ayrı kaynak entegrasyonu, P3 canlı cancel/timeout/unknown/restart ve edit entegrasyonu, P6 belge kapanışı açıktır. Çalışma ağacı bu değişikliklerle dirty; clean-source koşulu sağlanmış değildir.
+
+## 2026-10-21 19:36 Türkiye saati güncel kapı durumu
+
+- Etkin Hades `hades://workspace/identity/v1` kaynağında iki workspace özeti de beklenen `dc3d26eb65bfc4ef48a71103bfb33d44b73e7a1873139d2c6d7917b97248e68b` değeriyle eşleşti. Canlı envanterde `run_codex_profile_edit_pilot` mevcut; özel Claude pilotu ve OpenCode araçları yok.
+- Kaynak `main` dalında `4f0e85186e89486d9dae8aef08cd20b08dc5ae04` HEAD'inde, çalışma ağacı temiz. Bu rapor güncellemesi çalışma ağacını tekrar değiştirir; kaynak temizliği gerektiren batch kapısı bu belge değişiklikleri commit edilip yeniden doğrulanana dek sağlanmış sayılmaz.
+- Kullanıcının tekil onayıyla Codex P2 disposable pilot aracı bir kez çağrıldı. Araç sonucu `completed`, requested/resolved model `gpt-6.1-sol`, host promotion `applied=false` olarak raporlandı. Bu araç yalnız sabit fixture preview'si üretir; kaynak repository'ye yazmaz. Korunan sonuçta dosya hash/diff ayrıntıları yoktur. Gerçek ücret ve CLI içindeki inference/faturalama sayısı bilinmiyor.
+- Bu pilot P2 approval/reject, stale-hash, recovery veya kaynak entegrasyonunu kanıtlamaz. Bu kapılar için yerel fixture testleri kanıt olarak kalır; kaynak entegrasyonu için tam diff/hash ve ayrı açık onay gerekir.
+- Başarılı read-only DAG `70e5d365632ba7b3927ad3e2d8edcaf2` korunuyor, tekrarlanmadı. P3 canlı cancel/timeout/unknown/restart ve edit batch entegrasyonu yapılmadı; yeni immutable plan/hash ve ayrı start onayı olmadan batch başlatılmaz.
+- P1b Claude görev kabulü geçmiş `permission_denied/process_spawn/EPERM` sonucu nedeniyle başarısız ve açık; hangi alt komutun reddedildiği, gerçek inference ve faturalama sayısı bilinmiyor. Yeni çağrı onayı yoktur.
+- P5 aktif OpenCode yürütme rotasının kaldırılması kabulü geçerlidir; kalan tarihsel/legacy referanslar aktif rota değildir. P6'nın yapılabilir güncel durum uzlaştırması bu notla işlendi; nihai kapanış diğer kapılar tamamlanmadan yapılamaz. Genel geçiş tamamlanmamıştır.
+- Bu turda provider, batch, edit entegrasyonu, Vault veya kişisel runtime config işlemi yapılmadı. Kod ve MCP sözleşmesi değişmedi; bu dokümantasyon güncellemesi için Hades restart gerekmez.
+
 ## 2026-10-21 son Hades restart ve kaynak kapısı
 
 - Canlı `hades://workspace/identity/v1` kaynağında `processCwdSha256` ve `trustedWorkspaceSha256` beklenen checkout özetiyle eşleşti. Araç envanterinde `run_codex_profile_edit_pilot` görünüyor; özel Claude Sonnet pilotu ve OpenCode aracı görünmüyor. Pilot aracı bu kontrol sırasında çağrılmadı.

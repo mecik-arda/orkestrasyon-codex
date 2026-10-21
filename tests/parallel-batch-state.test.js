@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import { createParallelBatchRegistry } from "../subagent-bridge/src/services/parallel-batch-registry.js";
 import { createParallelArtifactStore } from "../subagent-bridge/src/services/parallel-artifact-store.js";
 import { createParallelBatchService } from "../subagent-bridge/src/services/parallel-batch.js";
+import { createWorkspaceCoordinator } from "../subagent-bridge/src/services/workspace-coordinator.js";
 import { withMetricLock } from "../subagent-bridge/src/metrics.js";
 
 function createWorkspace(t) {
@@ -350,6 +351,104 @@ test("V2-STATE: another bridge service preserves a batch with a live owner lease
   releaseExecution();
   const completed = await waitForBatch(fixture.service, started.batchId, ["result_ready"]);
   assert.equal(completed.tasks[0].status, "completed");
+});
+
+test("V2-STATE: a terminated bridge process recovers an in-flight batch without redispatch", async (t) => {
+  const { root, workspace } = createWorkspace(t);
+  const configuration = createConfiguration(root);
+  configuration.parallelBatch.orphanGraceMs = 1000;
+  configuration.orchestration.scheduler = { staleLockMs: 1000, leaseHeartbeatMs: 250, maxQueuedPerWorkspace: 10 };
+  const registryModule = pathToFileURL(path.resolve("subagent-bridge/src/services/parallel-batch-registry.js")).href;
+  const artifactModule = pathToFileURL(path.resolve("subagent-bridge/src/services/parallel-artifact-store.js")).href;
+  const coordinatorModule = pathToFileURL(path.resolve("subagent-bridge/src/services/workspace-coordinator.js")).href;
+  const batchModule = pathToFileURL(path.resolve("subagent-bridge/src/services/parallel-batch.js")).href;
+  const childSource = [
+    `import path from "node:path";`,
+    `import { createParallelBatchRegistry } from ${JSON.stringify(registryModule)};`,
+    `import { createParallelArtifactStore } from ${JSON.stringify(artifactModule)};`,
+    `import { createWorkspaceCoordinator } from ${JSON.stringify(coordinatorModule)};`,
+    `import { createParallelBatchService } from ${JSON.stringify(batchModule)};`,
+    `const configuration = ${JSON.stringify(configuration)};`,
+    `const workspace = ${JSON.stringify(workspace)};`,
+    `const registry = createParallelBatchRegistry({ stateDirectory: path.join(configuration.statePaths.state, "parallel-batches") });`,
+    `const artifactStore = createParallelArtifactStore({ rootDirectory: path.join(configuration.statePaths.state, "parallel-artifacts"), ttlMs: configuration.parallelBatch.artifactTtlMs, maxArtifactBytes: configuration.parallelBatch.maxArtifactBytes, maxTotalBytes: configuration.parallelBatch.maxArtifactTotalBytes });`,
+    `const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(configuration.statePaths.cache, "locks"), staleLockMs: 1000, leaseHeartbeatMs: 250, maxQueuedPerWorkspace: 10 });`,
+    `const service = createParallelBatchService({ configuration, registry, artifactStore, workspaceCoordinator, runtime: { async run() { process.stdout.write(JSON.stringify({ stage: "runtime_started" }) + "\\n"); return new Promise(() => {}); } }, trustedWorkspace: workspace, caller: "openCode" });`,
+    `const prepared = await service.prepare({ objective: "Hold a fake in-flight task until process termination", batchMaxReservedCostUsd: 1, tasks: [{ taskId: "restart-task", role: "analyst", mode: "read_only", target: "codex", objective: "Read one disposable fixture", readablePaths: ["src/a.txt"] }] });`,
+    `if (!prepared.ok) process.exit(2);`,
+    `const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });`,
+    `if (!started.ok) process.exit(3);`,
+    `process.stdout.write(JSON.stringify({ stage: "batch_started", batchId: started.batchId }) + "\\n");`,
+    `setInterval(() => {}, 1000);`
+  ].join("\n");
+  const child = spawn(process.execPath, ["--input-type=module", "-e", childSource], { stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  });
+  const childObservation = await new Promise((resolve, reject) => {
+    let bufferedOutput = "";
+    const observedStages = new Set();
+    let runtimeStarts = 0;
+    let batchId = null;
+    const timeout = setTimeout(() => reject(new Error("fake bridge did not enter the runtime with a started batch")), 10000);
+    child.stdout.on("data", (chunk) => {
+      bufferedOutput += chunk.toString("utf8");
+      let newlineIndex = bufferedOutput.indexOf("\n");
+      while (newlineIndex >= 0) {
+        const line = bufferedOutput.slice(0, newlineIndex);
+        bufferedOutput = bufferedOutput.slice(newlineIndex + 1);
+        const marker = JSON.parse(line);
+        observedStages.add(marker.stage);
+        if (marker.stage === "runtime_started") runtimeStarts += 1;
+        if (marker.stage === "batch_started") batchId = marker.batchId;
+        if (observedStages.has("runtime_started") && observedStages.has("batch_started")) {
+          clearTimeout(timeout);
+          resolve({ batchId, runtimeStarts });
+          return;
+        }
+        newlineIndex = bufferedOutput.indexOf("\n");
+      }
+    });
+    child.once("error", () => {
+      clearTimeout(timeout);
+      reject(new Error("fake bridge process could not start"));
+    });
+    child.once("exit", (code) => {
+      if (code !== 0) {
+        clearTimeout(timeout);
+        reject(new Error("fake bridge exited before publishing its running batch"));
+      }
+    });
+  });
+  assert.match(childObservation.batchId, /^[a-f0-9]{32}$/);
+  assert.equal(childObservation.runtimeStarts, 1);
+  child.kill();
+  await new Promise((resolve, reject) => {
+    child.once("close", resolve);
+    child.once("error", () => reject(new Error("fake bridge process could not be terminated")));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1250));
+  const registry = createParallelBatchRegistry({ stateDirectory: path.join(configuration.statePaths.state, "parallel-batches") });
+  const artifactStore = createParallelArtifactStore({ rootDirectory: path.join(configuration.statePaths.state, "parallel-artifacts"), ttlMs: configuration.parallelBatch.artifactTtlMs, maxArtifactBytes: configuration.parallelBatch.maxArtifactBytes, maxTotalBytes: configuration.parallelBatch.maxArtifactTotalBytes });
+  const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(configuration.statePaths.cache, "locks"), staleLockMs: 1000, leaseHeartbeatMs: 250, maxQueuedPerWorkspace: 10 });
+  let providerStartsAfterRestart = 0;
+  const restartedService = createParallelBatchService({
+    configuration,
+    registry,
+    artifactStore,
+    workspaceCoordinator,
+    runtime: { async run() { providerStartsAfterRestart += 1; throw new Error("recovered work must not be dispatched again"); } },
+    trustedWorkspace: workspace,
+    caller: "openCode"
+  });
+  const recovery = await restartedService.recover();
+  assert.deepEqual(recovery.recovered, [childObservation.batchId]);
+  const recovered = await restartedService.getBatch({ batchId: childObservation.batchId });
+  assert.equal(recovered.summary.status, "unknown");
+  assert.equal(recovered.summary.tasks[0].status, "unknown");
+  assert.equal(recovered.summary.tasks[0].failureClass, "host_restart_unknown");
+  assert.ok(recovered.summary.budget.unknownReservedUsd > 0);
+  assert.equal(providerStartsAfterRestart, 0);
 });
 
 test("V2-STATE: recovered owner cannot dispatch a task resumed from the provider queue", async (t) => {

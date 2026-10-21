@@ -17,6 +17,8 @@ import { parallelBatchTerminalStatuses, parallelTaskTerminalStatuses } from "./p
 import { createWorkspaceCoordinator } from "./workspace-coordinator.js";
 
 const safeHostVerificationCommands = new Set(["git diff --check"]);
+const hostFailureOperations = new Set(["prepare_directories", "clone", "remove_origin", "add_worktree", "capture_git_metadata", "change_manifest", "read_tree", "index_stage", "hash_object", "update_index", "diff_render"]);
+const hostGitFailureCodes = new Set(["process_start", "filesystem_permission", "git_lock", "git_repository", "git_object", "git_path", "git_index", "git_process_error"]);
 const recoveryEligibleBatchStatuses = new Set(["queued", "running", "cancel_requested", "cancelling", "integrating"]);
 
 function hashValue(value) {
@@ -29,6 +31,20 @@ function nowIso() {
 
 function roundCost(value) {
   return Number(Math.max(0, value).toFixed(12));
+}
+
+function normalizeHostFailureDiagnostics(diagnostics) {
+  const parsed = attemptDiagnosticsSchema.safeParse({
+    failureStage: diagnostics?.failureStage || "workspace_setup",
+    providerCode: diagnostics?.providerCode || "process_error",
+    osErrorCode: diagnostics?.osErrorCode || null,
+    settingsLockWaitMs: null,
+    providerExecutionMs: null,
+    providerAdmissionLeaseMs: null,
+    stdoutBytes: null,
+    stderrBytes: null
+  });
+  return parsed.success ? parsed.data : null;
 }
 
 function pendingTaskAllocationUsd(manifest) {
@@ -1203,11 +1219,33 @@ export function createParallelBatchService({
       if (contract.mode === "edit") {
         taskWorktree = worktreeManager.createTaskWorktree({ batchId, taskId: contract.taskId, baseCommit: control?.baseCommit || null });
         if (!taskWorktree.ok) {
+          const setupDiagnostics = normalizeHostFailureDiagnostics(taskWorktree.diagnostics);
+          let failureDetailRef = null;
+          try {
+            const failureArtifact = artifactStore.store({
+              callerHash,
+              workspaceHash,
+              batchIdHash: hashValue(batchId),
+              taskIdHash: hashValue(contract.taskId),
+              content: JSON.stringify({
+                taskId: contract.taskId,
+                status: "failed",
+                failureClass: taskWorktree.reason,
+                ...(setupDiagnostics ? { diagnostics: setupDiagnostics } : {}),
+                processExitCode: Number.isInteger(taskWorktree.diagnostics?.processExitCode) ? taskWorktree.diagnostics.processExitCode : null,
+                ...(hostFailureOperations.has(taskWorktree.diagnostics?.hostOperation) ? { hostOperation: taskWorktree.diagnostics.hostOperation } : {}),
+                ...(hostGitFailureCodes.has(taskWorktree.diagnostics?.gitFailureCode) ? { gitFailureCode: taskWorktree.diagnostics.gitFailureCode } : {})
+              })
+            });
+            failureDetailRef = failureArtifact.stored ? failureArtifact.detailRef : null;
+          } catch {
+          }
           await markTask(batchId, contract.taskId, (manifest, task) => {
             task.status = "failed";
             task.failureClass = taskWorktree.reason;
             task.summaryStatus = "not_available";
             task.actionRequired = "blocked";
+            task.detailRef = failureDetailRef;
             task.endedAt = nowIso();
             settleUnstartedTaskBudget(manifest, task);
             return task;
@@ -1374,6 +1412,7 @@ export function createParallelBatchService({
       }
       let detailRef = null;
       const diagnosticsValidation = attemptDiagnosticsSchema.safeParse(rawResult.metrics?.diagnostics);
+      const hostDiagnostics = diffResult?.diagnostics ? normalizeHostFailureDiagnostics(diffResult.diagnostics) : null;
       const artifact = artifactStore.store({
         callerHash,
         workspaceHash,
@@ -1390,6 +1429,10 @@ export function createParallelBatchService({
           webEvidenceStatus: webResearchProfile ? (webEvidencePresent ? "present_untrusted" : "missing") : "not_required",
           webReadStatus,
           ...(diagnosticsValidation.success ? { diagnostics: diagnosticsValidation.data } : {}),
+          ...(hostDiagnostics ? { hostDiagnostics } : {}),
+          ...(Number.isInteger(diffResult?.diagnostics?.processExitCode) ? { hostProcessExitCode: diffResult.diagnostics.processExitCode } : {}),
+          ...(hostFailureOperations.has(diffResult?.diagnostics?.hostOperation) ? { hostOperation: diffResult.diagnostics.hostOperation } : {}),
+          ...(hostGitFailureCodes.has(diffResult?.diagnostics?.gitFailureCode) ? { gitFailureCode: diffResult.diagnostics.gitFailureCode } : {}),
           error: rawResult.error ?? null,
           reason: rawResult.reason ?? null,
           durationMs,

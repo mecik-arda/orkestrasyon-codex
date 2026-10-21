@@ -46,6 +46,85 @@ test("V2-WORKTREE: clean source gate rejects a dirty repository", (t) => {
   assert.equal(dirty.reason, "source_workspace_dirty");
 });
 
+test("V2-WORKTREE: setup failures retain only safe process diagnostics", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  const runGitCommand = (workspace, args, options = {}) => {
+    if (args.includes("clone")) {
+      throw Object.assign(new Error(`denied ${repo}`), {
+        code: "EPERM",
+        status: 128,
+        stderr: `sensitive output ${repo}`
+      });
+    }
+    return execFileSync("git", args, {
+      ...options,
+      cwd: workspace,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+  };
+  const manager = createManager(root, repo, [], { runGitCommand });
+  const result = manager.createTaskWorktree({ batchId: "9".repeat(32), taskId: "task-one", baseCommit });
+  assert.deepEqual(result, {
+    ok: false,
+    reason: "worktree_create_failed",
+    diagnostics: {
+      failureStage: "workspace_setup",
+      providerCode: "process_error",
+      osErrorCode: "EPERM",
+      processExitCode: 128,
+      hostOperation: "clone",
+      gitFailureCode: "git_process_error"
+    }
+  });
+  assert.equal(JSON.stringify(result).includes(repo), false);
+});
+
+test("V2-WORKTREE: cleanup failures do not suppress setup diagnostics", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  const manager = createManager(root, repo, [], {
+    runGitCommand(workspace, args, options = {}) {
+      if (args.includes("clone")) {
+        throw Object.assign(new Error(`denied ${repo}`), { code: "EPERM", status: 128, stderr: `sensitive output ${repo}` });
+      }
+      return execFileSync("git", args, { ...options, cwd: workspace, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    },
+    removeTaskPath() {
+      throw new Error("cleanup details must remain private");
+    }
+  });
+  const result = manager.createTaskWorktree({ batchId: "6".repeat(32), taskId: "task-one", baseCommit });
+  assert.deepEqual(result, {
+    ok: false,
+    reason: "worktree_create_failed",
+    diagnostics: {
+      failureStage: "workspace_setup",
+      providerCode: "process_error",
+      osErrorCode: "EPERM",
+      processExitCode: 128,
+      hostOperation: "clone",
+      gitFailureCode: "git_process_error"
+    }
+  });
+  assert.equal(JSON.stringify(result).includes(repo), false);
+});
+
+test("V2-WORKTREE: directory setup failures retain safe host diagnostics", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  const worktreeRoot = path.join(root, "worktrees");
+  const manager = createManager(root, repo, [], { worktreeRoot });
+  const batchId = "8".repeat(32);
+  fs.writeFileSync(path.join(worktreeRoot, batchId), "not a directory", "utf8");
+  const result = manager.createTaskWorktree({ batchId, taskId: "task-one", baseCommit });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "worktree_create_failed");
+  assert.equal(result.diagnostics.failureStage, "workspace_setup");
+  assert.equal(result.diagnostics.providerCode, "process_error");
+  assert.equal(result.diagnostics.hostOperation, "prepare_directories");
+  assert.equal(result.diagnostics.gitFailureCode, "git_process_error");
+  assert.equal(JSON.stringify(result).includes(repo), false);
+});
+
 test("V2-WORKTREE: source root rebinding blocks edit admission", (t) => {
   const { root, repo } = createRepository(t);
   const manager = createManager(root, repo);

@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
@@ -13,7 +12,7 @@ function git(repo, args) {
 }
 
 function createRepository(t) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "parallel-integration-"));
+  const root = fs.mkdtempSync(path.join(process.cwd(), ".parallel-integration-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
@@ -139,7 +138,24 @@ test("V2-INTEGRATION: edit batch prepares an approval-bound diff and applies it 
   const started = await runtime.startParallelBatch({ planId: prepared.planId, planHash: prepared.planHash }, workspace);
   assert.equal(started.ok, true);
   const ready = await waitForBatch(runtime, workspace, started.batchId, ["ready_for_approval", "blocked", "failed"]);
-  assert.equal(ready.status, "ready_for_approval");
+  const editTaskSummary = ready.tasks[0];
+  let safeFailureDiagnostics = null;
+  if (ready.status !== "ready_for_approval" && editTaskSummary.detailRef) {
+    const detail = await runtime.getParallelTaskDetail({ batchId: started.batchId, taskId: editTaskSummary.taskId, detailRef: editTaskSummary.detailRef }, workspace);
+    if (detail.ok) {
+      const payload = JSON.parse(detail.page.content);
+      safeFailureDiagnostics = {
+        failureClass: payload.failureClass,
+        failureStage: payload.hostDiagnostics?.failureStage || payload.diagnostics?.failureStage || null,
+        providerCode: payload.hostDiagnostics?.providerCode || payload.diagnostics?.providerCode || null,
+        osErrorCode: payload.hostDiagnostics?.osErrorCode || payload.diagnostics?.osErrorCode || null,
+        processExitCode: payload.hostProcessExitCode ?? payload.processExitCode ?? null,
+        hostOperation: payload.hostOperation || null,
+        gitFailureCode: payload.gitFailureCode || null
+      };
+    }
+  }
+  assert.equal(ready.status, "ready_for_approval", JSON.stringify({ status: ready.status, failureClass: editTaskSummary.failureClass, safeFailureDiagnostics }));
   assert.equal(ready.approvalRequired, true);
   assert.deepEqual(ready.tasks[0].filesChanged, ["src/a.txt"]);
   assert.equal(ready.tasks[0].riskLevel, "low_impact");

@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
+import { operatingSystemErrorCodeValues } from "../schemas/core-schemas.js";
 
 const safeVerificationCommand = "git diff --check";
 
@@ -180,6 +181,18 @@ function integrationDiffHash(diff, changes) {
   };
 }
 
+function classifyGitFailure(error) {
+  const message = `${error?.message || ""}\n${error?.stderr || ""}`.toLowerCase();
+  if (/ntcreatedirectoryobject|failed to start|unable to start/.test(message)) return "process_start";
+  if (/permission denied|access is denied|operation not permitted/.test(message)) return "filesystem_permission";
+  if (/index\.lock|could not lock/.test(message)) return "git_lock";
+  if (/not a git repository|repository.*not found/.test(message)) return "git_repository";
+  if (/bad object|invalid object|bad revision|unknown revision/.test(message)) return "git_object";
+  if (/pathspec|invalid path/.test(message)) return "git_path";
+  if (/index/.test(message)) return "git_index";
+  return "git_process_error";
+}
+
 export function createGitWorktreeBatchManager({
   sourceWorkspace,
   worktreeRoot,
@@ -189,6 +202,7 @@ export function createGitWorktreeBatchManager({
   writePromotionFile = fs.writeFileSync,
   renamePromotionFile = fs.renameSync,
   removePromotionFile = (filePath, options) => fs.rmSync(filePath, options),
+  removeTaskPath = (filePath, options) => fs.rmSync(filePath, options),
   restorePromotionFile = fs.writeFileSync
 } = {}) {
   if (!sourceWorkspace) throw new Error("source workspace is required");
@@ -256,9 +270,20 @@ export function createGitWorktreeBatchManager({
 
   function stageRawFile(workspace, relativePath, fileMode) {
     if (!["100644", "100755"].includes(fileMode)) throw new Error("promotion file mode is invalid");
-    const objectId = gitAt(workspace, ["hash-object", "-w", "--no-filters", "--", relativePath]).trim();
+    let objectId;
+    try {
+      objectId = gitAt(workspace, ["hash-object", "-w", "--no-filters", "--", relativePath]).trim();
+    } catch (error) {
+      error.failureOperation = "hash_object";
+      throw error;
+    }
     if (!/^[a-f0-9]{40,64}$/.test(objectId)) throw new Error("Git returned an invalid object identifier");
-    gitAt(workspace, ["update-index", "--add", "--cacheinfo", fileMode, objectId, relativePath]);
+    try {
+      gitAt(workspace, ["update-index", "--add", "--cacheinfo", fileMode, objectId, relativePath]);
+    } catch (error) {
+      error.failureOperation = "update_index";
+      throw error;
+    }
   }
 
   function inspectSourcePath(relativePath) {
@@ -753,21 +778,43 @@ export function createGitWorktreeBatchManager({
     if (!isGitRepository()) return { ok: false, reason: "source_workspace_not_git" };
     const worktreePath = worktreePathFor(batchId, taskId);
     const repositoryPath = taskRepositoryPathFor(batchId, taskId);
-    fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-    fs.mkdirSync(path.dirname(repositoryPath), { recursive: true });
+    let hostOperation = "prepare_directories";
     try {
+      fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+      fs.mkdirSync(path.dirname(repositoryPath), { recursive: true });
+      hostOperation = "clone";
       git(["clone", "--shared", "--quiet", sourceWorkspaceAnchor.path, repositoryPath]);
       if (!isDirectoryAnchorStable(sourceWorkspaceAnchor)) throw Object.assign(new Error("source workspace root changed"), { failureClass: "source_workspace_rebound" });
+      hostOperation = "remove_origin";
       gitAt(repositoryPath, ["remote", "remove", "origin"]);
+      hostOperation = "add_worktree";
       gitAt(repositoryPath, ["worktree", "add", "--detach", "--quiet", worktreePath, baseCommit]);
+      hostOperation = "capture_git_metadata";
       const repositoryState = readTaskWorktreeState(worktreePath, repositoryPath);
       if (!repositoryState) throw new Error("task Git metadata could not be captured");
       if (!isDirectoryAnchorStable(sourceWorkspaceAnchor)) throw Object.assign(new Error("source workspace root changed"), { failureClass: "source_workspace_rebound" });
       taskWorktreeStates.set(taskWorktreeKey(worktreePath), { ...repositoryState, batchId, taskId });
     } catch (error) {
-      fs.rmSync(worktreePath, { recursive: true, force: true });
-      fs.rmSync(repositoryPath, { recursive: true, force: true });
-      return { ok: false, reason: error.failureClass || "worktree_create_failed", message: String(error.stderr || error.message).trim().slice(0, 500) };
+      try {
+        removeTaskPath(worktreePath, { recursive: true, force: true });
+      } catch {
+      }
+      try {
+        removeTaskPath(repositoryPath, { recursive: true, force: true });
+      } catch {
+      }
+      return {
+        ok: false,
+        reason: error.failureClass || "worktree_create_failed",
+        diagnostics: {
+          failureStage: "workspace_setup",
+          providerCode: error.code === "ENOENT" ? "executable_missing" : "process_error",
+          osErrorCode: operatingSystemErrorCodeValues.includes(error.code) ? error.code : null,
+          processExitCode: Number.isInteger(error.status) ? error.status : null,
+          hostOperation,
+          gitFailureCode: classifyGitFailure(error)
+        }
+      };
     }
     return { ok: true, worktreePath, repositoryPath, baseCommit };
   }
@@ -802,8 +849,14 @@ export function createGitWorktreeBatchManager({
       } catch {
       }
     }
+    let failureOperation = "change_manifest";
     try {
-      gitAt(worktreePath, ["read-tree", "HEAD"]);
+      try {
+        gitAt(worktreePath, ["read-tree", "HEAD"]);
+      } catch (error) {
+        error.failureOperation = "read_tree";
+        throw error;
+      }
       const changes = entries.map((entry) => {
         const filePath = path.join(worktreePath, ...entry.path.split("/"));
         const exists = fs.existsSync(filePath);
@@ -820,8 +873,16 @@ export function createGitWorktreeBatchManager({
         return { relativePath: entry.path, mode, fileMode, contentBase64, changeType: changeTypeFor(entry) };
       });
       for (const change of changes) {
-        if (change.mode !== "delete") stageRawFile(worktreePath, change.relativePath, change.fileMode);
+        if (change.mode !== "delete") {
+          try {
+            stageRawFile(worktreePath, change.relativePath, change.fileMode);
+          } catch (error) {
+            error.failureOperation ||= "index_stage";
+            throw error;
+          }
+        }
       }
+      failureOperation = "diff_render";
       const diff = gitAt(worktreePath, ["diff", "--binary", "--no-color", "--no-ext-diff", "--no-textconv", "HEAD", "--", ...entries.map((entry) => entry.path)], { maxBuffer: 64 * 1024 * 1024 });
       const diffBytes = Buffer.byteLength(diff, "utf8");
       if (diffBytes > maxTotalDiffBytes) return { ok: false, reason: "diff_size_exceeded", filesChanged: entries.map((entry) => entry.path) };
@@ -833,7 +894,18 @@ export function createGitWorktreeBatchManager({
         changes
       };
     } catch (error) {
-      return { ok: false, reason: "diff_collect_failed", message: error.message };
+      return {
+        ok: false,
+        reason: "diff_collect_failed",
+        diagnostics: {
+          failureStage: "workspace_setup",
+          providerCode: error.code === "ENOENT" ? "executable_missing" : error.code === "ETIMEDOUT" ? "timeout" : "process_error",
+          osErrorCode: operatingSystemErrorCodeValues.includes(error.code) ? error.code : null,
+          processExitCode: Number.isInteger(error.status) ? error.status : null,
+          hostOperation: error.failureOperation || failureOperation,
+          gitFailureCode: classifyGitFailure(error)
+        }
+      };
     }
   }
 

@@ -114,6 +114,12 @@ function requireSafeSourceFile(sourceRoot, relativePath) {
   return content;
 }
 
+export function readSafePilotSourceFile(sourceRoot, relativePath) {
+  const normalizedRoot = fs.realpathSync(sourceRoot);
+  const normalizedRelativePath = normalizeRelativePath(relativePath);
+  return requireSafeSourceFile(normalizedRoot, normalizedRelativePath);
+}
+
 function readOptionalSourceFile(sourceRoot, relativePath, allowMissing) {
   const absolutePath = path.join(sourceRoot, ...relativePath.split("/"));
   if (fs.existsSync(absolutePath)) return requireSafeSourceFile(sourceRoot, relativePath);

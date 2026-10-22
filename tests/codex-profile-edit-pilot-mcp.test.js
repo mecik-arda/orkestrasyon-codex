@@ -338,6 +338,41 @@ test("CODEX-EDIT-PILOT-RUNTIME-05: changed source fixture is rejected before the
   assert.equal(fs.readFileSync(target, "utf8"), "changed\n");
 });
 
+test("CODEX-EDIT-PILOT-RUNTIME-07: linked or oversized source fixture is rejected before the adapter starts", async (t) => {
+  for (const sourceState of ["hardlink", "symlink", "oversized"]) {
+    await t.test(sourceState, async (t) => {
+      const { root, target } = createFixtureRoot();
+      const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-pilot-external-"));
+      const externalPath = path.join(externalRoot, "external-target.txt");
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
+      fs.rmSync(target);
+      fs.writeFileSync(externalPath, "external\n");
+      if (sourceState === "hardlink") fs.linkSync(externalPath, target);
+      else if (sourceState === "symlink") {
+        try {
+          fs.symlinkSync(externalPath, target, "file");
+        } catch (error) {
+          if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code)) return t.skip("file symlink creation requires Windows symlink privileges");
+          throw error;
+        }
+      } else fs.writeFileSync(target, Buffer.alloc(1048577, 65));
+      let processStarts = 0;
+      const runtime = createBridgeRuntime({
+        configuration: configuration(root),
+        adapters: { codex: createCodexAdapter(configuration(root), { runProcess: async () => { processStarts += 1; throw new Error("provider must not run"); } }) },
+        sleep: async () => {}
+      });
+      const result = await runtime.runCodexProfileEditPilot(root);
+      assert.equal(result.status, "failed");
+      assert.equal(result.failureClass, "fixture_precondition_failed");
+      assert.equal(result.sourceFileSha256Before, undefined);
+      assert.equal(result.sourceFileSha256After, undefined);
+      assert.equal(processStarts, 0);
+    });
+  }
+});
+
 test("CODEX-EDIT-PILOT-RUNTIME-06: source fixture mutation during the provider run fails closed", async (t) => {
   const { root, target } = createFixtureRoot();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -366,6 +401,43 @@ test("CODEX-EDIT-PILOT-RUNTIME-06: source fixture mutation during the provider r
   assert.notEqual(result.sourceFileSha256After, result.sourceFileSha256Before);
   assert.equal(processStarts, 1);
   assert.equal(fs.readFileSync(target, "utf8"), "external-change\n");
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-08: unsafe post-run source fixture is rejected without returning its hash", async (t) => {
+  const { root, target } = createFixtureRoot();
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-pilot-external-"));
+  const externalPath = path.join(externalRoot, "external-source-content.txt");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
+  let processStarts = 0;
+  const codexAdapter = createCodexAdapter(configuration(root), {
+    runProcess: async (_executable, args, options) => {
+      if (args.at(-1) !== "-") return { stdout: "codex 0.163.0", stderr: "", code: 0, signal: null };
+      processStarts += 1;
+      fs.writeFileSync(path.join(options.cwd, fixturePath), "after\n", "utf8");
+      fs.writeFileSync(externalPath, "external-source-content\n", "utf8");
+      fs.rmSync(target);
+      fs.linkSync(externalPath, target);
+      return {
+        stdout: `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "changed" } })}\n${JSON.stringify({ type: "turn.completed" })}\n`,
+        stderr: "",
+        code: 0,
+        signal: null,
+        durationMs: 1
+      };
+    }
+  });
+  const runtime = createBridgeRuntime({ configuration: configuration(root), adapters: { codex: codexAdapter }, sleep: async () => {} });
+  const result = await runtime.runCodexProfileEditPilot(root);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failureClass, "source_workspace_changed");
+  assert.equal(result.applied, false);
+  assert.equal(result.diff, "");
+  assert.ok(result.sourceFileSha256Before);
+  assert.equal(result.sourceFileSha256After, undefined);
+  assert.equal(JSON.stringify(result).includes("external-source-content"), false);
+  assert.equal(processStarts, 1);
+  assert.equal(fs.readFileSync(externalPath, "utf8"), "external-source-content\n");
 });
 
 test("CODEX-EDIT-PILOT-ADAPTER-01: pilot ignores configured extra CLI arguments and disables sandbox networking", () => {

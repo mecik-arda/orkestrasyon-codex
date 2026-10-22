@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
@@ -12,7 +13,7 @@ function git(repo, args) {
 }
 
 function createRepository(t) {
-  const root = fs.mkdtempSync(path.join(process.cwd(), ".parallel-integration-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "parallel-integration-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, "workspace");
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });

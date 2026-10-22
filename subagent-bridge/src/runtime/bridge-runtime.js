@@ -13,7 +13,7 @@ import { createDelegationGuard } from "../services/delegation-guard.js";
 import { createExecutionId, createProcessFailureDiagnostics } from "../services/execution-service.js";
 import { createHealthCache } from "../services/health-service.js";
 import { checkModePolicy, resolveAllowedModes } from "../services/mode-policy.js";
-import { applyDeepSeekDisposablePatch, containsSecretLikeAddedValue, containsSecretLikeValue, applyPreparedChanges, detectRecoveryArtifacts, provisionDisposableWorkspace } from "../services/disposable-workspace.js";
+import { applyDeepSeekDisposablePatch, containsSecretLikeAddedValue, containsSecretLikeValue, applyPreparedChanges, detectRecoveryArtifacts, provisionDisposableWorkspace, readSafePilotSourceFile } from "../services/disposable-workspace.js";
 import { calculateChangeSetHash, classifyChangeSet, isPreparedEditApprovable } from "../services/approval-boundary.js";
 import { createPreparedEditRegistry } from "../services/prepared-edit-registry.js";
 import { containsHttpUrl, containsSensitiveWebValue, containsWebMarkup, detectWebIntent, normalizeUntrustedWebEvidence, providerWebEvidenceCarrierSchema } from "../web-evidence.js";
@@ -1657,10 +1657,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     const expectedSourceContent = Buffer.from("before\n", "utf8");
     const expectedDisposableContent = Buffer.from("after\n", "utf8");
     const sourceWorkspace = canonicalizeTrustedWorkspace(trustedWorkspace);
-    const sourceFixturePath = path.join(sourceWorkspace, ...fixtureRelativePath.split("/"));
     let sourceFileSha256Before;
     try {
-      const sourceContent = fs.readFileSync(sourceFixturePath);
+      const sourceContent = readSafePilotSourceFile(sourceWorkspace, fixtureRelativePath);
       sourceFileSha256Before = crypto.createHash("sha256").update(sourceContent).digest("hex");
       if (!sourceContent.equals(expectedSourceContent)) {
         return validateControlledEditResult({
@@ -1717,7 +1716,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     });
     let sourceFileSha256After;
     try {
-      sourceFileSha256After = crypto.createHash("sha256").update(fs.readFileSync(sourceFixturePath)).digest("hex");
+      sourceFileSha256After = crypto.createHash("sha256").update(readSafePilotSourceFile(sourceWorkspace, fixtureRelativePath)).digest("hex");
     } catch {
       return validateControlledEditResult({
         status: "failed",

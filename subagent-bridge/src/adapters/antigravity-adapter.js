@@ -514,7 +514,7 @@ function createAttemptDiagnostics(failureStage, providerCode = null, timings = {
 }
 
 function failureStageForClassification(errorClass, fallback = "provider_execution", error = null) {
-  if (/^spawn(?:\s|$)/u.test(error?.syscall || "")) return "process_spawn";
+  if (/^spawn(?:\s|$)/u.test(error?.syscall || "")) return fallback === "mcp_preflight" ? fallback : "process_spawn";
   if (["sandbox_setup", "workspace_read", "provider_auth", "provider_rate_limit", "provider_process_exit", "evidence_invalid", "cancelled"].includes(errorClass)) return errorClass;
   if (errorClass === "authentication_failure" || errorClass === "auth_invalid") return "provider_auth";
   if (errorClass === "rate_limited") return "provider_rate_limit";

@@ -187,11 +187,11 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
       } else if (scenario === "preflight_spawn_failure") {
         assert.equal(result.providerPurposeStarts, 0);
         assert.equal(result.reason, "permission_denied");
-        assert.equal(result.failureStage, "process_spawn");
+        assert.equal(result.failureStage, "mcp_preflight");
         assert.equal(result.providerFailureDiagnostics.providerCode, "permission_denied");
         assert.equal(result.providerFailureDiagnostics.osErrorCode, "EPERM");
         assert.equal(result.recentFailureClass, "permission_denied");
-        assert.equal(result.recentFailureStage, "process_spawn");
+        assert.equal(result.recentFailureStage, "mcp_preflight");
         assert.equal(result.recentProviderCode, "permission_denied");
         assert.equal(result.recentOsErrorCode, "EPERM");
         assert.equal(result.recentExitCode, null);

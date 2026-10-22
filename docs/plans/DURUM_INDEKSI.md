@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+Güncel yerel health gözlemi — 2026-10-22 14:52 Türkiye: `npm run verify` ve `npm run verify:ci` geçti; Codex CLI sürüm kontrolü başarılı, model erişimi `not_probed`; DeepSeek `/models` sonucu `apiAvailable=false`, `authenticated=null`. Bu inference/capability probe değil ve Claude P1b kök nedeni kanıtı değildir. Vault erişim bayrakları başarılı olsa da yol veya içerik yazımı doğrulanmadı. P1b/P2/P3/P6 açık.
+
 Güncel P3 timeout planı — 2026-10-22 14:50 Türkiye: `f4d750deba208d4e655c569684149ab4` / `eecdf73e1920a87fa06ac31f77f4551e9250e3c9e4372b6803d18e02841eed4a`, expiry 15:00:16 TRT. Bir read-only gpt-6.1-sol task, 10 saniye/deneme ve en çok 2 adapter denemesi; process 1 MiB, host snapshot 8 MiB, özet cap'leri 4096 karakter/task ve 20480 byte/batch. Batch-local tahsis $0.20/cap $0.40, fatura garantisi değil. Prepare yanıtı worker başlamadığını gösterdi. Task erken bitebileceğinden timeout kanıtı garanti değil; start ayrı exact-hash onayına bağlı. Unknown tarihsel rezervler korundu. P1b/P2/P3/P6 açık.
 
 Güncel P2 güvenli fixture testi — 2026-10-22 14:44 Türkiye: Codex edit pilotu kaynak fixture’ında dış hedefe bağlanan ancestor junction/symlink’i provider öncesi reddeden regresyon eklendi. Kısıtlı sandbox junction oluşturamadı; izinli test 1/1 geçti. `npm test` sandbox içinde Windows Temp `EPERM` ile başarısız, izinli yerel tam tur 900 toplam/896 geçti/4 platform skip/0 fail. Üretim kodu değişmedi; bu P2 canlı kabul kanıtı değil. P1b/P2/P3/P6 açık.

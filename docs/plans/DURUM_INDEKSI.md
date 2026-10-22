@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+Güncel opt-in gözlemi — 2026-10-22 16:16 Türkiye: Bu shell'in kişisel varsayılan config'inde Codex disposable edit pilotu ve paralel edit batch opt-in'i açık; Claude pilot opt-in'i kapalıdır. Etkin Hades araç kataloğunda Codex pilot aracı görünür, Claude pilot aracı görünmez; araç çağrısı veya config değişikliği yapılmadı. Shell ayarı Hades proses config kaynağını kanıtlamaz; identity bu kontrolde yeniden okunmadı. P1b, P2 canlı entegrasyon, P3 restart/edit entegrasyonu ve P6 açık. Ayrıntı [uygulama raporundadır](../reports/CODEX_DESKTOP_GECIS_UYGULAMA_DURUMU_2026-10-18.md).
+
 Güncel review kaynağı root-race düzeltmesi — 2026-10-22 16:11 Türkiye: Başlangıçta doğrulanmış workspace root'u okuma esnasında symlink/junction ile değiştirme kusuru regresyon testiyle kanıtlandı ve canonical root/dizin kimliğini her dosya snapshot'ı öncesi/sonrası kontrol ederek fail-closed düzeltildi. Hard-link ve NUL kontrollerine doğrudan test eklendi. Hedefli 16/16; `npm test` 907/903/4 skip/0 fail; `npm run verify` ve `npm run verify:ci` geçti. Yerel kanıt P1b/P2/P3 canlı kabullerini veya P6 kapanışını sağlamaz.
 
 Güncel P2 stdio kapı testi — 2026-10-22 16:02 Türkiye: Yerel stdio MCP, fake adapter ve gerçek runtime üzerinden strict onay, red, stale kaynak ve recovery doğrulandı. Hedefli 1/1, approval 8/8, `npm test` 905 toplam/901 geçti/4 skip/0 fail. Bu canlı onay veya entegrasyon kanıtı değildir; P1b/P2/P3/P6 açık.

@@ -401,6 +401,27 @@ test("OPT-01g1: null lease kaydı bayatlık eşiği geçince temizlenir", async 
   assert.equal(fs.existsSync(nullLeasePath), false);
 });
 
+test("OPT-01g2: geçersiz pozitif olmayan PID lease kayıtları bayatlık eşiği geçince temizlenir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-invalid-pid-lease-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const invalidLeasePaths = [0, -1].map((pid) => {
+    const executionHash = crypto.createHash("sha256").update(`invalid-pid-${pid}`).digest("hex");
+    const leasePath = path.join(lockDirectory, workspaceHash, `read-${executionHash}.lock`);
+    fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+    fs.writeFileSync(leasePath, JSON.stringify({ ownerId: "stale-owner", pid }), "utf8");
+    return leasePath;
+  });
+  const staleAt = new Date(Date.now() - 2000);
+  for (const leasePath of invalidLeasePaths) fs.utimesSync(leasePath, staleAt, staleAt);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 100, maxWaitAttempts: 0 });
+  t.after(() => coordinator.release("invalid-pid-lease-writer"));
+
+  assert.ok(await coordinator.acquire(root, "edit", "invalid-pid-lease-writer"));
+  assert.equal(invalidLeasePaths.every((leasePath) => !fs.existsSync(leasePath)), true);
+});
+
 test("OPT-01h: farklı workspace'ler aynı kilit dizininde birbirini engellemez", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-isolation-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

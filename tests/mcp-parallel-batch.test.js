@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -472,6 +473,165 @@ test("V2-MCP-E2E: in-memory MCP client gerçek runtime üzerinden read-only batc
     assert.equal(cancelledBatch.structuredContent.summary.tasks[0].status, "cancelled");
     assert.equal(adapterCalls, 2);
     assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "fixture value=42\n");
+  } finally {
+    await client.close();
+  }
+});
+
+test("V2-MCP-E2E: edit batch birleşik diff'i MCP üzerinden sunar ve ayrı onaydan önce kaynağı değiştirmez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-parallel-edit-runtime-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace");
+  const stateRoot = path.join(root, "state");
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "src", "a.txt"), "alpha\n", "utf8");
+  const runGit = (args) => execFileSync("git", args, { cwd: workspace, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  runGit(["init", "-q"]);
+  runGit(["config", "user.email", "mcp-edit-test@example.invalid"]);
+  runGit(["config", "user.name", "MCP Edit Test"]);
+  runGit(["add", "-A"]);
+  runGit(["commit", "-qm", "initial"]);
+  let adapterCalls = 0;
+  const codexAdapter = createAdapter("codex", {
+    canRead: true,
+    canWrite: true,
+    supportsSandbox: true,
+    supportsModelSelection: true
+  });
+  codexAdapter.execute = async (request) => {
+    adapterCalls += 1;
+    assert.equal(request.mode, "edit");
+    assert.equal(request.model, "gpt-6.1-sol");
+    fs.writeFileSync(path.join(request.workspace, "src", "a.txt"), "edited by worker\n", "utf8");
+    return createSuccessSubagentResult("codex", request.model, {
+      requestedModel: request.model,
+      resolvedModel: request.model,
+      result: JSON.stringify({ status: "ok", summary: "selected fixture updated", action_required: "none" }),
+      durationMs: 1,
+      metrics: { totalCostUsd: 0.01 }
+    });
+  };
+  const configuration = {
+    packageRoot: root,
+    statePaths: {
+      logs: path.join(stateRoot, "logs"),
+      state: path.join(stateRoot, "data"),
+      cache: path.join(stateRoot, "cache")
+    },
+    allowedRoots: [workspace],
+    reliability: {
+      maxAttempts: 1,
+      maxTotalDurationMs: 30000,
+      maxRetryCostUsd: 1,
+      maxRetryCostReserveUsd: 0.1,
+      maxUnknownAttemptCostUsd: 0.1,
+      dailyCostLimitUsd: 10,
+      monthlyCostLimitUsd: 10,
+      costBudgetEnforced: false
+    },
+    observability: { maxMetricFileBytes: 1048576, maxMetricRetentionDays: 30 },
+    codex: { timeoutMs: 30000, maxRetries: 0, allowedModes: ["read_only", "edit"] },
+    orchestration: {
+      taskProfiles: {},
+      scheduler: { maxQueuedPerWorkspace: 5, staleLockMs: 60000, leaseHeartbeatMs: 1000 },
+      readOnlyCache: { enabled: false, ttlMs: 1000, maxEntryBytes: 1024 }
+    },
+    parallelBatch: {
+      enabled: true,
+      editEnabled: true,
+      maxWorkers: 1,
+      providerConcurrency: { codex: 1 },
+      defaultProviderConcurrency: 1,
+      planTtlMs: 60000,
+      maxSummaryCharacters: 4096,
+      maxBatchSummaryBytes: 8192,
+      maxReadablePathsPerTask: 5,
+      maxContextFilesPerTask: 5,
+      maxReadableSnapshotBytes: 65536,
+      maxOutputBytesPerTask: 65536,
+      maxFilesChangedPerTask: 1,
+      maxFileBytesPerTask: 1024,
+      maxTotalDiffBytesPerTask: 4096,
+      artifactTtlMs: 60000,
+      maxArtifactBytes: 65536,
+      maxArtifactTotalBytes: 262144,
+      allowedTargets: ["codex"],
+      codexNetworkOffCapability: "available",
+      worktreeRoot: path.join(stateRoot, "worktrees"),
+      verificationCommands: ["git diff --check"],
+      orphanGraceMs: 100
+    }
+  };
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex: codexAdapter }, sleep: async () => {}, orchestratorApprovalEnabled: true });
+  const server = createSubagentMcpServer({ runtime, configuration, trustedWorkspace: workspace, enableOrchestratorApproval: true });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "parallel-edit-runtime-e2e-test", version: "1.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const listed = await client.listTools();
+    assert.equal(listed.tools.some((tool) => tool.name === "approve_parallel_integration"), true);
+    const prepared = await client.callTool({
+      name: "prepare_parallel_batch",
+      arguments: {
+        objective: "Edit one selected disposable source file and wait for separate integration approval",
+        batchMaxReservedCostUsd: 0.5,
+        tasks: [{
+          taskId: "edit-fixture",
+          role: "implementer",
+          mode: "edit",
+          target: "codex",
+          model: "gpt-6.1-sol",
+          objective: "Replace the selected fixture content with edited by worker",
+          files: ["src/a.txt"],
+          acceptanceCriteria: ["Only src/a.txt changes in the task worktree"],
+          verificationCommands: ["git diff --check"],
+          maxFilesChanged: 1,
+          maxFileBytes: 1024,
+          maxTotalDiffBytes: 4096,
+          maxOutputBytes: 65536,
+          timeoutSeconds: 30
+        }]
+      }
+    });
+    assert.equal(prepared.isError, false);
+    assert.equal(prepared.structuredContent.summary.status, "planned");
+    const started = await client.callTool({
+      name: "start_parallel_batch",
+      arguments: { planId: prepared.structuredContent.planId, planHash: prepared.structuredContent.planHash }
+    });
+    assert.equal(started.isError, false);
+    const deadline = Date.now() + 60000;
+    let observed;
+    while (Date.now() < deadline) {
+      observed = await client.callTool({ name: "get_parallel_batch", arguments: { batchId: started.structuredContent.batchId } });
+      if (["ready_for_approval", "blocked", "failed"].includes(observed.structuredContent.summary.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    const summary = observed.structuredContent.summary;
+    assert.equal(summary.status, "ready_for_approval");
+    assert.equal(summary.approvalRequired, true);
+    assert.equal(summary.approval.filesChanged.length, 1);
+    assert.equal(summary.approval.filesChanged[0], "src/a.txt");
+    assert.match(summary.approval.diffHash, /^[a-f0-9]{64}$/);
+    assert.match(summary.approval.approvalRef, /^[a-f0-9]{64}$/);
+    assert.equal(adapterCalls, 1);
+    assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "alpha\n");
+    assert.equal(runGit(["status", "--porcelain"]).trim(), "");
+    const detail = await client.callTool({
+      name: "get_parallel_task_detail",
+      arguments: {
+        batchId: started.structuredContent.batchId,
+        taskId: "integration",
+        detailRef: summary.approval.detailRef
+      }
+    });
+    assert.equal(detail.isError, false);
+    const preview = JSON.parse(detail.structuredContent.page.content);
+    assert.match(preview.diff, /edited by worker/u);
+    assert.equal(preview.diffHash, summary.approval.diffHash);
+    assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "alpha\n");
+    assert.equal(runGit(["status", "--porcelain"]).trim(), "");
   } finally {
     await client.close();
   }

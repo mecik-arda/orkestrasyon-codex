@@ -368,7 +368,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     server.registerTool("approve_prepared_edit", {
       title: "Hazırlanmış edit değişikliğini onayla ve uygula",
       description: "Yalnız orkestratör oturumunda hazırlanmış, yüksek etkili edit değişikliğini sağlayıcıyı yeniden çalıştırmadan saklanan kesin içerikle uygular.",
-      inputSchema: publicToolInputShape(publicToolSchemas.approvePreparedEdit),
+      inputSchema: publicToolSchemas.approvePreparedEdit,
       annotations: executionAnnotations
     }, safe(handlers.approvePreparedEdit));
     server.registerTool("reject_prepared_edit", {

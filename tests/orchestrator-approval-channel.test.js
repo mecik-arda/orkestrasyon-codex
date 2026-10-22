@@ -5,6 +5,9 @@ import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
+import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { createSubagentMcpServer, isOrchestratorApprovalEnabled } from "../subagent-bridge/src/frontends/mcp/server.js";
 import { createProviderEnvironment } from "../subagent-bridge/src/services/execution-service.js";
 import { provisionDisposableWorkspace } from "../subagent-bridge/src/services/disposable-workspace.js";
@@ -82,6 +85,91 @@ test("WP5B-CHANNEL-05: reject_prepared_edit gerçek MCP strict şemasını ve ya
     assert.equal(accepted.isError, false);
     assert.deepEqual(accepted.structuredContent, { status: "rejected", outcome: "prepared_edit_rejected" });
     assert.equal(rejectionCalls, 1);
+  } finally {
+    await client.close();
+  }
+});
+
+test("WP5B-CHANNEL-06: approve_prepared_edit gerçek MCP taşımasında strict girdiyi ve açık tek-seferlik terfiyi uygular", async (t) => {
+  const root = fs.mkdtempSync(path.join(process.cwd(), ".tmp-mcp-prepared-edit-approval-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const sourcePath = path.join(root, "src", "new-value.txt");
+  fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+  let providerStarts = 0;
+  const codexAdapter = createAdapter("codex", { canRead: true, canWrite: true, supportsSandbox: true, supportsModelSelection: true });
+  codexAdapter.execute = async (request) => {
+    providerStarts += 1;
+    fs.writeFileSync(path.join(request.workspace, "src", "new-value.txt"), "created\n", "utf8");
+    return createSuccessSubagentResult("codex", request.model, { result: "Updated selected file", durationMs: 1 });
+  };
+  const configuration = {
+    statePaths: {
+      logs: path.join(root, "logs"),
+      state: path.join(root, "state"),
+      cache: path.join(root, "cache")
+    },
+    allowedRoots: [root],
+    codex: { timeoutMs: 30000, allowedModes: ["read_only", "edit"] },
+    reliability: { maxAttempts: 1, maxSchemaRepairAttempts: 0, baseRetryDelayMs: 1, maxRetryDelayMs: 2, maxTotalDurationMs: 30000, maxRetryCostUsd: 1, maxRetryCostReserveUsd: 0.1, maxUnknownAttemptCostUsd: 0.1 },
+    orchestration: {
+      taskProfiles: { create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false } },
+      scheduler: { maxQueuedPerWorkspace: 10, staleLockMs: 60000, leaseHeartbeatMs: 1000 },
+      readOnlyCache: { enabled: false, ttlMs: 1000, maxEntryBytes: 1024 }
+    },
+    observability: { maxMetricFileBytes: 1048576, maxMetricRetentionDays: 30 }
+  };
+  const runtime = createBridgeRuntime({
+    configuration,
+    adapters: { codex: codexAdapter },
+    sleep: async () => {},
+    orchestratorApprovalEnabled: true
+  });
+  const server = createSubagentMcpServer({ runtime, configuration, trustedWorkspace: root, enableOrchestratorApproval: true });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "prepared-edit-approval-runtime-test", version: "1.0.0" });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  try {
+    const { tools } = await client.listTools();
+    const approvalTool = tools.find((tool) => tool.name === "approve_prepared_edit");
+    assert.ok(approvalTool);
+    assert.equal(approvalTool.inputSchema.additionalProperties, false);
+    const preview = await client.callTool({
+      name: "run_task_profile",
+      arguments: {
+        profile: "create_profile",
+        taskId: "mcp-approval-channel-test",
+        prompt: "Update the selected fixture file",
+        files: ["src/new-value.txt"],
+        acceptanceCriteria: ["The selected fixture exists"]
+      }
+    });
+    assert.equal(preview.structuredContent.failureClass, "approval_required");
+    assert.equal(preview.structuredContent.applied, false);
+    assert.equal(fs.existsSync(sourcePath), false);
+    assert.equal(providerStarts, 1);
+    const invalidApproval = await client.callTool({
+      name: "approve_prepared_edit",
+      arguments: { approvalRequestId: preview.structuredContent.approvalRequestId, unexpected: true }
+    });
+    assert.equal(invalidApproval.isError, true);
+    assert.equal(fs.existsSync(sourcePath), false);
+    assert.equal(providerStarts, 1);
+    const approved = await client.callTool({
+      name: "approve_prepared_edit",
+      arguments: { approvalRequestId: preview.structuredContent.approvalRequestId }
+    });
+    assert.equal(approved.structuredContent.status, "completed");
+    assert.equal(approved.structuredContent.applied, true);
+    assert.deepEqual(approved.structuredContent.filesChanged, ["src/new-value.txt"]);
+    assert.equal(fs.readFileSync(sourcePath, "utf8"), "created\n");
+    assert.equal(providerStarts, 1);
+    const repeatedApproval = await client.callTool({
+      name: "approve_prepared_edit",
+      arguments: { approvalRequestId: preview.structuredContent.approvalRequestId }
+    });
+    assert.equal(repeatedApproval.structuredContent.failureClass, "approval_invalid");
+    assert.equal(fs.readFileSync(sourcePath, "utf8"), "created\n");
+    assert.equal(providerStarts, 1);
   } finally {
     await client.close();
   }

@@ -305,6 +305,40 @@ for (const processCap of [4096, 262144]) {
   });
 }
 
+test("V2-BATCH: a claimed plan resolves to its batch summary after the start response is unavailable", async (t) => {
+  const { service } = createFixture(t);
+  const prepared = await service.prepare({
+    objective: "Inspect files",
+    batchMaxReservedCostUsd: 1,
+    tasks: [baseTask("resolve-started-plan")]
+  });
+  const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
+  assert.equal(started.ok, true);
+  const completed = await waitForBatch(service, started.batchId, ["result_ready"]);
+  const resolved = await service.getBatch({ batchId: prepared.planId });
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.summary.batchId, started.batchId);
+  assert.equal(resolved.summary.status, completed.status);
+  assert.equal(resolved.summary.tasks[0].status, "completed");
+});
+
+test("V2-BATCH: a claimed plan with a missing batch fails closed instead of reporting not started", async (t) => {
+  const { service, configuration } = createFixture(t);
+  const prepared = await service.prepare({
+    objective: "Inspect files",
+    batchMaxReservedCostUsd: 1,
+    tasks: [baseTask("missing-claimed-batch")]
+  });
+  const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
+  assert.equal(started.ok, true);
+  await waitForBatch(service, started.batchId, ["result_ready"]);
+  const batchPath = path.join(configuration.statePaths.state, "parallel-batches", "batches", `${started.batchId}.json`);
+  fs.unlinkSync(batchPath);
+  const resolved = await service.getBatch({ batchId: prepared.planId });
+  assert.equal(resolved.ok, false);
+  assert.equal(resolved.reason, "batch_not_found");
+});
+
 test("V2-BATCH: start runs the single wave, projects bounded summaries and settles known cost", async (t) => {
   const { service } = createFixture(t);
   const prepared = await service.prepare({

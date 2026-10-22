@@ -1665,17 +1665,30 @@ export function createParallelBatchService({
     const manifest = await registry.getBatch(batchId);
     if (!manifest) {
       const plan = await registry.getPlan(batchId);
-      if (plan?.workspaceHash === workspaceHash) return { ok: true, summary: buildSummary({
-        batchId: null,
-        planId: plan.planId,
-        planHash: plan.planHash,
-        status: plan.status,
-        createdAt: plan.createdAt,
-        expiresAt: plan.expiresAt,
-        taskOrder: plan.tasks.map((task) => task.taskId),
-        tasks: Object.fromEntries(plan.tasks.map((task) => [task.taskId, { taskId: task.taskId, status: "queued", allocationUsd: task.allocationUsd, summaryStatus: "not_available", actionRequired: "none", detailRef: null, failureClass: null, durationMs: 0, costUsd: null }])),
-        budget: { capUsd: plan.budgetCapUsd, spentKnownUsd: 0, unknownReservedUsd: 0, refundedUsd: 0, remainingUsd: plan.budgetCapUsd - plan.estimatedAllocationUsd }
-      }, plan, "plan not started yet") };
+      if (plan?.workspaceHash === workspaceHash) {
+        if (plan.status === "claimed") {
+          const claimedBatch = typeof plan.usedByBatchId === "string" ? await registry.getBatch(plan.usedByBatchId) : null;
+          if (!claimedBatch
+            || claimedBatch.batchId !== plan.usedByBatchId
+            || claimedBatch.workspaceHash !== workspaceHash
+            || claimedBatch.planId !== plan.planId
+            || claimedBatch.planHash !== plan.planHash) {
+            return { ok: false, reason: "batch_not_found", message: "claimed batch is unavailable" };
+          }
+          return { ok: true, batchId: claimedBatch.batchId, summary: buildSummary(claimedBatch, plan) };
+        }
+        return { ok: true, summary: buildSummary({
+          batchId: null,
+          planId: plan.planId,
+          planHash: plan.planHash,
+          status: plan.status,
+          createdAt: plan.createdAt,
+          expiresAt: plan.expiresAt,
+          taskOrder: plan.tasks.map((task) => task.taskId),
+          tasks: Object.fromEntries(plan.tasks.map((task) => [task.taskId, { taskId: task.taskId, status: "queued", allocationUsd: task.allocationUsd, summaryStatus: "not_available", actionRequired: "none", detailRef: null, failureClass: null, durationMs: 0, costUsd: null }])),
+          budget: { capUsd: plan.budgetCapUsd, spentKnownUsd: 0, unknownReservedUsd: 0, refundedUsd: 0, remainingUsd: plan.budgetCapUsd - plan.estimatedAllocationUsd }
+        }, plan, plan.status === "expired" ? "plan expired before start" : "plan not started yet") };
+      }
       return { ok: false, reason: "batch_not_found", message: "batch is unknown" };
     }
     if (manifest.workspaceHash !== workspaceHash) return { ok: false, reason: "batch_not_found", message: "batch is unknown" };

@@ -146,7 +146,7 @@ function requireSafeSourceFile(sourceRoot, relativePath) {
   return content;
 }
 
-export function readSafePilotSourceFile(sourceRoot, relativePath) {
+export function readSafeWorkspaceFile(sourceRoot, relativePath) {
   const normalizedRoot = fs.realpathSync(sourceRoot);
   const normalizedRelativePath = normalizeRelativePath(relativePath);
   return requireSafeSourceFile(normalizedRoot, normalizedRelativePath);

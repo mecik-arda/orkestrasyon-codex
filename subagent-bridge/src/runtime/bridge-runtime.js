@@ -13,7 +13,7 @@ import { createDelegationGuard } from "../services/delegation-guard.js";
 import { createExecutionId, createProcessFailureDiagnostics } from "../services/execution-service.js";
 import { createHealthCache } from "../services/health-service.js";
 import { checkModePolicy, resolveAllowedModes } from "../services/mode-policy.js";
-import { applyDeepSeekDisposablePatch, containsSecretLikeAddedValue, containsSecretLikeValue, applyPreparedChanges, detectRecoveryArtifacts, provisionDisposableWorkspace, readSafePilotSourceFile } from "../services/disposable-workspace.js";
+import { applyDeepSeekDisposablePatch, containsSecretLikeAddedValue, containsSecretLikeValue, applyPreparedChanges, detectRecoveryArtifacts, provisionDisposableWorkspace, readSafeWorkspaceFile } from "../services/disposable-workspace.js";
 import { calculateChangeSetHash, classifyChangeSet, isPreparedEditApprovable } from "../services/approval-boundary.js";
 import { createPreparedEditRegistry } from "../services/prepared-edit-registry.js";
 import { containsHttpUrl, containsSensitiveWebValue, containsWebMarkup, detectWebIntent, normalizeUntrustedWebEvidence, providerWebEvidenceCarrierSchema } from "../web-evidence.js";
@@ -220,14 +220,20 @@ export function fingerprintTrustedWorkspace(trustedWorkspace) {
 export function captureSourceState(trustedWorkspace, relativePaths) {
   const sourceWorkspace = canonicalizeTrustedWorkspace(trustedWorkspace);
   return [...new Set(relativePaths)].map((relativePath) => {
+    if (typeof relativePath !== "string") throw new Error("approval source path rejected");
     const normalizedPath = relativePath.replaceAll("\\", "/");
+    if (normalizedPath.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) throw new Error("approval source path rejected");
     const candidatePath = path.resolve(sourceWorkspace, ...normalizedPath.split("/"));
     const relativeCandidate = path.relative(sourceWorkspace, candidatePath);
     if (!normalizedPath || relativeCandidate.startsWith("..") || path.isAbsolute(relativeCandidate)) throw new Error("approval source path rejected");
-    if (!fs.existsSync(candidatePath)) return { relativePath: normalizedPath, state: "absent" };
-    const status = fs.lstatSync(candidatePath);
-    if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1) throw new Error("approval source file rejected");
-    return { relativePath: normalizedPath, state: "present", sha256: crypto.createHash("sha256").update(fs.readFileSync(candidatePath)).digest("hex") };
+    let content;
+    try {
+      content = readSafeWorkspaceFile(sourceWorkspace, normalizedPath);
+    } catch (error) {
+      if (error.code === "ENOENT") return { relativePath: normalizedPath, state: "absent" };
+      throw error;
+    }
+    return { relativePath: normalizedPath, state: "present", sha256: crypto.createHash("sha256").update(content).digest("hex") };
   }).sort((left, right) => left.relativePath.localeCompare(right.relativePath));
 }
 
@@ -238,8 +244,7 @@ export function hashSourceState(sourceStateEntries) {
 function matchesExpectedDisposableFile(disposable, changes, expectedFile) {
   if (changes.changes.length !== 1 || changes.changes[0].relativePath !== expectedFile.relativePath || changes.changes[0].changeType !== "modified") return false;
   try {
-    const candidatePath = path.join(disposable.workspace, ...expectedFile.relativePath.split("/"));
-    return fs.readFileSync(candidatePath).equals(expectedFile.content);
+    return readSafeWorkspaceFile(disposable.workspace, expectedFile.relativePath).equals(expectedFile.content);
   } catch {
     return false;
   }
@@ -1659,7 +1664,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     const sourceWorkspace = canonicalizeTrustedWorkspace(trustedWorkspace);
     let sourceFileSha256Before;
     try {
-      const sourceContent = readSafePilotSourceFile(sourceWorkspace, fixtureRelativePath);
+      const sourceContent = readSafeWorkspaceFile(sourceWorkspace, fixtureRelativePath);
       sourceFileSha256Before = crypto.createHash("sha256").update(sourceContent).digest("hex");
       if (!sourceContent.equals(expectedSourceContent)) {
         return validateControlledEditResult({
@@ -1716,7 +1721,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     });
     let sourceFileSha256After;
     try {
-      sourceFileSha256After = crypto.createHash("sha256").update(readSafePilotSourceFile(sourceWorkspace, fixtureRelativePath)).digest("hex");
+      sourceFileSha256After = crypto.createHash("sha256").update(readSafeWorkspaceFile(sourceWorkspace, fixtureRelativePath)).digest("hex");
     } catch {
       return validateControlledEditResult({
         status: "failed",

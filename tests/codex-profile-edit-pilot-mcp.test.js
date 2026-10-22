@@ -8,11 +8,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { buildCodexArgs, createCodexAdapter } from "../subagent-bridge/src/adapters/codex-adapter.js";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
-import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { captureSourceState, createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { createMcpToolHandlers, publicToolSchemas } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
-import { provisionDisposableWorkspace, readSafePilotSourceFile } from "../subagent-bridge/src/services/disposable-workspace.js";
+import { provisionDisposableWorkspace, readSafeWorkspaceFile } from "../subagent-bridge/src/services/disposable-workspace.js";
 
 const fixturePath = "tests/fixtures/codex-profile-edit-pilot/value.txt";
 
@@ -428,7 +428,51 @@ test("CODEX-EDIT-PILOT-RUNTIME-09: source replacement between path validation an
     return originalOpenSync(filePath, flags);
   };
   try {
-    assert.throws(() => readSafePilotSourceFile(root, fixturePath), /changed during validation|source file rejected/);
+    assert.throws(() => readSafeWorkspaceFile(root, fixturePath), /changed during validation|source file rejected/);
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(replaced, true);
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-09A: approval source state rejects traversal and linked ancestors", async (t) => {
+  const { root } = createFixtureRoot();
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-approval-link-"));
+  const externalTarget = path.join(externalRoot, "outside.txt");
+  const linkedAncestor = path.join(root, "linked");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
+  fs.writeFileSync(externalTarget, "outside content\n", "utf8");
+  assert.throws(() => captureSourceState(root, ["../outside.txt"]), /approval source path rejected/u);
+  try {
+    fs.symlinkSync(externalRoot, linkedAncestor, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code)) return t.skip("directory junction creation is unavailable in this Windows execution context");
+    throw error;
+  }
+  assert.throws(() => captureSourceState(root, ["linked/outside.txt"]), /pilot source link rejected/u);
+  assert.equal(fs.readFileSync(externalTarget, "utf8"), "outside content\n");
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-09B: approval source state uses the bounded descriptor snapshot", async (t) => {
+  const { root, target } = createFixtureRoot();
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-approval-race-"));
+  const externalTarget = path.join(externalRoot, "replacement.txt");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
+  fs.writeFileSync(externalTarget, "replacement source content\n", "utf8");
+  let replaced = false;
+  const originalOpenSync = fs.openSync;
+  fs.openSync = (filePath, flags) => {
+    if (!replaced && filePath === fs.realpathSync(target)) {
+      replaced = true;
+      fs.rmSync(target);
+      fs.copyFileSync(externalTarget, target);
+    }
+    return originalOpenSync(filePath, flags);
+  };
+  try {
+    assert.throws(() => captureSourceState(root, [fixturePath]), /changed during validation|source file rejected/u);
   } finally {
     fs.openSync = originalOpenSync;
   }
@@ -450,7 +494,7 @@ test("CODEX-EDIT-PILOT-RUNTIME-10: source growth during descriptor read remains 
     return originalReadSync(descriptor, buffer, offset, length, position);
   };
   try {
-    assert.throws(() => readSafePilotSourceFile(root, fixturePath), /source file limit exceeded/u);
+    assert.throws(() => readSafeWorkspaceFile(root, fixturePath), /source file limit exceeded/u);
   } finally {
     fs.readSync = originalReadSync;
   }

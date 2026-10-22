@@ -383,6 +383,24 @@ test("OPT-01g: ölü okuyucunun bayat kilidi yazma edinimi sırasında temizleni
   coordinator.release("stale-read-writer");
 });
 
+test("OPT-01g1: null lease kaydı bayatlık eşiği geçince temizlenir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-null-lease-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const executionHash = crypto.createHash("sha256").update("null-lease-reader").digest("hex");
+  const nullLeasePath = path.join(lockDirectory, workspaceHash, `read-${executionHash}.lock`);
+  fs.mkdirSync(path.dirname(nullLeasePath), { recursive: true });
+  fs.writeFileSync(nullLeasePath, "null", "utf8");
+  const staleAt = new Date(Date.now() - 2000);
+  fs.utimesSync(nullLeasePath, staleAt, staleAt);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 100, maxWaitAttempts: 0 });
+  t.after(() => coordinator.release("null-lease-writer"));
+
+  assert.ok(await coordinator.acquire(root, "edit", "null-lease-writer"));
+  assert.equal(fs.existsSync(nullLeasePath), false);
+});
+
 test("OPT-01h: farklı workspace'ler aynı kilit dizininde birbirini engellemez", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-isolation-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

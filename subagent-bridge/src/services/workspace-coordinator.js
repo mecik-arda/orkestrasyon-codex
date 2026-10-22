@@ -25,7 +25,7 @@ function staleWorkspaceLease(filePath, staleLockMs) {
   } catch {
     return stale(filePath, staleLockMs);
   }
-  if (!Number.isInteger(value.pid)) return stale(filePath, staleLockMs);
+  if (!value || !Number.isInteger(value.pid)) return stale(filePath, staleLockMs);
   try {
     process.kill(value.pid, 0);
     return false;

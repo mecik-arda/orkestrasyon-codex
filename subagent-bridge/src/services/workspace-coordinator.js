@@ -19,20 +19,20 @@ function stale(filePath, staleLockMs) {
 }
 
 function staleWorkspaceLease(filePath, staleLockMs) {
-  if (!stale(filePath, staleLockMs)) return false;
+  let value;
   try {
-    const value = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    if (Number.isInteger(value.pid)) {
-      try {
-        process.kill(value.pid, 0);
-        return false;
-      } catch (error) {
-        if (error.code === "EPERM") return false;
-      }
-    }
+    value = JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
+    return stale(filePath, staleLockMs);
   }
-  return true;
+  if (!Number.isInteger(value.pid)) return stale(filePath, staleLockMs);
+  try {
+    process.kill(value.pid, 0);
+    return false;
+  } catch (error) {
+    if (error.code === "ESRCH") return true;
+    return false;
+  }
 }
 
 function cleanStaleLocks(directory, staleLockMs) {

@@ -357,7 +357,7 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
   const { root, workspace } = createWorkspace(t);
   const configuration = createConfiguration(root);
   configuration.parallelBatch.orphanGraceMs = 1000;
-  configuration.orchestration.scheduler = { staleLockMs: 1000, leaseHeartbeatMs: 250, maxQueuedPerWorkspace: 10 };
+  configuration.orchestration.scheduler = { staleLockMs: 60000, leaseHeartbeatMs: 30000, maxQueuedPerWorkspace: 10 };
   const registryModule = pathToFileURL(path.resolve("subagent-bridge/src/services/parallel-batch-registry.js")).href;
   const artifactModule = pathToFileURL(path.resolve("subagent-bridge/src/services/parallel-artifact-store.js")).href;
   const coordinatorModule = pathToFileURL(path.resolve("subagent-bridge/src/services/workspace-coordinator.js")).href;
@@ -372,7 +372,7 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
     `const workspace = ${JSON.stringify(workspace)};`,
     `const registry = createParallelBatchRegistry({ stateDirectory: path.join(configuration.statePaths.state, "parallel-batches") });`,
     `const artifactStore = createParallelArtifactStore({ rootDirectory: path.join(configuration.statePaths.state, "parallel-artifacts"), ttlMs: configuration.parallelBatch.artifactTtlMs, maxArtifactBytes: configuration.parallelBatch.maxArtifactBytes, maxTotalBytes: configuration.parallelBatch.maxArtifactTotalBytes });`,
-    `const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(configuration.statePaths.cache, "locks"), staleLockMs: 1000, leaseHeartbeatMs: 250, maxQueuedPerWorkspace: 10 });`,
+    `const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(configuration.statePaths.cache, "locks"), staleLockMs: 60000, leaseHeartbeatMs: 30000, maxQueuedPerWorkspace: 10 });`,
     `const service = createParallelBatchService({ configuration, registry, artifactStore, workspaceCoordinator, runtime: { async run() { process.stdout.write(JSON.stringify({ stage: "runtime_started" }) + "\\n"); return new Promise(() => {}); } }, trustedWorkspace: workspace, caller: "openCode" });`,
     `const prepared = await service.prepare({ objective: "Hold a fake in-flight task until process termination", batchMaxReservedCostUsd: 1, tasks: [{ taskId: "restart-task", role: "analyst", mode: "read_only", target: "codex", objective: "Read one disposable fixture", readablePaths: ["src/a.txt"] }] });`,
     `if (!prepared.ok) process.exit(2);`,
@@ -430,7 +430,7 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
   await new Promise((resolve) => setTimeout(resolve, 1250));
   const registry = createParallelBatchRegistry({ stateDirectory: path.join(configuration.statePaths.state, "parallel-batches") });
   const artifactStore = createParallelArtifactStore({ rootDirectory: path.join(configuration.statePaths.state, "parallel-artifacts"), ttlMs: configuration.parallelBatch.artifactTtlMs, maxArtifactBytes: configuration.parallelBatch.maxArtifactBytes, maxTotalBytes: configuration.parallelBatch.maxArtifactTotalBytes });
-  const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(configuration.statePaths.cache, "locks"), staleLockMs: 1000, leaseHeartbeatMs: 250, maxQueuedPerWorkspace: 10 });
+  const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(configuration.statePaths.cache, "locks"), staleLockMs: 60000, leaseHeartbeatMs: 30000, maxQueuedPerWorkspace: 10, maxWaitAttempts: 3 });
   let providerStartsAfterRestart = 0;
   const restartedService = createParallelBatchService({
     configuration,

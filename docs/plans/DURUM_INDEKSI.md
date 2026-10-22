@@ -1,5 +1,9 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+Güncel P2 stdio kapı testi — 2026-10-22 16:02 Türkiye: Yerel stdio MCP, fake adapter ve gerçek runtime üzerinden strict onay, red, stale kaynak ve recovery doğrulandı. Hedefli 1/1, approval 8/8, `npm test` 905 toplam/901 geçti/4 skip/0 fail. Bu canlı onay veya entegrasyon kanıtı değildir; P1b/P2/P3/P6 açık.
+
+Güncel P2 stdio stale/recovery kapsamı — 2026-10-22 16:01 Türkiye: Yerel gerçek stdio MCP fixture strict onay, red, stale kaynak ve recovery kapılarını gerçek runtime/fake adapter hattında kapsıyor; dört adapter hazırlığı, karar aşamalarında tekrar yok; yalnız disposable fixture değişir. Hedefli 1/1 geçti; npm test yeni genişletilmiş kapsamdan sonra yeniden çalıştırılacak. Bu canlı kabul değildir; P1b, P2 canlı entegrasyon, P3 restart/unknown/edit ve P6 açık.
+
 Güncel P2 yerel stdio taşıma kanıtı — 2026-10-22 15:59 Türkiye: Gerçek stdio MCP → bridge runtime → fake Codex adapter, strict boş girdiyi provider öncesi reddetti; redde kaynak değişmedi ve saklanan diff açık onayda yalnız geçici fixture'a uygulandı. 8/8 hedefli, `npm test` 905/901/4/0. Bu canlı provider ya da gerçek workspace entegrasyonu değildir; P1b, P2 live decision/recovery/integration, P3 restart/unknown/edit integration ve P6 açık.
 
 Güncel güvenli kaynak reader kontrolü — 2026-10-22 15:50 Türkiye: Review manifest kaynağı descriptor üzerinden dosya tavanı + 1 byte ile sınırlı okuyor; büyüme yarışı `review_scope_too_large` ile fail-closed. Hedefli 13 pass/1 Windows skip, `npm test` 904/900/4/0, verify ve verify:ci geçti. Verify health GET dışında inference yok; DeepSeek erişilebilirliği mevcut shell'de unavailable, Codex modeli `not_probed`. Bu yerel kaynak koruması P1b/P2/P3/P6 kabulini kapatmaz; ayrıntı uygulama raporunda.

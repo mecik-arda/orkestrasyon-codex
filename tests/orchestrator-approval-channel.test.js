@@ -48,7 +48,7 @@ async function createStdioApprovalClient(workspace, providerCallCountPath) {
     `const providerCallCountPath = ${JSON.stringify(providerCallCountPath)};`,
     `const configuration = ${JSON.stringify(configuration)};`,
     "const codexAdapter = createAdapter('codex', { canRead: true, canWrite: true, supportsSandbox: true, supportsModelSelection: true });",
-    "codexAdapter.execute = async (request) => { fs.appendFileSync(providerCallCountPath, '1', 'utf8'); const selectedPath = path.join(request.workspace, 'src', 'stdio-value.txt'); fs.mkdirSync(path.dirname(selectedPath), { recursive: true }); fs.writeFileSync(selectedPath, 'created\\n', 'utf8'); return createSuccessSubagentResult('codex', request.model, { result: 'Updated selected file', durationMs: 1 }); };",
+    "codexAdapter.execute = async (request) => { const selectedPath = /^Düzenlenebilecek dosyalar: ([^\\n]+)/mu.exec(request.prompt)?.[1]; if (!selectedPath) throw new Error('selected file missing'); fs.appendFileSync(providerCallCountPath, '1', 'utf8'); const outputPath = path.join(request.workspace, ...selectedPath.split('/')); fs.mkdirSync(path.dirname(outputPath), { recursive: true }); fs.writeFileSync(outputPath, 'created\\n', 'utf8'); return createSuccessSubagentResult('codex', request.model, { result: 'Updated selected file', durationMs: 1 }); };",
     "const runtime = createBridgeRuntime({ configuration, adapters: { codex: codexAdapter }, sleep: async () => {}, orchestratorApprovalEnabled: true });",
     "const server = createSubagentMcpServer({ runtime, configuration, trustedWorkspace: workspace, enableOrchestratorApproval: true });",
     "await server.connect(new StdioServerTransport());"
@@ -360,7 +360,7 @@ test("WP5B-CHANNEL-07: approve_prepared_edit MCP taşıması stale kaynak ve rec
   }
 });
 
-test("WP5B-CHANNEL-STDIO-01: stdio MCP taşıması strict onay, red ve saklanan değişikliği uygular", async (t) => {
+test("WP5B-CHANNEL-STDIO-01: stdio MCP onay, red, stale kaynak ve recovery kapılarını taşır", async (t) => {
   const root = fs.mkdtempSync(path.join(process.cwd(), ".tmp-mcp-stdio-prepared-edit-"));
   const providerCallCountPath = `${root}.provider-call-count`;
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
@@ -368,7 +368,7 @@ test("WP5B-CHANNEL-STDIO-01: stdio MCP taşıması strict onay, red ve saklanan 
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(providerCallCountPath, { force: true });
   });
-  const sourcePath = path.join(root, "src", "stdio-value.txt");
+  const approvedSourcePath = path.join(root, "src", "approved-value.txt");
   const client = await createStdioApprovalClient(root, providerCallCountPath);
   try {
     const { tools } = await client.listTools();
@@ -384,38 +384,97 @@ test("WP5B-CHANNEL-STDIO-01: stdio MCP taşıması strict onay, red ve saklanan 
         profile: "create_profile",
         taskId: "stdio-approval-reject-test",
         prompt: "Create the selected fixture file",
-        files: ["src/stdio-value.txt"],
+        files: ["src/rejected-value.txt"],
         acceptanceCriteria: ["The selected fixture contains created"]
       }
     });
     assert.equal(rejectPreview.structuredContent.failureClass, "approval_required");
-    assert.equal(fs.existsSync(sourcePath), false);
+    assert.equal(fs.existsSync(approvedSourcePath), false);
+    assert.equal(fs.existsSync(path.join(root, "src", "rejected-value.txt")), false);
     const rejected = await client.callTool({
       name: "reject_prepared_edit",
       arguments: { approvalRequestId: rejectPreview.structuredContent.approvalRequestId }
     });
     assert.deepEqual(rejected.structuredContent, { status: "rejected", outcome: "prepared_edit_rejected" });
-    assert.equal(fs.existsSync(sourcePath), false);
+    assert.equal(fs.existsSync(path.join(root, "src", "rejected-value.txt")), false);
+    assert.equal(fs.readFileSync(providerCallCountPath, "utf8"), "1");
     const approvalPreview = await client.callTool({
       name: "run_task_profile",
       arguments: {
         profile: "create_profile",
         taskId: "stdio-approval-accept-test",
         prompt: "Create the selected fixture file",
-        files: ["src/stdio-value.txt"],
+        files: ["src/approved-value.txt"],
         acceptanceCriteria: ["The selected fixture contains created"]
       }
     });
     assert.equal(approvalPreview.structuredContent.failureClass, "approval_required");
-    assert.equal(fs.existsSync(sourcePath), false);
+    assert.equal(fs.existsSync(approvedSourcePath), false);
     const approved = await client.callTool({
       name: "approve_prepared_edit",
       arguments: { approvalRequestId: approvalPreview.structuredContent.approvalRequestId }
     });
     assert.equal(approved.structuredContent.status, "completed");
     assert.equal(approved.structuredContent.applied, true);
-    assert.equal(fs.readFileSync(sourcePath, "utf8"), "created\n");
+    assert.deepEqual(approved.structuredContent.filesChanged, ["src/approved-value.txt"]);
+    assert.equal(fs.readFileSync(approvedSourcePath, "utf8"), "created\n");
     assert.equal(fs.readFileSync(providerCallCountPath, "utf8"), "11");
+    const staleSourcePath = path.join(root, "src", "stale-value.txt");
+    const stalePreview = await client.callTool({
+      name: "run_task_profile",
+      arguments: {
+        profile: "create_profile",
+        taskId: "stdio-approval-stale-test",
+        prompt: "Update the selected fixture file",
+        files: ["src/stale-value.txt"],
+        acceptanceCriteria: ["The selected fixture contains created"]
+      }
+    });
+    assert.equal(stalePreview.structuredContent.failureClass, "approval_required");
+    fs.writeFileSync(staleSourcePath, "changed after preview\n", "utf8");
+    const staleApproval = await client.callTool({
+      name: "approve_prepared_edit",
+      arguments: { approvalRequestId: stalePreview.structuredContent.approvalRequestId }
+    });
+    assert.equal(staleApproval.isError, true);
+    const staleResult = staleApproval.structuredContent || JSON.parse(staleApproval.content[0].text);
+    assert.equal(staleResult.failureClass, "approval_invalid");
+    assert.equal(staleResult.applied, false);
+    assert.equal(fs.readFileSync(staleSourcePath, "utf8"), "changed after preview\n");
+    assert.equal(fs.readFileSync(providerCallCountPath, "utf8"), "111");
+    const recoverySourcePath = path.join(root, "src", "recovery-value.txt");
+    const recoveryPreview = await client.callTool({
+      name: "run_task_profile",
+      arguments: {
+        profile: "create_profile",
+        taskId: "stdio-approval-recovery-test",
+        prompt: "Create the selected fixture file",
+        files: ["src/recovery-value.txt"],
+        acceptanceCriteria: ["The selected fixture contains created"]
+      }
+    });
+    assert.equal(recoveryPreview.structuredContent.failureClass, "approval_required");
+    const recoveryArtifactPath = path.join(root, "src", ".recovery-value.txt.123.456.abcdef.tmp");
+    fs.writeFileSync(recoveryArtifactPath, "interrupted promotion\n", "utf8");
+    const blockedApproval = await client.callTool({
+      name: "approve_prepared_edit",
+      arguments: { approvalRequestId: recoveryPreview.structuredContent.approvalRequestId }
+    });
+    assert.equal(blockedApproval.isError, true);
+    const blockedResult = blockedApproval.structuredContent || JSON.parse(blockedApproval.content[0].text);
+    assert.equal(blockedResult.failureClass, "recovery_required");
+    assert.equal(blockedResult.applied, false);
+    assert.equal(fs.existsSync(recoverySourcePath), false);
+    fs.rmSync(recoveryArtifactPath);
+    const recoveredApproval = await client.callTool({
+      name: "approve_prepared_edit",
+      arguments: { approvalRequestId: recoveryPreview.structuredContent.approvalRequestId }
+    });
+    assert.equal(recoveredApproval.structuredContent.status, "completed");
+    assert.equal(recoveredApproval.structuredContent.applied, true);
+    assert.equal(fs.readFileSync(recoverySourcePath, "utf8"), "created\n");
+    assert.equal(fs.readFileSync(providerCallCountPath, "utf8"), "1111");
+    assert.deepEqual(fs.readdirSync(path.join(root, "src")).sort(), ["approved-value.txt", "stale-value.txt", "recovery-value.txt"].sort());
   } finally {
     await client.close().catch(() => {});
   }

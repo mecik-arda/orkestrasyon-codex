@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+Güncel P3 canlı salt-okunur görev sonucu — 2026-10-22 15:37 Türkiye: Batch `f9cfddfeee83abf24f695be8abdc4dab` (`048a5a819e3a3847ce84b20a11491f45` / `046c987f8912a707194650e8373531251f0fdf21bc9a8c006f7fa48c54a2aa38`) `result_ready` oldu; görev bekleme/fixture ayrıştırmasını tamamladı, 385682 ms, maliyet `null`. Hades restart yapılmadığından bu P3 restart recovery kanıtı değildir. `$0.20` unknown rezerv korunur; `$0.40` batch-local tavan sağlayıcı faturası değildir. P1b, P2, P3 restart/edit entegrasyonu ve P6 açık; ayrıntı uygulama raporundadır.
+
 Güncel P3 canlı timeout gözlemi — 2026-10-22 15:18 Türkiye: Kullanıcı onayıyla başlatılan ea9dced5e42e9c638c1201c33a33b124 salt-okunur task'ı timeout ile başarısız oldu; süre 21 saniye 575 milisaniye, maliyet null, $0.20 unknown reservation. Bu yalnız canlı timeout hata yolu kanıtıdır; diğer P3 dayanıklılık/edit kapıları, P1b, P2 ve P6 açık. Ayrıntı uygulama raporundadır.
 
 Güncel P2/P3 kaynak-state reader düzeltmesi — 2026-10-22 15:12 Türkiye: Approval kaynak hash’i ve disposable fixture acceptance path’i sınırsız path okuması yerine descriptor-tabanlı güvenli reader kullanıyor; traversal, linkli ata ve read-race regresyonları eklendi. Tam test, verify, local MCP smoke, verify:ci ve diff-check geçti; DeepSeek health unavailable, model erişimi prob edilmedi. P3 canlı timeout için kod değişikliği öncesi hazırlanmış plan geçersizdir; temiz commit sonrası yeni hash ve ayrı start onayı gerekir. P1b/P2/P3/P6 açık.

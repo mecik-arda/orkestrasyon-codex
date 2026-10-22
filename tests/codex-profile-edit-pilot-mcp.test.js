@@ -12,6 +12,7 @@ import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runti
 import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { createMcpToolHandlers, publicToolSchemas } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
+import { readSafePilotSourceFile } from "../subagent-bridge/src/services/disposable-workspace.js";
 
 const fixturePath = "tests/fixtures/codex-profile-edit-pilot/value.txt";
 
@@ -348,8 +349,14 @@ test("CODEX-EDIT-PILOT-RUNTIME-07: linked or oversized source fixture is rejecte
       t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
       fs.rmSync(target);
       fs.writeFileSync(externalPath, "external\n");
-      if (sourceState === "hardlink") fs.linkSync(externalPath, target);
-      else if (sourceState === "symlink") {
+      if (sourceState === "hardlink") {
+        try {
+          fs.linkSync(externalPath, target);
+        } catch (error) {
+          if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code)) return t.skip("hardlink creation is unavailable in this Windows execution context");
+          throw error;
+        }
+      } else if (sourceState === "symlink") {
         try {
           fs.symlinkSync(externalPath, target, "file");
         } catch (error) {
@@ -371,6 +378,31 @@ test("CODEX-EDIT-PILOT-RUNTIME-07: linked or oversized source fixture is rejecte
       assert.equal(processStarts, 0);
     });
   }
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-09: source replacement between path validation and open fails closed", async (t) => {
+  const { root, target } = createFixtureRoot();
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-pilot-race-"));
+  const externalPath = path.join(externalRoot, "external-source.txt");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
+  fs.writeFileSync(externalPath, "external payload\n", "utf8");
+  let replaced = false;
+  const originalOpenSync = fs.openSync;
+  fs.openSync = (filePath, flags) => {
+    if (!replaced && filePath === fs.realpathSync(target)) {
+      replaced = true;
+      fs.rmSync(target);
+      fs.copyFileSync(externalPath, target);
+    }
+    return originalOpenSync(filePath, flags);
+  };
+  try {
+    assert.throws(() => readSafePilotSourceFile(root, fixturePath), /changed during validation|source file rejected/);
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(replaced, true);
 });
 
 test("CODEX-EDIT-PILOT-RUNTIME-06: source fixture mutation during the provider run fails closed", async (t) => {

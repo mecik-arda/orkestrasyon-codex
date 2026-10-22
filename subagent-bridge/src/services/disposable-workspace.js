@@ -97,6 +97,15 @@ function normalizeRelativePath(value) {
   return normalized;
 }
 
+function sameSourceFileSnapshot(expected, actual) {
+  return expected.dev === actual.dev
+    && expected.ino === actual.ino
+    && expected.nlink === actual.nlink
+    && expected.size === actual.size
+    && expected.mtimeNs === actual.mtimeNs
+    && expected.ctimeNs === actual.ctimeNs;
+}
+
 function requireSafeSourceFile(sourceRoot, relativePath) {
   let current = sourceRoot;
   for (const segment of relativePath.split("/")) {
@@ -104,11 +113,22 @@ function requireSafeSourceFile(sourceRoot, relativePath) {
     const status = fs.lstatSync(current);
     if (status.isSymbolicLink()) throw new Error("pilot source link rejected");
   }
-  const status = fs.lstatSync(current);
-  if (!status.isFile() || status.nlink !== 1 || status.size > maximumFileBytes) throw new Error("pilot source file rejected");
+  const status = fs.lstatSync(current, { bigint: true });
+  if (!status.isFile() || status.nlink !== 1n || status.size > BigInt(maximumFileBytes)) throw new Error("pilot source file rejected");
   const realPath = fs.realpathSync(current);
   if (!isInside(realPath, sourceRoot)) throw new Error("pilot source file escapes workspace");
-  const content = fs.readFileSync(realPath);
+  const noFollowFlag = fs.constants.O_NOFOLLOW || 0;
+  const descriptor = fs.openSync(realPath, fs.constants.O_RDONLY | noFollowFlag);
+  let content;
+  try {
+    const openedStatus = fs.fstatSync(descriptor, { bigint: true });
+    if (!sameSourceFileSnapshot(status, openedStatus) || openedStatus.nlink !== 1n) throw new Error("pilot source file changed during validation");
+    content = fs.readFileSync(descriptor);
+    const completedStatus = fs.fstatSync(descriptor, { bigint: true });
+    if (!sameSourceFileSnapshot(openedStatus, completedStatus) || BigInt(content.length) !== completedStatus.size) throw new Error("pilot source file changed during read");
+  } finally {
+    fs.closeSync(descriptor);
+  }
   if (content.includes(0)) throw new Error("pilot binary file rejected");
   if (!Buffer.from(content.toString("utf8"), "utf8").equals(content)) throw new Error("pilot source encoding rejected");
   return content;

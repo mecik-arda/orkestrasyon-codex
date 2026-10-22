@@ -450,12 +450,15 @@ test("V2-BATCH: batch summaries and cancellation are scoped to their trusted wor
   await waitForBatch(first.service, started.batchId, ["result_ready"]);
 
   const foreignSummary = await second.service.getBatch({ batchId: started.batchId });
+  const foreignPlanSummary = await second.service.getBatch({ batchId: prepared.planId });
   const foreignCancel = await second.service.cancel({ batchId: started.batchId });
   const foreignDetail = await second.service.getTaskDetail({ batchId: started.batchId, taskId: "workspace-scoped-task", detailRef: "0".repeat(64) });
   const foreignStart = await second.service.start({ planId: prepared.planId, planHash: prepared.planHash });
   const original = await first.registry.getBatch(started.batchId);
   assert.equal(foreignSummary.ok, false);
   assert.equal(foreignSummary.reason, "batch_not_found");
+  assert.equal(foreignPlanSummary.ok, false);
+  assert.equal(foreignPlanSummary.reason, "batch_not_found");
   assert.equal(foreignCancel.ok, false);
   assert.equal(foreignCancel.reason, "batch_not_found");
   assert.equal(foreignDetail.ok, false);

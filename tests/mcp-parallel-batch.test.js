@@ -392,6 +392,13 @@ test("V2-MCP-E2E: in-memory MCP client gerçek runtime üzerinden read-only batc
     });
     assert.equal(started.isError, false);
     assert.equal(started.structuredContent.summary.status, "queued");
+    const resolvedByPlan = await client.callTool({
+      name: "get_parallel_batch",
+      arguments: { batchId: prepared.structuredContent.planId }
+    });
+    assert.equal(resolvedByPlan.isError, false);
+    assert.equal(resolvedByPlan.structuredContent.batchId, started.structuredContent.batchId);
+    assert.equal(resolvedByPlan.structuredContent.summary.planId, prepared.structuredContent.planId);
     const deadline = Date.now() + 10000;
     let observed;
     while (Date.now() < deadline) {

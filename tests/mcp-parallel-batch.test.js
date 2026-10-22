@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
+import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
+import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createMcpToolHandlers, publicToolSchemas } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
 
@@ -245,4 +251,155 @@ test("V2-MCP: get batch keeps progress machine-readable without a custom visual 
   assert.equal(result.structuredContent.summary.progress.runningCount, 1);
   assert.equal(JSON.parse(result.content[0].text).summary.progress.percentage, 50);
   assert.equal(result.content[0].text.includes("┏━ ORKESTRASYON V2"), false);
+});
+
+test("V2-MCP-E2E: in-memory MCP client gerçek bridge runtime üzerinden read-only batch'i izler", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-parallel-runtime-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const workspace = path.join(root, "workspace");
+  const stateRoot = path.join(root, "state");
+  fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
+  fs.writeFileSync(path.join(workspace, "src", "a.txt"), "fixture value=42\n", "utf8");
+  let adapterCalls = 0;
+  const codexAdapter = createAdapter("codex", {
+    canRead: true,
+    canWrite: false,
+    supportsSandbox: true,
+    supportsModelSelection: true
+  });
+  codexAdapter.execute = async (request) => {
+    adapterCalls += 1;
+    assert.equal(request.mode, "read_only");
+    assert.equal(request.model, "gpt-6.1-sol");
+    return createSuccessSubagentResult("codex", request.model, {
+      requestedModel: request.model,
+      resolvedModel: request.model,
+      result: JSON.stringify({ status: "ok", summary: "fixture value=42", action_required: "none" }),
+      durationMs: 1,
+      metrics: { totalCostUsd: 0.01 }
+    });
+  };
+  const configuration = {
+    packageRoot: root,
+    statePaths: {
+      logs: path.join(stateRoot, "logs"),
+      state: path.join(stateRoot, "data"),
+      cache: path.join(stateRoot, "cache")
+    },
+    allowedRoots: [workspace],
+    reliability: {
+      maxAttempts: 1,
+      maxTotalDurationMs: 30000,
+      maxRetryCostUsd: 1,
+      maxRetryCostReserveUsd: 0.1,
+      maxUnknownAttemptCostUsd: 0.1,
+      dailyCostLimitUsd: 10,
+      monthlyCostLimitUsd: 10,
+      costBudgetEnforced: false
+    },
+    observability: { maxMetricFileBytes: 1048576, maxMetricRetentionDays: 30 },
+    codex: { timeoutMs: 30000, maxRetries: 0, allowedModes: ["read_only"] },
+    orchestration: {
+      taskProfiles: {},
+      scheduler: { maxQueuedPerWorkspace: 5, staleLockMs: 60000, leaseHeartbeatMs: 1000 },
+      readOnlyCache: { enabled: false, ttlMs: 1000, maxEntryBytes: 1024 }
+    },
+    parallelBatch: {
+      enabled: true,
+      editEnabled: false,
+      maxWorkers: 1,
+      providerConcurrency: { codex: 1 },
+      defaultProviderConcurrency: 1,
+      planTtlMs: 60000,
+      maxSummaryCharacters: 4096,
+      maxBatchSummaryBytes: 8192,
+      maxReadablePathsPerTask: 5,
+      maxContextFilesPerTask: 5,
+      maxReadableSnapshotBytes: 65536,
+      maxOutputBytesPerTask: 65536,
+      artifactTtlMs: 60000,
+      maxArtifactBytes: 65536,
+      maxArtifactTotalBytes: 262144,
+      allowedTargets: ["codex"],
+      codexNetworkOffCapability: "available",
+      worktreeRoot: null,
+      verificationCommands: [],
+      orphanGraceMs: 100
+    }
+  };
+  const runtime = createBridgeRuntime({
+    configuration,
+    adapters: { codex: codexAdapter },
+    sleep: async () => {},
+    orchestratorApprovalEnabled: true
+  });
+  const server = createSubagentMcpServer({
+    runtime,
+    configuration,
+    trustedWorkspace: workspace,
+    enableOrchestratorApproval: true
+  });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: "parallel-runtime-e2e-test", version: "1.0.0" });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  try {
+    const prepared = await client.callTool({
+      name: "prepare_parallel_batch",
+      arguments: {
+        objective: "Read the selected fixture and confirm its value",
+        batchMaxReservedCostUsd: 0.5,
+        tasks: [{
+          taskId: "fixture-check",
+          role: "analyst",
+          mode: "read_only",
+          target: "codex",
+          model: "gpt-6.1-sol",
+          objective: "Confirm the fixture text and report its value",
+          readablePaths: ["src/a.txt"],
+          maxInputBytes: 4096,
+          maxOutputBytes: 65536,
+          timeoutSeconds: 30
+        }]
+      }
+    });
+    assert.equal(prepared.isError, false);
+    assert.equal(prepared.structuredContent.summary.status, "planned");
+    assert.equal(prepared.structuredContent.allocation.estimatedUsd, 0.1);
+    const started = await client.callTool({
+      name: "start_parallel_batch",
+      arguments: { planId: prepared.structuredContent.planId, planHash: prepared.structuredContent.planHash }
+    });
+    assert.equal(started.isError, false);
+    assert.equal(started.structuredContent.summary.status, "queued");
+    const deadline = Date.now() + 10000;
+    let observed;
+    while (Date.now() < deadline) {
+      observed = await client.callTool({
+        name: "get_parallel_batch",
+        arguments: { batchId: started.structuredContent.batchId }
+      });
+      if (observed.structuredContent.summary.status === "result_ready") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(observed.structuredContent.summary.status, "result_ready");
+    assert.equal(observed.structuredContent.summary.tasks[0].status, "completed");
+    assert.equal(observed.structuredContent.summary.tasks[0].summary, "fixture value=42");
+    assert.equal(observed.structuredContent.summary.tasks[0].summaryStatus, "full");
+    assert.equal(adapterCalls, 1);
+    assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "fixture value=42\n");
+    const detail = await client.callTool({
+      name: "get_parallel_task_detail",
+      arguments: {
+        batchId: started.structuredContent.batchId,
+        taskId: "fixture-check",
+        detailRef: observed.structuredContent.summary.tasks[0].detailRef
+      }
+    });
+    assert.equal(detail.isError, false);
+    assert.equal(detail.structuredContent.page.batchId, started.structuredContent.batchId);
+    assert.match(detail.structuredContent.page.content, /fixture value=42/u);
+  } finally {
+    await client.close();
+  }
 });

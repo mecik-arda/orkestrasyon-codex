@@ -4,6 +4,8 @@ Güncel P2 güvenlik düzeltmesi — 2026-10-22 13:10 Türkiye: Codex disposable
 
 Güncel doğrulama eki — 2026-10-22 13:30 Türkiye: Entegrasyon test fixture deposu Unicode checkout altında Windows cleanup `EPERM` vermesin diye OS temp köküne taşındı. Worktree entegrasyon testi dosyası 9/9, tam `npm test` 889/885/4 skip/0 fail; `verify`, `verify:ci`, `git diff --check` geçti. Bu test düzenlemesi ürün davranışını değiştirmez. Doğrulamada model inference veya batch yok; `verify` yalnız health/version kontrolleri yaptı. O anki kaynak ağacı commit edilmemişti; P1b/P2/P3/P6 açık.
 
+Commit kontrol noktası — 2026-10-22 13:32 Türkiye: P2 güvenli fixture hash düzeltmesi ve doğrulamaları `ccb6372` commit'inde; commit sonrası Git temiz. MCP runtime commit edilmesi etkin Hades sürecini yenilemez. P1b, P2 canlı alt kapıları, P3 kalan dayanıklılık/edit entegrasyonu ve P6 açık.
+
 Güncel preview kapsamı — 2026-10-21 22:49 Türkiye: Read-only task preview numeric snapshot byte sınırını, edit task preview `edit-worktree` gösterir; bu yolların gerçek kaynak sınırlarıyla uyumludur. Hedefli testler, `npm test`, `npm run verify`, `npm run verify:ci`, `git diff --check` geçti. Canlı plan expired ve başlatılmadı; Hades reload/restart sonrası yeni exact hash gerekir. P1b/P2/P3 ve P6 açık.
 
 Son yerel doğrulama — 2026-10-21 22:43 Türkiye: Yeni kompakt limit önizlemesi için targeted tests, `npm test`, `npm run verify`, `npm run verify:ci` geçti. Verify'de DeepSeek health GET erişilemez, Codex CLI/Vault sağlık başarılı; inference yok. Eski `a183fb3e2c0e379003e879fd0b638556` planı sona erdi ve başlatılmadı. Hades reload/restart sonrası yeni plan hash'i ve ayrı start onayı gerekir. P1b/P2/P3 kalan alt kapıları ve P6 açık.

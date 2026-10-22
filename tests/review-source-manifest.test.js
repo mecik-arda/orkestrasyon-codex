@@ -175,6 +175,31 @@ test("RSM-ERROR-01: pre-open path failures retain the bounded source error class
   assert.throws(() => createReviewSourceManifest(root, ["missing.js"]), { code: "review_scope_not_found" });
 });
 
+test("RSM-READ-01: source growth during descriptor read remains byte bounded", (t) => {
+  const root = createWorkspace(t);
+  const filePath = path.join(root, "growing.js");
+  fs.writeFileSync(filePath, "x\n", "utf8");
+  const originalReadSync = fs.readSync;
+  let bytesRead = 0;
+  let sourceGrew = false;
+  fs.readSync = (...argumentsList) => {
+    const currentBytesRead = originalReadSync(...argumentsList);
+    bytesRead += currentBytesRead;
+    if (!sourceGrew) {
+      sourceGrew = true;
+      fs.appendFileSync(filePath, Buffer.alloc(REVIEW_SOURCE_MAX_FILE_BYTES + 2, 0x61));
+    }
+    return currentBytesRead;
+  };
+  try {
+    assert.throws(() => createReviewSourceManifest(root, ["growing.js"]), { code: "review_scope_too_large" });
+  } finally {
+    fs.readSync = originalReadSync;
+  }
+  assert.equal(sourceGrew, true);
+  assert.equal(bytesRead, REVIEW_SOURCE_MAX_FILE_BYTES + 1);
+});
+
 test("RSM-ORDER-01: manifest ordering is independent of the host locale", (t) => {
   const root = createWorkspace(t);
   const names = ["ä.js", "z.js", "I.js", "İ.js"];

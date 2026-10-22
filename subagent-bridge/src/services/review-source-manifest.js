@@ -52,6 +52,19 @@ function sameFileIdentity(left, right) {
     && left.ctimeMs === right.ctimeMs;
 }
 
+function readSourceDescriptorWithinLimit(descriptor) {
+  const maximumReadBytes = REVIEW_SOURCE_MAX_FILE_BYTES + 1;
+  const buffer = Buffer.allocUnsafe(maximumReadBytes);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const currentBytesRead = fs.readSync(descriptor, buffer, bytesRead, buffer.length - bytesRead, null);
+    if (currentBytesRead === 0) break;
+    bytesRead += currentBytesRead;
+  }
+  if (bytesRead > REVIEW_SOURCE_MAX_FILE_BYTES) throw new ReviewSourceManifestError("review_scope_too_large");
+  return Buffer.from(buffer.subarray(0, bytesRead));
+}
+
 function normalizeRelativePath(value) {
   if (typeof value !== "string" || value.length === 0 || value.includes("\u0000") || /[\r\n]/u.test(value)) {
     throw new ReviewSourceManifestError("review_scope_invalid");
@@ -125,7 +138,7 @@ function readSourceFile(rootPath, relativePath, sortedScopeIndex) {
       || !sameFileIdentity(before, opened)) {
       throw new ReviewSourceManifestError("review_scope_changed");
     }
-    const content = fs.readFileSync(descriptor);
+    const content = readSourceDescriptorWithinLimit(descriptor);
     const after = fs.fstatSync(descriptor);
     if (content.length !== opened.size || !sameFileIdentity(opened, after)) {
       throw new ReviewSourceManifestError("review_scope_changed");

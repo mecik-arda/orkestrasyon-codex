@@ -106,6 +106,18 @@ function sameSourceFileSnapshot(expected, actual) {
     && expected.ctimeNs === actual.ctimeNs;
 }
 
+function readDescriptorWithinLimit(descriptor, maximumBytes) {
+  const buffer = Buffer.allocUnsafe(maximumBytes + 1);
+  let bytesRead = 0;
+  while (bytesRead < buffer.length) {
+    const currentBytesRead = fs.readSync(descriptor, buffer, bytesRead, buffer.length - bytesRead, null);
+    if (currentBytesRead === 0) break;
+    bytesRead += currentBytesRead;
+  }
+  if (bytesRead > maximumBytes) throw new Error("pilot source file limit exceeded");
+  return Buffer.from(buffer.subarray(0, bytesRead));
+}
+
 function requireSafeSourceFile(sourceRoot, relativePath) {
   let current = sourceRoot;
   for (const segment of relativePath.split("/")) {
@@ -123,7 +135,7 @@ function requireSafeSourceFile(sourceRoot, relativePath) {
   try {
     const openedStatus = fs.fstatSync(descriptor, { bigint: true });
     if (!sameSourceFileSnapshot(status, openedStatus) || openedStatus.nlink !== 1n) throw new Error("pilot source file changed during validation");
-    content = fs.readFileSync(descriptor);
+    content = readDescriptorWithinLimit(descriptor, maximumFileBytes);
     const completedStatus = fs.fstatSync(descriptor, { bigint: true });
     if (!sameSourceFileSnapshot(openedStatus, completedStatus) || BigInt(content.length) !== completedStatus.size) throw new Error("pilot source file changed during read");
   } finally {
@@ -171,9 +183,7 @@ function readWorkspaceFiles(workspace) {
         continue;
       }
       if (!status.isFile() || status.nlink !== 1 || status.size > maximumFileBytes) throw new Error("pilot output file rejected");
-      const content = fs.readFileSync(absolutePath);
-      if (content.includes(0)) throw new Error("pilot binary output rejected");
-      if (!Buffer.from(content.toString("utf8"), "utf8").equals(content)) throw new Error("pilot output encoding rejected");
+      const content = requireSafeSourceFile(workspace, relativePath);
       totalBytes += content.length;
       if (totalBytes > maximumTotalBytes || files.size >= maximumFiles) throw new Error("pilot output limit exceeded");
       files.set(relativePath, content.toString("utf8"));

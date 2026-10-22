@@ -405,6 +405,102 @@ test("CODEX-EDIT-PILOT-RUNTIME-09: source replacement between path validation an
   assert.equal(replaced, true);
 });
 
+test("CODEX-EDIT-PILOT-RUNTIME-10: source growth during descriptor read remains byte bounded", async (t) => {
+  const { root, target } = createFixtureRoot();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let expanded = false;
+  let maximumRequestedBytes = 0;
+  const originalReadSync = fs.readSync;
+  fs.readSync = (descriptor, buffer, offset, length, position) => {
+    maximumRequestedBytes = Math.max(maximumRequestedBytes, length);
+    if (!expanded) {
+      expanded = true;
+      fs.writeFileSync(target, Buffer.alloc(2097152, 65));
+    }
+    return originalReadSync(descriptor, buffer, offset, length, position);
+  };
+  try {
+    assert.throws(() => readSafePilotSourceFile(root, fixturePath), /source file limit exceeded/u);
+  } finally {
+    fs.readSync = originalReadSync;
+  }
+  assert.equal(expanded, true);
+  assert.ok(maximumRequestedBytes <= 1048577);
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-11: NUL and malformed UTF-8 fixtures are rejected before provider execution", async (t) => {
+  for (const content of [Buffer.from([0x62, 0x00, 0x66]), Buffer.from([0x62, 0xc3, 0x28])]) {
+    await t.test(content.includes(0) ? "NUL" : "invalid UTF-8", async (t) => {
+      const { root, target } = createFixtureRoot();
+      t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+      fs.writeFileSync(target, content);
+      let processStarts = 0;
+      const runtime = createBridgeRuntime({
+        configuration: configuration(root),
+        adapters: { codex: createCodexAdapter(configuration(root), { runProcess: async () => { processStarts += 1; throw new Error("provider must not run"); } }) },
+        sleep: async () => {}
+      });
+      const result = await runtime.runCodexProfileEditPilot(root);
+      assert.equal(result.status, "failed");
+      assert.equal(result.failureClass, "fixture_precondition_failed");
+      assert.equal(result.applied, false);
+      assert.equal(processStarts, 0);
+      assert.deepEqual(fs.readFileSync(target), content);
+    });
+  }
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-12: disposable output replacement during open fails closed", async (t) => {
+  const { root, target } = createFixtureRoot();
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-pilot-output-race-"));
+  const externalPath = path.join(externalRoot, "replacement.txt");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
+  fs.writeFileSync(externalPath, "untrusted replacement\n", "utf8");
+  let armed = false;
+  let replaced = false;
+  let disposableTarget = "";
+  const originalOpenSync = fs.openSync;
+  fs.openSync = (filePath, flags) => {
+    if (armed && !replaced && filePath === disposableTarget) {
+      replaced = true;
+      fs.rmSync(disposableTarget);
+      fs.copyFileSync(externalPath, disposableTarget);
+    }
+    return originalOpenSync(filePath, flags);
+  };
+  let processStarts = 0;
+  try {
+    const codexAdapter = createCodexAdapter(configuration(root), {
+      runProcess: async (_executable, args, options) => {
+        if (args.at(-1) !== "-") return { stdout: "codex 0.163.0", stderr: "", code: 0, signal: null };
+        processStarts += 1;
+        disposableTarget = path.join(options.cwd, fixturePath);
+        fs.writeFileSync(disposableTarget, "after\n", "utf8");
+        armed = true;
+        return {
+          stdout: `${JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "changed" } })}\n${JSON.stringify({ type: "turn.completed" })}\n`,
+          stderr: "",
+          code: 0,
+          signal: null,
+          durationMs: 1
+        };
+      }
+    });
+    const runtime = createBridgeRuntime({ configuration: configuration(root), adapters: { codex: codexAdapter }, sleep: async () => {} });
+    const result = await runtime.runCodexProfileEditPilot(root);
+    assert.equal(result.status, "failed");
+    assert.equal(result.applied, false);
+    assert.equal(result.diff, "");
+    assert.equal(JSON.stringify(result).includes("untrusted replacement"), false);
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+  assert.equal(replaced, true);
+  assert.equal(processStarts, 1);
+  assert.equal(fs.readFileSync(target, "utf8"), "before\n");
+});
+
 test("CODEX-EDIT-PILOT-RUNTIME-06: source fixture mutation during the provider run fails closed", async (t) => {
   const { root, target } = createFixtureRoot();
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

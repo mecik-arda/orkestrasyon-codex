@@ -380,6 +380,36 @@ test("CODEX-EDIT-PILOT-RUNTIME-07: linked or oversized source fixture is rejecte
   }
 });
 
+test("CODEX-EDIT-PILOT-RUNTIME-08: source fixture below a linked ancestor is rejected before the adapter starts", async (t) => {
+  const { root } = createFixtureRoot();
+  const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-pilot-ancestor-link-"));
+  const externalTarget = path.join(externalRoot, "codex-profile-edit-pilot", "value.txt");
+  const linkedAncestor = path.join(root, "tests", "fixtures");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(externalRoot, { recursive: true, force: true }));
+  fs.rmSync(linkedAncestor, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(externalTarget), { recursive: true });
+  fs.writeFileSync(externalTarget, "before\n", "utf8");
+  try {
+    fs.symlinkSync(externalRoot, linkedAncestor, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (process.platform === "win32" && ["EPERM", "EACCES"].includes(error.code)) return t.skip("directory junction creation is unavailable in this Windows execution context");
+    throw error;
+  }
+  let processStarts = 0;
+  const runtime = createBridgeRuntime({
+    configuration: configuration(root),
+    adapters: { codex: createCodexAdapter(configuration(root), { runProcess: async () => { processStarts += 1; throw new Error("provider must not run"); } }) },
+    sleep: async () => {}
+  });
+  const result = await runtime.runCodexProfileEditPilot(root);
+  assert.equal(result.status, "failed");
+  assert.equal(result.failureClass, "fixture_precondition_failed");
+  assert.equal(result.applied, false);
+  assert.equal(processStarts, 0);
+  assert.equal(fs.readFileSync(externalTarget, "utf8"), "before\n");
+});
+
 test("CODEX-EDIT-PILOT-RUNTIME-09: source replacement between path validation and open fails closed", async (t) => {
   const { root, target } = createFixtureRoot();
   const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-pilot-race-"));

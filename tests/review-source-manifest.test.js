@@ -124,6 +124,7 @@ test("RSM-03: secret-like and invalid UTF-8 files fail closed without exposing c
   const secretContent = `OPENAI_API_KEY=${syntheticKey}\n`;
   fs.writeFileSync(path.join(root, "credential.js"), secretContent);
   fs.writeFileSync(path.join(root, "invalid.js"), Buffer.from([0xff, 0xfe, 0xfd]));
+  fs.writeFileSync(path.join(root, "nul-content.js"), Buffer.from("const value = 1;\u0000\n", "utf8"));
 
   assert.throws(() => createReviewSourceManifest(root, ["credential.js"]), (error) => {
     assert.equal(error.code, "review_scope_secret_detected");
@@ -132,6 +133,7 @@ test("RSM-03: secret-like and invalid UTF-8 files fail closed without exposing c
     return true;
   });
   assert.throws(() => createReviewSourceManifest(root, ["invalid.js"]), { code: "review_scope_invalid_encoding" });
+  assert.throws(() => createReviewSourceManifest(root, ["nul-content.js"]), { code: "review_scope_invalid_encoding" });
 });
 
 test("RSM-04: source scope file count, per-file size, and total size are bounded", (t) => {
@@ -168,6 +170,47 @@ test("RSM-05: symbolic-link paths are rejected", (t) => {
     throw error;
   }
   assert.throws(() => createReviewSourceManifest(root, ["link.js"]), { code: "review_scope_unsafe_file" });
+});
+
+test("RSM-05B: hard-linked source files are rejected", (t) => {
+  const root = createWorkspace(t);
+  const originalPath = path.join(root, "original.js");
+  const linkedPath = path.join(root, "linked.js");
+  fs.writeFileSync(originalPath, "const value = true;\n", "utf8");
+  try {
+    fs.linkSync(originalPath, linkedPath);
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP"].includes(error.code)) return t.skip("hard-link creation is unavailable");
+    throw error;
+  }
+  assert.throws(() => createReviewSourceManifest(root, ["linked.js"]), { code: "review_scope_unsafe_file" });
+});
+
+test("RSM-05C: trusted workspace rebinding after initial validation is rejected", (t) => {
+  const root = createWorkspace(t);
+  const outsideRoot = `${root}.outside`;
+  const originalRoot = `${root}.original`;
+  fs.mkdirSync(outsideRoot, { recursive: true });
+  fs.writeFileSync(path.join(root, "selected.js"), "const value = 'inside';\n", "utf8");
+  fs.writeFileSync(path.join(outsideRoot, "selected.js"), "const value = 'outside';\n", "utf8");
+  t.after(() => {
+    fs.rmSync(outsideRoot, { recursive: true, force: true });
+    fs.rmSync(originalRoot, { recursive: true, force: true });
+  });
+  const requestedPaths = ["selected.js"];
+  requestedPaths.map = (normalizePath) => {
+    fs.renameSync(root, originalRoot);
+    try {
+      fs.symlinkSync(outsideRoot, root, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      fs.renameSync(originalRoot, root);
+      if (["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP"].includes(error.code)) return t.skip("directory-link creation is unavailable");
+      throw error;
+    }
+    return Array.prototype.map.call(requestedPaths, normalizePath);
+  };
+
+  assert.throws(() => createReviewSourceManifest(root, requestedPaths), { code: "review_scope_changed" });
 });
 
 test("RSM-ERROR-01: pre-open path failures retain the bounded source error classification", (t) => {

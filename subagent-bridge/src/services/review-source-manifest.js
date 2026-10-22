@@ -52,6 +52,23 @@ function sameFileIdentity(left, right) {
     && left.ctimeMs === right.ctimeMs;
 }
 
+function assertCanonicalRootUnchanged(rootPath, expectedRootStatus) {
+  let currentRootRealPath;
+  let currentRootStatus;
+  try {
+    currentRootRealPath = fs.realpathSync(rootPath);
+    currentRootStatus = fs.lstatSync(rootPath);
+  } catch {
+    throw new ReviewSourceManifestError("review_scope_changed");
+  }
+  if (!sameResolvedPath(currentRootRealPath, rootPath)
+    || currentRootStatus.isSymbolicLink()
+    || !currentRootStatus.isDirectory()
+    || !sameFileIdentity(expectedRootStatus, currentRootStatus)) {
+    throw new ReviewSourceManifestError("review_scope_changed");
+  }
+}
+
 function readSourceDescriptorWithinLimit(descriptor) {
   const maximumReadBytes = REVIEW_SOURCE_MAX_FILE_BYTES + 1;
   const buffer = Buffer.allocUnsafe(maximumReadBytes);
@@ -103,17 +120,17 @@ function assertSafeComponents(rootPath, filePath) {
   }
 }
 
-function readSourceFile(rootPath, relativePath, sortedScopeIndex) {
+function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex) {
   let descriptor;
   try {
+    assertCanonicalRootUnchanged(rootPath, rootStatus);
     const candidatePath = path.resolve(rootPath, ...relativePath.split("/"));
     const resolvedRelativePath = path.relative(rootPath, candidatePath);
     if (!resolvedRelativePath || resolvedRelativePath.startsWith(".." + path.sep) || path.isAbsolute(resolvedRelativePath)) {
       throw new ReviewSourceManifestError("review_scope_invalid");
     }
-    const rootRealPath = fs.realpathSync(rootPath);
     const candidateRealPath = fs.realpathSync(candidatePath);
-    const canonicalRelativePath = path.relative(rootRealPath, candidateRealPath);
+    const canonicalRelativePath = path.relative(rootPath, candidateRealPath);
     if (!canonicalRelativePath || canonicalRelativePath === ".." || canonicalRelativePath.startsWith(".." + path.sep) || path.isAbsolute(canonicalRelativePath)) {
       throw new ReviewSourceManifestError("review_scope_unsafe_file");
     }
@@ -143,6 +160,7 @@ function readSourceFile(rootPath, relativePath, sortedScopeIndex) {
     if (content.length !== opened.size || !sameFileIdentity(opened, after)) {
       throw new ReviewSourceManifestError("review_scope_changed");
     }
+    assertCanonicalRootUnchanged(rootPath, rootStatus);
     const text = content.toString("utf8");
     if (!Buffer.from(text, "utf8").equals(content) || text.includes("\u0000")) {
       throw new ReviewSourceManifestError("review_scope_invalid_encoding");
@@ -205,7 +223,7 @@ export function createReviewSourceManifest(trustedWorkspace, requestedPaths) {
   let totalBytes = 0;
   for (let index = 0; index < paths.length; index += 1) {
     const relativePath = paths[index];
-    const entry = readSourceFile(rootPath, relativePath, index + 1);
+    const entry = readSourceFile(rootPath, rootStatus, relativePath, index + 1);
     const canonicalPathKey = process.platform === "win32" || process.platform === "darwin"
       ? entry.relativePath.toLocaleLowerCase("en-US")
       : entry.relativePath;

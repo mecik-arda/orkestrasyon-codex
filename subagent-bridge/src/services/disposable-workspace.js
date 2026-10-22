@@ -118,6 +118,16 @@ function readDescriptorWithinLimit(descriptor, maximumBytes) {
   return Buffer.from(buffer.subarray(0, bytesRead));
 }
 
+function hasFilesystemEntry(filePath) {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+    throw error;
+  }
+}
+
 function requireSafeSourceFile(sourceRoot, relativePath) {
   let current = sourceRoot;
   for (const segment of relativePath.split("/")) {
@@ -154,7 +164,7 @@ export function readSafeWorkspaceFile(sourceRoot, relativePath) {
 
 function readOptionalSourceFile(sourceRoot, relativePath, allowMissing) {
   const absolutePath = path.join(sourceRoot, ...relativePath.split("/"));
-  if (fs.existsSync(absolutePath)) return requireSafeSourceFile(sourceRoot, relativePath);
+  if (hasFilesystemEntry(absolutePath)) return requireSafeSourceFile(sourceRoot, relativePath);
   if (!allowMissing) throw new Error("pilot source file not found");
   const parentPath = path.dirname(absolutePath);
   if (!fs.existsSync(parentPath)) {
@@ -253,7 +263,7 @@ export function applyPreparedChanges(sourceRoot, preparedChanges, expectedStates
   try {
     for (const item of items) {
       const sourcePath = path.join(normalizedRoot, ...item.relativePath.split("/"));
-      const currentContent = fs.existsSync(sourcePath) ? requireSafeSourceFile(normalizedRoot, item.relativePath) : null;
+      const currentContent = hasFilesystemEntry(sourcePath) ? requireSafeSourceFile(normalizedRoot, item.relativePath) : null;
       const stateMatches = item.expected.state === "absent"
         ? currentContent === null
         : currentContent !== null && sha256Hex(currentContent) === item.expected.sha256;
@@ -279,7 +289,7 @@ export function applyPreparedChanges(sourceRoot, preparedChanges, expectedStates
   const applied = [];
   try {
     for (const item of prepared) {
-      const currentContent = fs.existsSync(item.sourcePath) ? requireSafeSourceFile(normalizedRoot, item.relativePath) : null;
+      const currentContent = hasFilesystemEntry(item.sourcePath) ? requireSafeSourceFile(normalizedRoot, item.relativePath) : null;
       const stateMatches = item.expected.state === "absent"
         ? currentContent === null
         : currentContent !== null && sha256Hex(currentContent) === item.expected.sha256;

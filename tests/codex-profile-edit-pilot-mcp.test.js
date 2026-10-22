@@ -380,6 +380,36 @@ test("CODEX-EDIT-PILOT-RUNTIME-07: linked or oversized source fixture is rejecte
   }
 });
 
+test("CODEX-EDIT-PILOT-RUNTIME-07A: dangling source symlink is rejected before the adapter starts", async (t) => {
+  const { root, target } = createFixtureRoot();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const originalExistsSync = fs.existsSync;
+  const originalLstatSync = fs.lstatSync;
+  fs.existsSync = (filePath) => filePath === target ? false : originalExistsSync(filePath);
+  fs.lstatSync = (filePath, options) => {
+    const status = originalLstatSync(filePath, options);
+    if (filePath === target) status.isSymbolicLink = () => true;
+    return status;
+  };
+  let processStarts = 0;
+  try {
+    const runtime = createBridgeRuntime({
+      configuration: configuration(root),
+      adapters: { codex: createCodexAdapter(configuration(root), { runProcess: async () => { processStarts += 1; throw new Error("provider must not run"); } }) },
+      sleep: async () => {}
+    });
+    const result = await runtime.runCodexProfileEditPilot(root);
+    assert.equal(result.status, "failed");
+    assert.equal(result.failureClass, "fixture_precondition_failed");
+    assert.equal(result.applied, false);
+    assert.equal(processStarts, 0);
+  } finally {
+    fs.existsSync = originalExistsSync;
+    fs.lstatSync = originalLstatSync;
+  }
+  assert.equal(fs.readFileSync(target, "utf8"), "before\n");
+});
+
 test("CODEX-EDIT-PILOT-RUNTIME-08: source fixture below a linked ancestor is rejected before the adapter starts", async (t) => {
   const { root } = createFixtureRoot();
   const externalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "codex-profile-edit-pilot-ancestor-link-"));

@@ -426,7 +426,11 @@ test("CLIENT-13: paralel Codex kurulumları aynı handler'ı bir kez merge eder"
   const env = { ...process.env, SUBAGENT_MEMORY_HOOK_COHORT_REGISTRY: fixture.registryPath };
   const args = [installerPath, "--client=codex", "--apply", `--project-root=${fixture.projectRoot}`, "--cohort=dersmerkezi"];
   const results = await Promise.all([runChild(process.execPath, args, env), runChild(process.execPath, args, env)]);
-  assert.deepEqual(results.map((result) => result.status), [0, 0]);
+  const resultStatuses = results.map((result) => ({
+    status: result.status,
+    reason: parseFirstJsonObject(result.stdout).reason
+  }));
+  assert.deepEqual(resultStatuses.map((result) => result.status), [0, 0], JSON.stringify(resultStatuses));
   const merged = JSON.parse(fs.readFileSync(target, "utf8"));
   const handlers = merged.hooks.UserPromptSubmit.flatMap((group) => group.hooks);
   assert.equal(merged.hooks.SessionStart[0].hooks[0].command, "keep-me");

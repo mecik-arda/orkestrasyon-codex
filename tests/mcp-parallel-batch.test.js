@@ -6,7 +6,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
-import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
+import { createFailureSubagentResult, createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createMcpToolHandlers, publicToolSchemas } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
@@ -253,7 +253,7 @@ test("V2-MCP: get batch keeps progress machine-readable without a custom visual 
   assert.equal(result.content[0].text.includes("┏━ ORKESTRASYON V2"), false);
 });
 
-test("V2-MCP-E2E: in-memory MCP client gerçek bridge runtime üzerinden read-only batch'i izler", async (t) => {
+test("V2-MCP-E2E: in-memory MCP client gerçek runtime üzerinden read-only batch'i izler ve iptal eder", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-parallel-runtime-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const workspace = path.join(root, "workspace");
@@ -261,6 +261,10 @@ test("V2-MCP-E2E: in-memory MCP client gerçek bridge runtime üzerinden read-on
   fs.mkdirSync(path.join(workspace, "src"), { recursive: true });
   fs.writeFileSync(path.join(workspace, "src", "a.txt"), "fixture value=42\n", "utf8");
   let adapterCalls = 0;
+  let adapterCancelCalls = 0;
+  let releaseCancelledExecution = null;
+  let signalCancelledExecution;
+  const cancelledExecutionStarted = new Promise((resolve) => { signalCancelledExecution = resolve; });
   const codexAdapter = createAdapter("codex", {
     canRead: true,
     canWrite: false,
@@ -271,6 +275,17 @@ test("V2-MCP-E2E: in-memory MCP client gerçek bridge runtime üzerinden read-on
     adapterCalls += 1;
     assert.equal(request.mode, "read_only");
     assert.equal(request.model, "gpt-6.1-sol");
+    if (request.prompt.includes("wait for host cancellation")) {
+      signalCancelledExecution();
+      return new Promise((resolve) => {
+        releaseCancelledExecution = () => resolve(createFailureSubagentResult("codex", request.model, {
+          error: "execution cancelled",
+          reason: "cancelled",
+          retryable: false,
+          retries: 0
+        }));
+      });
+    }
     return createSuccessSubagentResult("codex", request.model, {
       requestedModel: request.model,
       resolvedModel: request.model,
@@ -278,6 +293,10 @@ test("V2-MCP-E2E: in-memory MCP client gerçek bridge runtime üzerinden read-on
       durationMs: 1,
       metrics: { totalCostUsd: 0.01 }
     });
+  };
+  codexAdapter.cancel = async () => {
+    adapterCancelCalls += 1;
+    releaseCancelledExecution?.();
   };
   const configuration = {
     packageRoot: root,
@@ -399,6 +418,60 @@ test("V2-MCP-E2E: in-memory MCP client gerçek bridge runtime üzerinden read-on
     assert.equal(detail.isError, false);
     assert.equal(detail.structuredContent.page.batchId, started.structuredContent.batchId);
     assert.match(detail.structuredContent.page.content, /fixture value=42/u);
+
+    const cancelPrepared = await client.callTool({
+      name: "prepare_parallel_batch",
+      arguments: {
+        objective: "Cancel one held fixture check",
+        batchMaxReservedCostUsd: 0.5,
+        tasks: [{
+          taskId: "cancel-check",
+          role: "analyst",
+          mode: "read_only",
+          target: "codex",
+          model: "gpt-6.1-sol",
+          objective: "wait for host cancellation",
+          readablePaths: ["src/a.txt"],
+          maxInputBytes: 4096,
+          maxOutputBytes: 65536,
+          timeoutSeconds: 30
+        }]
+      }
+    });
+    assert.equal(cancelPrepared.isError, false);
+    const cancelStarted = await client.callTool({
+      name: "start_parallel_batch",
+      arguments: { planId: cancelPrepared.structuredContent.planId, planHash: cancelPrepared.structuredContent.planHash }
+    });
+    assert.equal(cancelStarted.isError, false);
+    await cancelledExecutionStarted;
+    const runningCancelBatch = await client.callTool({
+      name: "get_parallel_batch",
+      arguments: { batchId: cancelStarted.structuredContent.batchId }
+    });
+    assert.equal(runningCancelBatch.structuredContent.summary.status, "running");
+    assert.equal(runningCancelBatch.structuredContent.summary.tasks[0].status, "running");
+    const cancelRequested = await client.callTool({
+      name: "cancel_parallel_batch",
+      arguments: { batchId: cancelStarted.structuredContent.batchId }
+    });
+    assert.equal(cancelRequested.isError, false);
+    assert.equal(cancelRequested.structuredContent.cancellation.requested, true);
+    assert.equal(adapterCancelCalls, 1);
+    const cancelDeadline = Date.now() + 10000;
+    let cancelledBatch;
+    while (Date.now() < cancelDeadline) {
+      cancelledBatch = await client.callTool({
+        name: "get_parallel_batch",
+        arguments: { batchId: cancelStarted.structuredContent.batchId }
+      });
+      if (["cancelled", "unknown"].includes(cancelledBatch.structuredContent.summary.status)) break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(cancelledBatch.structuredContent.summary.status, "cancelled");
+    assert.equal(cancelledBatch.structuredContent.summary.tasks[0].status, "cancelled");
+    assert.equal(adapterCalls, 2);
+    assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "fixture value=42\n");
   } finally {
     await client.close();
   }

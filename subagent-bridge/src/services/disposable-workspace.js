@@ -378,30 +378,36 @@ export function provisionDisposableWorkspace(configuration, sourceWorkspace, req
       fs.writeFileSync(targetPath, content, { flag: "wx" });
     }
     const baseline = readWorkspaceFiles(workspace);
+    function collectChangeSnapshot() {
+      if (fs.readdirSync(container).some((entry) => entry !== "workspace")) throw new Error("pilot workspace escape detected");
+      const current = readWorkspaceFiles(workspace);
+      const paths = [...new Set([...baseline.keys(), ...current.keys()])].sort();
+      const changes = paths.flatMap((relativePath) => {
+        const before = baseline.has(relativePath) ? baseline.get(relativePath) : null;
+        const after = current.has(relativePath) ? current.get(relativePath) : null;
+        if (before === after) return [];
+        const restored = after === null ? null : restoreSourceSecrets(relativePath, after);
+        return [{ relativePath, changeType: before === null ? "created" : after === null ? "deleted" : "modified", diff: createUnifiedDiff(relativePath, before, after), contentSha256: restored === null ? null : sha256Hex(Buffer.from(restored, "utf8")) }];
+      });
+      if (changes.some((change) => !editablePaths.has(change.relativePath))) throw new Error("pilot changed a non-editable file");
+      const diff = changes.map((change) => change.diff).join("\n");
+      if (Buffer.byteLength(diff, "utf8") > maximumTotalBytes) throw new Error("pilot diff limit exceeded");
+      return { filesChanged: changes.map((change) => change.relativePath), changes, diff, current };
+    }
     return {
       workspace,
       collectChanges() {
-        if (fs.readdirSync(container).some((entry) => entry !== "workspace")) throw new Error("pilot workspace escape detected");
-        const current = readWorkspaceFiles(workspace);
-        const paths = [...new Set([...baseline.keys(), ...current.keys()])].sort();
-        const changes = paths.flatMap((relativePath) => {
-          const before = baseline.has(relativePath) ? baseline.get(relativePath) : null;
-          const after = current.has(relativePath) ? current.get(relativePath) : null;
-          if (before === after) return [];
-           const restored = after === null ? null : restoreSourceSecrets(relativePath, after);
-           return [{ relativePath, changeType: before === null ? "created" : after === null ? "deleted" : "modified", diff: createUnifiedDiff(relativePath, before, after), contentSha256: restored === null ? null : sha256Hex(Buffer.from(restored, "utf8")) }];
-        });
-        if (changes.some((change) => !editablePaths.has(change.relativePath))) throw new Error("pilot changed a non-editable file");
-        const diff = changes.map((change) => change.diff).join("\n");
-        if (Buffer.byteLength(diff, "utf8") > maximumTotalBytes) throw new Error("pilot diff limit exceeded");
-        return { filesChanged: changes.map((change) => change.relativePath), changes, diff };
+        const { filesChanged, changes, diff } = collectChangeSnapshot();
+        return { filesChanged, changes, diff };
       },
       capturePreparedChanges() {
-        const collected = this.collectChanges();
+        const snapshot = collectChangeSnapshot();
+        const collected = { filesChanged: snapshot.filesChanged, changes: snapshot.changes, diff: snapshot.diff };
         if (collected.changes.some((change) => change.changeType === "deleted")) throw new Error("pilot file deletion is not allowed");
         const changes = collected.changes.map((change) => {
-          const disposablePath = path.join(workspace, ...change.relativePath.split("/"));
-           const content = Buffer.from(restoreSourceSecrets(change.relativePath, fs.readFileSync(disposablePath, "utf8")), "utf8");
+          const snapshotContent = snapshot.current.get(change.relativePath);
+          if (typeof snapshotContent !== "string") throw new Error("pilot output snapshot unavailable");
+          const content = Buffer.from(restoreSourceSecrets(change.relativePath, snapshotContent), "utf8");
           return { relativePath: change.relativePath, changeType: change.changeType, diff: change.diff, contentSha256: sha256Hex(content), content };
         });
         const expectedStates = changes.map((change) => {

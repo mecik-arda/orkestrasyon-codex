@@ -12,7 +12,7 @@ import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runti
 import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { createMcpToolHandlers, publicToolSchemas } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
-import { readSafePilotSourceFile } from "../subagent-bridge/src/services/disposable-workspace.js";
+import { provisionDisposableWorkspace, readSafePilotSourceFile } from "../subagent-bridge/src/services/disposable-workspace.js";
 
 const fixturePath = "tests/fixtures/codex-profile-edit-pilot/value.txt";
 
@@ -498,6 +498,51 @@ test("CODEX-EDIT-PILOT-RUNTIME-12: disposable output replacement during open fai
   }
   assert.equal(replaced, true);
   assert.equal(processStarts, 1);
+  assert.equal(fs.readFileSync(target, "utf8"), "before\n");
+});
+
+test("CODEX-EDIT-PILOT-RUNTIME-13: prepared changes use the exact validated output snapshot", (t) => {
+  const { root, target } = createFixtureRoot();
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const disposable = provisionDisposableWorkspace(configuration(root), root, [fixturePath], [fixturePath]);
+  t.after(() => disposable.cleanup());
+  const disposableTarget = path.join(disposable.workspace, fixturePath);
+  fs.writeFileSync(disposableTarget, "after\n", "utf8");
+  const replacementPath = path.join(root, "replacement.txt");
+  fs.writeFileSync(replacementPath, "replacement\n", "utf8");
+  let targetDescriptor = null;
+  let targetFstatCalls = 0;
+  let replaced = false;
+  const originalOpenSync = fs.openSync;
+  const originalFstatSync = fs.fstatSync;
+  fs.openSync = (filePath, flags) => {
+    const descriptor = originalOpenSync(filePath, flags);
+    if (filePath === disposableTarget) targetDescriptor = descriptor;
+    return descriptor;
+  };
+  fs.fstatSync = (descriptor, options) => {
+    const status = originalFstatSync(descriptor, options);
+    if (descriptor === targetDescriptor) targetFstatCalls += 1;
+    if (!replaced && targetFstatCalls === 2) {
+      replaced = true;
+      fs.rmSync(disposableTarget);
+      fs.copyFileSync(replacementPath, disposableTarget);
+    }
+    return status;
+  };
+  let prepared;
+  try {
+    prepared = disposable.capturePreparedChanges();
+  } finally {
+    fs.openSync = originalOpenSync;
+    fs.fstatSync = originalFstatSync;
+  }
+  const change = prepared.changes[0];
+  assert.equal(replaced, true);
+  assert.equal(change.content.toString("utf8"), "after\n");
+  assert.equal(change.contentSha256, createHash("sha256").update("after\n").digest("hex"));
+  assert.match(change.diff, /^\+after$/mu);
+  assert.doesNotMatch(change.diff, /replacement/u);
   assert.equal(fs.readFileSync(target, "utf8"), "before\n");
 });
 

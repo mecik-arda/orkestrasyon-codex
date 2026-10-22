@@ -3,7 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
@@ -11,6 +13,56 @@ import { createSuccessSubagentResult } from "../subagent-bridge/src/schemas/core
 import { createSubagentMcpServer, isOrchestratorApprovalEnabled } from "../subagent-bridge/src/frontends/mcp/server.js";
 import { createProviderEnvironment } from "../subagent-bridge/src/services/execution-service.js";
 import { provisionDisposableWorkspace } from "../subagent-bridge/src/services/disposable-workspace.js";
+
+async function createStdioApprovalClient(workspace, providerCallCountPath) {
+  const adapterModule = pathToFileURL(path.resolve("subagent-bridge/src/adapters/agent-adapter-base.js")).href;
+  const resultModule = pathToFileURL(path.resolve("subagent-bridge/src/schemas/core-schemas.js")).href;
+  const runtimeModule = pathToFileURL(path.resolve("subagent-bridge/src/runtime/bridge-runtime.js")).href;
+  const serverModule = pathToFileURL(path.resolve("subagent-bridge/src/frontends/mcp/server.js")).href;
+  const transportModule = import.meta.resolve("@modelcontextprotocol/sdk/server/stdio.js");
+  const configuration = {
+    statePaths: {
+      logs: path.join(workspace, "logs"),
+      state: path.join(workspace, "state"),
+      cache: path.join(workspace, "cache")
+    },
+    allowedRoots: [workspace],
+    codex: { timeoutMs: 30000, allowedModes: ["read_only", "edit"] },
+    reliability: { maxAttempts: 1, maxSchemaRepairAttempts: 0, baseRetryDelayMs: 1, maxRetryDelayMs: 2, maxTotalDurationMs: 30000, maxRetryCostUsd: 1, maxRetryCostReserveUsd: 0.1, maxUnknownAttemptCostUsd: 0.1 },
+    orchestration: {
+      taskProfiles: { create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false } },
+      scheduler: { maxQueuedPerWorkspace: 10, staleLockMs: 60000, leaseHeartbeatMs: 1000 },
+      readOnlyCache: { enabled: false, ttlMs: 1000, maxEntryBytes: 1024 }
+    },
+    observability: { maxMetricFileBytes: 1048576, maxMetricRetentionDays: 30 }
+  };
+  const childSource = [
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    `import { createAdapter } from ${JSON.stringify(adapterModule)};`,
+    `import { createSuccessSubagentResult } from ${JSON.stringify(resultModule)};`,
+    `import { createBridgeRuntime } from ${JSON.stringify(runtimeModule)};`,
+    `import { createSubagentMcpServer } from ${JSON.stringify(serverModule)};`,
+    `import { StdioServerTransport } from ${JSON.stringify(transportModule)};`,
+    `const workspace = ${JSON.stringify(workspace)};`,
+    `const providerCallCountPath = ${JSON.stringify(providerCallCountPath)};`,
+    `const configuration = ${JSON.stringify(configuration)};`,
+    "const codexAdapter = createAdapter('codex', { canRead: true, canWrite: true, supportsSandbox: true, supportsModelSelection: true });",
+    "codexAdapter.execute = async (request) => { fs.appendFileSync(providerCallCountPath, '1', 'utf8'); const selectedPath = path.join(request.workspace, 'src', 'stdio-value.txt'); fs.mkdirSync(path.dirname(selectedPath), { recursive: true }); fs.writeFileSync(selectedPath, 'created\\n', 'utf8'); return createSuccessSubagentResult('codex', request.model, { result: 'Updated selected file', durationMs: 1 }); };",
+    "const runtime = createBridgeRuntime({ configuration, adapters: { codex: codexAdapter }, sleep: async () => {}, orchestratorApprovalEnabled: true });",
+    "const server = createSubagentMcpServer({ runtime, configuration, trustedWorkspace: workspace, enableOrchestratorApproval: true });",
+    "await server.connect(new StdioServerTransport());"
+  ].join("\n");
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["--input-type=module", "--eval", childSource],
+    cwd: workspace,
+    env: { ...process.env }
+  });
+  const client = new Client({ name: "prepared-edit-stdio-test", version: "1.0.0" });
+  await client.connect(transport);
+  return client;
+}
 
 async function listToolNames(enableOrchestratorApproval) {
   const runtime = {
@@ -305,6 +357,67 @@ test("WP5B-CHANNEL-07: approve_prepared_edit MCP taşıması stale kaynak ve rec
     assert.equal(providerStarts, 2);
   } finally {
     await client.close();
+  }
+});
+
+test("WP5B-CHANNEL-STDIO-01: stdio MCP taşıması strict onay, red ve saklanan değişikliği uygular", async (t) => {
+  const root = fs.mkdtempSync(path.join(process.cwd(), ".tmp-mcp-stdio-prepared-edit-"));
+  const providerCallCountPath = `${root}.provider-call-count`;
+  fs.mkdirSync(path.join(root, "src"), { recursive: true });
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(providerCallCountPath, { force: true });
+  });
+  const sourcePath = path.join(root, "src", "stdio-value.txt");
+  const client = await createStdioApprovalClient(root, providerCallCountPath);
+  try {
+    const { tools } = await client.listTools();
+    const approvalTool = tools.find((tool) => tool.name === "approve_prepared_edit");
+    assert.ok(approvalTool);
+    assert.equal(approvalTool.inputSchema.additionalProperties, false);
+    const emptyApproval = await client.callTool({ name: "approve_prepared_edit", arguments: {} });
+    assert.equal(emptyApproval.isError, true);
+    assert.equal(fs.existsSync(providerCallCountPath), false);
+    const rejectPreview = await client.callTool({
+      name: "run_task_profile",
+      arguments: {
+        profile: "create_profile",
+        taskId: "stdio-approval-reject-test",
+        prompt: "Create the selected fixture file",
+        files: ["src/stdio-value.txt"],
+        acceptanceCriteria: ["The selected fixture contains created"]
+      }
+    });
+    assert.equal(rejectPreview.structuredContent.failureClass, "approval_required");
+    assert.equal(fs.existsSync(sourcePath), false);
+    const rejected = await client.callTool({
+      name: "reject_prepared_edit",
+      arguments: { approvalRequestId: rejectPreview.structuredContent.approvalRequestId }
+    });
+    assert.deepEqual(rejected.structuredContent, { status: "rejected", outcome: "prepared_edit_rejected" });
+    assert.equal(fs.existsSync(sourcePath), false);
+    const approvalPreview = await client.callTool({
+      name: "run_task_profile",
+      arguments: {
+        profile: "create_profile",
+        taskId: "stdio-approval-accept-test",
+        prompt: "Create the selected fixture file",
+        files: ["src/stdio-value.txt"],
+        acceptanceCriteria: ["The selected fixture contains created"]
+      }
+    });
+    assert.equal(approvalPreview.structuredContent.failureClass, "approval_required");
+    assert.equal(fs.existsSync(sourcePath), false);
+    const approved = await client.callTool({
+      name: "approve_prepared_edit",
+      arguments: { approvalRequestId: approvalPreview.structuredContent.approvalRequestId }
+    });
+    assert.equal(approved.structuredContent.status, "completed");
+    assert.equal(approved.structuredContent.applied, true);
+    assert.equal(fs.readFileSync(sourcePath, "utf8"), "created\n");
+    assert.equal(fs.readFileSync(providerCallCountPath, "utf8"), "11");
+  } finally {
+    await client.close().catch(() => {});
   }
 });
 

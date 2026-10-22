@@ -378,7 +378,7 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
     `if (!prepared.ok) process.exit(2);`,
     `const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });`,
     `if (!started.ok) process.exit(3);`,
-    `process.stdout.write(JSON.stringify({ stage: "batch_started", batchId: started.batchId }) + "\\n");`,
+    `process.stdout.write(JSON.stringify({ stage: "batch_started", batchId: started.batchId, planId: prepared.planId }) + "\\n");`,
     `setInterval(() => {}, 1000);`
   ].join("\n");
   const child = spawn(process.execPath, ["--input-type=module", "-e", childSource], { stdio: ["ignore", "pipe", "ignore"] });
@@ -390,6 +390,7 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
     const observedStages = new Set();
     let runtimeStarts = 0;
     let batchId = null;
+    let planId = null;
     const timeout = setTimeout(() => reject(new Error("fake bridge did not enter the runtime with a started batch")), 10000);
     child.stdout.on("data", (chunk) => {
       bufferedOutput += chunk.toString("utf8");
@@ -400,10 +401,13 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
         const marker = JSON.parse(line);
         observedStages.add(marker.stage);
         if (marker.stage === "runtime_started") runtimeStarts += 1;
-        if (marker.stage === "batch_started") batchId = marker.batchId;
+        if (marker.stage === "batch_started") {
+          batchId = marker.batchId;
+          planId = marker.planId;
+        }
         if (observedStages.has("runtime_started") && observedStages.has("batch_started")) {
           clearTimeout(timeout);
-          resolve({ batchId, runtimeStarts });
+          resolve({ batchId, planId, runtimeStarts });
           return;
         }
         newlineIndex = bufferedOutput.indexOf("\n");
@@ -421,6 +425,7 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
     });
   });
   assert.match(childObservation.batchId, /^[a-f0-9]{32}$/);
+  assert.match(childObservation.planId, /^[a-f0-9]{32}$/);
   assert.equal(childObservation.runtimeStarts, 1);
   child.kill();
   await new Promise((resolve, reject) => {
@@ -448,6 +453,12 @@ test("V2-STATE: a terminated bridge process recovers an in-flight batch without 
   assert.equal(recovered.summary.tasks[0].status, "unknown");
   assert.equal(recovered.summary.tasks[0].failureClass, "host_restart_unknown");
   assert.ok(recovered.summary.budget.unknownReservedUsd > 0);
+  const recoveredByPlan = await restartedService.getBatch({ batchId: childObservation.planId });
+  assert.equal(recoveredByPlan.ok, true);
+  assert.equal(recoveredByPlan.summary.batchId, childObservation.batchId);
+  assert.equal(recoveredByPlan.summary.status, "unknown");
+  assert.equal(recoveredByPlan.summary.tasks[0].failureClass, "host_restart_unknown");
+  assert.ok(recoveredByPlan.summary.budget.unknownReservedUsd > 0);
   assert.equal(providerStartsAfterRestart, 0);
 });
 

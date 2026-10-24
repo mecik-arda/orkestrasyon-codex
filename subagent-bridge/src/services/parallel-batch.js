@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   parallelBatchBlockedReasonValues,
+  parallelBatchRefChangesSchema,
   parallelTaskVerificationSchema,
   parallelBatchSchemaVersion,
   validatePrepareParallelBatchRequest,
@@ -18,6 +19,7 @@ import { resolveReliabilityBudget } from "./reliability-budget.js";
 import { parallelBatchTerminalStatuses, parallelTaskTerminalStatuses } from "./parallel-batch-registry.js";
 import { createWorkspaceCoordinator } from "./workspace-coordinator.js";
 import { integrationApprovalHash, integrationPayloadHash } from "./git-worktree-batch.js";
+import { compareGitRefSnapshots, validateGitRefSnapshot } from "./git-ref-snapshot.js";
 
 const safeHostVerificationCommands = new Set(["git diff --check"]);
 const safeParallelBatchBlockedReasons = new Set(parallelBatchBlockedReasonValues);
@@ -61,10 +63,24 @@ function safeVerificationResults(results) {
   return normalized.length > 0 ? normalized : null;
 }
 
+function safeRefChanges(value) {
+  const parsed = parallelBatchRefChangesSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 function blockedDiagnosticsForManifest(manifest) {
-  if (manifest.status !== "blocked" || manifest.integrationFailure !== "verification_failed") return null;
-  const verification = safeVerificationResults(manifest.integrationVerification);
-  return verification ? { verification } : null;
+  const verification = manifest.status === "blocked" && manifest.integrationFailure === "verification_failed"
+    ? safeVerificationResults(manifest.integrationVerification)
+    : null;
+  const storedRefChanges = manifest.integrationFailure === "source_ref_changed"
+    ? safeRefChanges(manifest.integrationFailureDiagnostics?.refChanges)
+    : null;
+  const revalidationRefChanges = manifest.integration?.revalidation
+    ? safeRefChanges(manifest.integration.revalidation.sourceRefChanges)
+    : null;
+  const refChanges = storedRefChanges || revalidationRefChanges;
+  if (!verification && !refChanges) return null;
+  return { verification: verification || [], ...(refChanges ? { refChanges } : {}) };
 }
 
 function normalizeHostFailureDiagnostics(diagnostics) {
@@ -103,9 +119,11 @@ function integrationRevalidationMatchesManifest(manifest, integration) {
   if (revalidation === undefined) {
     return integration?.baseCommit === manifest.baseCommit
       && integration?.sourceRefHash === manifest.sourceRefHash
+      && (!integration?.sourceRefSnapshot || (validateGitRefSnapshot(integration.sourceRefSnapshot)
+        && integration.sourceRefSnapshot.refsHash === integration.sourceRefHash))
       && (!Array.isArray(manifest.integrationRevalidations) || manifest.integrationRevalidations.length === 0);
   }
-  const expectedKeys = [
+  const legacyExpectedKeys = [
     "approvalRef",
     "baseCommit",
     "changePayloadHash",
@@ -122,9 +140,10 @@ function integrationRevalidationMatchesManifest(manifest, integration) {
     "sourceFileIdentities",
     "sourceRefHash"
   ];
+  const currentExpectedKeys = [...legacyExpectedKeys, "previousSourceRefSnapshotHash", "sourceRefChanges", "sourceRefSnapshotHash"].sort();
   const records = manifest.integrationRevalidations;
   if (!revalidation || typeof revalidation !== "object" || Array.isArray(revalidation)
-    || Object.keys(revalidation).sort().join("|") !== expectedKeys.join("|")
+    || ![legacyExpectedKeys.join("|"), currentExpectedKeys.join("|")].includes(Object.keys(revalidation).sort().join("|"))
     || !Array.isArray(records) || records.length === 0 || records.length > 8
     || canonicalJson(records.at(-1)) !== canonicalJson(revalidation)
     || revalidation.schemaVersion !== 1 || revalidation.reason !== "source_ref_changed"
@@ -144,9 +163,19 @@ function integrationRevalidationMatchesManifest(manifest, integration) {
     || revalidation.sourceFileIdentities.some((state, index) => state?.relativePath !== integration.filesChanged[index])
     || !Number.isFinite(Date.parse(revalidation.createdAt || ""))
     || !Number.isFinite(Date.parse(revalidation.expiresAt || ""))) return false;
+  const hasRefSnapshotDiagnostics = Object.hasOwn(revalidation, "sourceRefSnapshotHash");
+  if (hasRefSnapshotDiagnostics && (!/^[a-f0-9]{64}$/.test(revalidation.sourceRefSnapshotHash || "")
+    || !(revalidation.previousSourceRefSnapshotHash === null || /^[a-f0-9]{64}$/.test(revalidation.previousSourceRefSnapshotHash || ""))
+    || !parallelBatchRefChangesSchema.safeParse(revalidation.sourceRefChanges).success)) return false;
+  if (integration.sourceRefSnapshot !== undefined
+    && (!validateGitRefSnapshot(integration.sourceRefSnapshot) || integration.sourceRefSnapshot.refsHash !== integration.sourceRefHash)) return false;
   const priorBinding = records.length > 1
     ? records.at(-2)
-    : { baseCommit: manifest.baseCommit, sourceRefHash: manifest.sourceRefHash };
+    : {
+      baseCommit: manifest.baseCommit,
+      sourceRefHash: manifest.sourceRefHash,
+      sourceRefSnapshotHash: manifest.sourceRefSnapshot?.snapshotHash || null
+    };
   return revalidation.baseCommit === integration.baseCommit
     && revalidation.sourceRefHash === integration.sourceRefHash
     && revalidation.approvalRef === integration.approvalRef
@@ -155,6 +184,8 @@ function integrationRevalidationMatchesManifest(manifest, integration) {
     && revalidation.changePayloadHash === integration.changePayloadHash
     && revalidation.previousBaseCommit === priorBinding.baseCommit
     && revalidation.previousSourceRefHash === priorBinding.sourceRefHash
+    && (!hasRefSnapshotDiagnostics || (revalidation.sourceRefSnapshotHash === integration.sourceRefSnapshot?.snapshotHash
+      && revalidation.previousSourceRefSnapshotHash === (priorBinding.sourceRefSnapshotHash || null)))
     && (records.length === 1 || (revalidation.previousApprovalRef === priorBinding.approvalRef
       && revalidation.previousDiffHash === priorBinding.diffHash));
 }
@@ -1031,11 +1062,20 @@ export function createParallelBatchService({
     const hasEditTasks = planned.entries.some((entry) => entry.contract.mode === "edit");
     let baseCommit = null;
     let sourceRefHash = null;
+    let sourceRefSnapshot = null;
     if (hasEditTasks) {
       const clean = worktreeManager.assertCleanSource();
       if (!clean.ok) return { ok: false, reason: clean.reason, message: "source workspace must be clean before a parallel edit batch" };
       baseCommit = clean.head;
-      sourceRefHash = worktreeManager.captureRefState().refsHash;
+      let sourceRefState;
+      try {
+        sourceRefState = worktreeManager.captureRefState();
+      } catch (error) {
+        return { ok: false, reason: error.failureClass || "ref_snapshot_unavailable", message: "source Git state could not be captured safely" };
+      }
+      if (sourceRefState.head !== baseCommit) return { ok: false, reason: "source_head_changed", message: "source HEAD changed while edit admission started" };
+      sourceRefHash = sourceRefState.refsHash;
+      sourceRefSnapshot = sourceRefState.refSnapshot;
     }
     const batchId = crypto.randomBytes(16).toString("hex");
     const claim = await registry.claimPlan({ planId: request.planId, planHash: request.planHash, batchId });
@@ -1062,6 +1102,7 @@ export function createParallelBatchService({
       recoveredAt: null,
       baseCommit,
       sourceRefHash,
+      ...(sourceRefSnapshot ? { sourceRefSnapshot } : {}),
       expiresAt: planned.planRecord.expiresAt,
       taskOrder: planned.entries.map((entry) => entry.contract.taskId),
       waves: planned.waves || [planned.entries.map((entry) => entry.contract.taskId)],
@@ -1094,7 +1135,7 @@ export function createParallelBatchService({
     };
     const created = await registry.createBatch(manifest);
     if (!created.created) return { ok: false, reason: "duplicate_batch", message: "batch already exists" };
-    batchControls.set(batchId, { cancelRequested: false, activeExecutionIds: new Set(), pendingResourceLockIds: new Set(), plan: planned, baseCommit, sourceRefHash });
+    batchControls.set(batchId, { cancelRequested: false, activeExecutionIds: new Set(), pendingResourceLockIds: new Set(), plan: planned, baseCommit, sourceRefHash, sourceRefSnapshot });
     startBatchLease(batchId);
     metric({
       recordType: "parallel_batch_start",
@@ -1426,11 +1467,11 @@ export function createParallelBatchService({
       }
       let diffResult = null;
       if (contract.mode === "edit") {
-        const refCheck = worktreeManager.assertRefStateUnchanged(control?.sourceRefHash);
+        const refCheck = worktreeManager.assertRefStateUnchanged(control?.sourceRefHash, control?.sourceRefSnapshot);
         if (!taskVerification.ok) {
           diffResult = { ok: false, reason: taskVerification.reason };
         } else if (!refCheck.ok) {
-          diffResult = { ok: false, reason: refCheck.reason };
+          diffResult = { ok: false, reason: refCheck.reason, ...(refCheck.refChanges ? { refChanges: refCheck.refChanges } : {}) };
         } else {
           try {
             diffResult = worktreeManager.collectTaskDiff({
@@ -1556,6 +1597,7 @@ export function createParallelBatchService({
           ...(Number.isInteger(diffResult?.diagnostics?.processExitCode) ? { hostProcessExitCode: diffResult.diagnostics.processExitCode } : {}),
           ...(hostFailureOperations.has(diffResult?.diagnostics?.hostOperation) ? { hostOperation: diffResult.diagnostics.hostOperation } : {}),
           ...(hostGitFailureCodes.has(diffResult?.diagnostics?.gitFailureCode) ? { gitFailureCode: diffResult.diagnostics.gitFailureCode } : {}),
+          ...(diffResult?.refChanges ? { refChanges: safeRefChanges(diffResult.refChanges) } : {}),
           error: rawResult.error ?? null,
           reason: rawResult.reason ?? null,
           durationMs,
@@ -1683,12 +1725,14 @@ export function createParallelBatchService({
         batchId,
         baseCommit: updated.manifest.baseCommit,
         tasks: editEntries.map((entry) => ({ taskId: entry.contract.taskId, status: updated.manifest.tasks[entry.contract.taskId].status })),
-        expectedRefHash: updated.manifest.sourceRefHash || null
+        expectedRefHash: updated.manifest.sourceRefHash || null,
+        expectedRefSnapshot: updated.manifest.sourceRefSnapshot || null
       });
       if (!preparation.ok) {
         await requireBatchUpdate(batchId, (manifest) => {
           manifest.status = "blocked";
           manifest.integrationFailure = preparation.reason;
+          manifest.integrationFailureDiagnostics = preparation.refChanges ? { refChanges: safeRefChanges(preparation.refChanges) } : null;
           manifest.integrationVerification = preparation.reason === "verification_failed"
             ? safeVerificationResults(preparation.verification)
             : null;
@@ -1725,6 +1769,7 @@ export function createParallelBatchService({
             detailRef: integrationDetail.detailRef,
             baseCommit: updated.manifest.baseCommit,
             sourceRefHash: updated.manifest.sourceRefHash || null,
+            sourceRefSnapshot: preparation.sourceRefSnapshot || updated.manifest.sourceRefSnapshot || null,
             filesChanged: preparation.filesChanged,
             sourceFileStates: preparation.sourceFileStates,
             acceptedTaskIds: preparation.acceptedTaskIds,
@@ -1738,6 +1783,7 @@ export function createParallelBatchService({
             await requireBatchUpdate(batchId, (manifest) => {
               manifest.status = "blocked";
               manifest.integrationFailure = "public_summary_limit";
+              manifest.integrationFailureDiagnostics = null;
               manifest.integration = {
                 diffHash: integration.diffHash,
                 detailRef: integration.detailRef,
@@ -1751,6 +1797,7 @@ export function createParallelBatchService({
             await requireBatchUpdate(batchId, (manifest) => {
               manifest.status = "ready_for_approval";
               manifest.integration = integration;
+              manifest.integrationFailureDiagnostics = null;
               return manifest;
             });
           }
@@ -1984,6 +2031,7 @@ export function createParallelBatchService({
           if (workspaceCoordinator.assertOwner(trustedWorkspace, lockId) !== true) return false;
           if (candidate.status !== "integrating" || candidate.ownerId !== batchOwnerId || candidate.ownerEpoch !== integrationOwnerEpoch) return false;
           candidate.integrationFailure = result.reason;
+          candidate.integrationFailureDiagnostics = result.refChanges ? { refChanges: safeRefChanges(result.refChanges) } : null;
           candidate.status = new Set(["source_file_identity_changed", "source_file_state_changed", "source_head_changed", "source_ref_changed"]).has(result.reason)
             ? "ready_for_approval"
             : "blocked";
@@ -2002,6 +2050,7 @@ export function createParallelBatchService({
         candidate.status = "integrated";
         candidate.integratedAt = nowIso();
         candidate.integration = result.integration;
+        candidate.integrationFailureDiagnostics = null;
         return candidate;
       }, {
         assertOwner: () => workspaceCoordinator.assertOwner(trustedWorkspace, lockId)
@@ -2116,6 +2165,7 @@ export function createParallelBatchService({
         return { ok: false, reason: "source_ref_changed", message: "source Git state could not be captured safely" };
       }
       if (currentRefState.head !== cleanSourceAtStart.head) return { ok: false, reason: "source_head_changed", message: "source HEAD changed while revalidation started" };
+      const sourceRefChanges = compareGitRefSnapshots(previous.sourceRefSnapshot || null, currentRefState.refSnapshot);
       const preparation = worktreeManager.revalidateIntegration({
         batchId: request.batchId,
         originalBaseCommit: previous.baseCommit,
@@ -2126,9 +2176,15 @@ export function createParallelBatchService({
         expectedDiffHash: previous.diffHash,
         expectedDiffPreviewHash: previous.diffPreviewHash,
         expectedChangePayloadHash: previous.changePayloadHash,
-        expectedRefHash: currentRefState.refsHash
+        expectedRefHash: currentRefState.refsHash,
+        expectedRefSnapshot: currentRefState.refSnapshot
       });
-      if (!preparation.ok) return { ok: false, reason: preparation.reason, message: "stored integration could not be safely rebound to the current source" };
+      if (!preparation.ok) return {
+        ok: false,
+        reason: preparation.reason,
+        message: "stored integration could not be safely rebound to the current source",
+        ...(preparation.refChanges ? { refChanges: safeRefChanges(preparation.refChanges) } : {})
+      };
       if (workspaceCoordinator.assertOwner(trustedWorkspace, lockId) !== true) return { ok: false, reason: "workspace_lock_lost", message: "source workspace integration lock is no longer owned" };
       const approvalHashes = { diffHash: preparation.diffHash, diffPreviewHash: preparation.diffPreviewHash, changePayloadHash: preparation.changePayloadHash };
       const newDetail = artifactStore.store({
@@ -2162,8 +2218,11 @@ export function createParallelBatchService({
         previousSourceRefHash: previous.sourceRefHash,
         previousApprovalRef: previous.approvalRef,
         previousDiffHash: previous.diffHash,
+        previousSourceRefSnapshotHash: previous.sourceRefSnapshot?.snapshotHash || null,
         baseCommit: preparation.baseCommit,
         sourceRefHash: preparation.sourceRefHash,
+        sourceRefSnapshotHash: preparation.sourceRefSnapshot?.snapshotHash || null,
+        sourceRefChanges: safeRefChanges(sourceRefChanges),
         approvalRef: newApprovalRef,
         diffHash: preparation.diffHash,
         diffPreviewHash: preparation.diffPreviewHash,
@@ -2179,6 +2238,7 @@ export function createParallelBatchService({
         detailRef: newDetail.detailRef,
         baseCommit: preparation.baseCommit,
         sourceRefHash: preparation.sourceRefHash,
+        sourceRefSnapshot: preparation.sourceRefSnapshot,
         filesChanged: preparation.filesChanged,
         sourceFileStates: preparation.sourceFileStates,
         acceptedTaskIds: preparation.acceptedTaskIds,
@@ -2190,12 +2250,23 @@ export function createParallelBatchService({
       const beforeCommit = worktreeManager.captureRefState();
       const cleanBeforeCommit = worktreeManager.assertCleanSource();
       const stableIdentity = worktreeManager.captureSourceFileIdentityStates?.(preparation.filesChanged);
-      if (beforeCommit.head !== preparation.baseCommit || beforeCommit.refsHash !== preparation.sourceRefHash
-        || !cleanBeforeCommit.ok || cleanBeforeCommit.head !== preparation.baseCommit
-        || !Array.isArray(stableIdentity) || JSON.stringify(stableIdentity) !== JSON.stringify(preparation.sourceFileIdentities)) {
-        return { ok: false, reason: "source_ref_changed", message: "source state changed before the new approval binding was recorded" };
+      if (beforeCommit.head !== preparation.baseCommit) {
+        return { ok: false, reason: "source_head_changed", message: "source HEAD changed before the new approval binding was recorded" };
+      }
+      if (beforeCommit.refsHash !== preparation.sourceRefHash) {
+        return {
+          ok: false,
+          reason: "source_ref_changed",
+          message: "source state changed before the new approval binding was recorded",
+          refChanges: compareGitRefSnapshots(preparation.sourceRefSnapshot, beforeCommit.refSnapshot)
+        };
+      }
+      if (!cleanBeforeCommit.ok || cleanBeforeCommit.head !== preparation.baseCommit) return { ok: false, reason: cleanBeforeCommit.reason || "source_head_changed", message: "source workspace changed before the new approval binding was recorded" };
+      if (!Array.isArray(stableIdentity) || JSON.stringify(stableIdentity) !== JSON.stringify(preparation.sourceFileIdentities)) {
+        return { ok: false, reason: "source_file_identity_changed", message: "source file identity changed before the new approval binding was recorded" };
       }
       let commitValidationReason = null;
+      let commitValidationRefChanges = null;
       const updated = await registry.updateBatch(request.batchId, (candidate) => {
         if (workspaceCoordinator.assertOwner(trustedWorkspace, lockId) !== true
           || candidate.workspaceHash !== workspaceHash
@@ -2212,6 +2283,7 @@ export function createParallelBatchService({
             || !cleanSource.ok || cleanSource.head !== preparation.baseCommit
             || JSON.stringify(fileIdentities) !== JSON.stringify(preparation.sourceFileIdentities)) {
             commitValidationReason = "source_ref_changed";
+            commitValidationRefChanges = compareGitRefSnapshots(preparation.sourceRefSnapshot, refState.refSnapshot);
             return false;
           }
         } catch {
@@ -2223,7 +2295,12 @@ export function createParallelBatchService({
         candidate.integrationFailure = null;
         return candidate;
       }, { assertOwner: () => workspaceCoordinator.assertOwner(trustedWorkspace, lockId) });
-      if (!updated.ok) return { ok: false, reason: commitValidationReason || updated.reason, message: "new approval binding could not be recorded" };
+      if (!updated.ok) return {
+        ok: false,
+        reason: commitValidationReason || updated.reason,
+        message: "new approval binding could not be recorded",
+        ...(commitValidationRefChanges ? { refChanges: commitValidationRefChanges } : {})
+      };
       let afterCommit;
       let cleanAfterCommit;
       let identityAfterCommit;
@@ -2252,9 +2329,19 @@ export function createParallelBatchService({
             || candidate.integration?.approvalRef !== newApprovalRef) return false;
           candidate.status = "blocked";
           candidate.integrationFailure = failureReason;
+          candidate.integrationFailureDiagnostics = failureReason === "source_ref_changed"
+            ? { refChanges: safeRefChanges(compareGitRefSnapshots(preparation.sourceRefSnapshot, afterCommit.refSnapshot || null)) }
+            : null;
           return candidate;
         }, { assertOwner: () => workspaceCoordinator.assertOwner(trustedWorkspace, lockId) });
-        return { ok: false, reason: failureReason, message: "source changed while the new approval binding was recorded" };
+        return {
+          ok: false,
+          reason: failureReason,
+          message: "source changed while the new approval binding was recorded",
+          ...(failureReason === "source_ref_changed"
+            ? { refChanges: compareGitRefSnapshots(preparation.sourceRefSnapshot, afterCommit.refSnapshot || null) }
+            : {})
+        };
       }
       return { ok: true, summary: buildSummary(updated.manifest, null, "stored integration was revalidated; separate user approval is required") };
     } finally {

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { operatingSystemErrorCodeValues } from "../schemas/core-schemas.js";
+import { compareGitRefSnapshots, createGitRefSnapshot, gitRefSnapshotMaxOutputBytes } from "./git-ref-snapshot.js";
 
 const safeVerificationCommand = "git diff --check";
 
@@ -708,17 +709,45 @@ export function createGitWorktreeBatchManager({
   }
 
   function captureRefState() {
-    const head = captureHead();
-    const refs = git(["for-each-ref", "--format=%(refname):%(objectname)"]);
-    if (!isDirectoryAnchorStable(sourceWorkspaceAnchor)) throw new Error("source workspace root changed");
-    return { head, refsHash: hashValue(refs) };
+    let firstHead;
+    let firstRefs;
+    let secondRefs;
+    let secondHead;
+    try {
+      firstHead = captureHead();
+      firstRefs = git(["for-each-ref", "--format=%(refname):%(objectname)"], { maxBuffer: gitRefSnapshotMaxOutputBytes });
+      secondRefs = git(["for-each-ref", "--format=%(refname):%(objectname)"], { maxBuffer: gitRefSnapshotMaxOutputBytes });
+      secondHead = captureHead();
+    } catch (error) {
+      const reason = ["ENOBUFS", "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"].includes(error?.code)
+        ? "ref_snapshot_limit_exceeded"
+        : "ref_snapshot_unavailable";
+      throw Object.assign(new Error("source Git refs could not be captured safely"), { failureClass: reason });
+    }
+    if (firstHead !== secondHead || firstRefs !== secondRefs || !isDirectoryAnchorStable(sourceWorkspaceAnchor)) {
+      throw Object.assign(new Error("source Git refs changed during snapshot capture"), { failureClass: "ref_snapshot_inconsistent" });
+    }
+    const captured = createGitRefSnapshot(firstRefs);
+    if (!captured.ok) throw Object.assign(new Error("source Git ref snapshot is invalid"), { failureClass: captured.reason });
+    return { head: secondHead, refsHash: captured.snapshot.refsHash, refSnapshot: captured.snapshot };
   }
 
-  function assertRefStateUnchanged(expectedRefsHash) {
-    if (!expectedRefsHash) return { ok: true };
-    const current = captureRefState();
-    if (current.refsHash !== expectedRefsHash) return { ok: false, reason: "source_ref_changed", head: current.head };
-    return { ok: true };
+  function assertRefStateUnchanged(expectedRefsHash, expectedRefSnapshot = null) {
+    let current;
+    try {
+      current = captureRefState();
+    } catch (error) {
+      return { ok: false, reason: error.failureClass || "ref_snapshot_unavailable" };
+    }
+    if (expectedRefsHash && current.refsHash !== expectedRefsHash) {
+      return {
+        ok: false,
+        reason: "source_ref_changed",
+        head: current.head,
+        refChanges: compareGitRefSnapshots(expectedRefSnapshot, current.refSnapshot)
+      };
+    }
+    return { ok: true, head: current.head, refsHash: current.refsHash, refSnapshot: current.refSnapshot };
   }
 
   function assertCleanSource() {
@@ -1013,11 +1042,11 @@ export function createGitWorktreeBatchManager({
     }
   }
 
-  function prepareIntegrationInternal({ batchId, baseCommit, tasks, expectedRefHash = null }) {
+  function prepareIntegrationInternal({ batchId, baseCommit, tasks, expectedRefHash = null, expectedRefSnapshot = null }) {
     if (promotionRecoveryRequired) return { ok: false, reason: "promotion_recovery_required" };
     if (!isGitRepository()) return { ok: false, reason: "source_workspace_not_git" };
-    const refCheck = assertRefStateUnchanged(expectedRefHash);
-    if (!refCheck.ok) return { ok: false, reason: refCheck.reason };
+    const refCheck = assertRefStateUnchanged(expectedRefHash, expectedRefSnapshot);
+    if (!refCheck.ok) return { ok: false, reason: refCheck.reason, ...(refCheck.refChanges ? { refChanges: refCheck.refChanges } : {}) };
     const sourceCheck = assertCleanSource();
     if (!sourceCheck.ok || sourceCheck.head !== baseCommit) return { ok: false, reason: sourceCheck.reason || "source_head_changed" };
     const integrationPath = path.join(worktreeRoot, batchId, "integration");
@@ -1094,10 +1123,25 @@ export function createGitWorktreeBatchManager({
       const sourceFileStates = captureSourceFileStates(changes.map((change) => change.relativePath));
       if (sourceFileStates.some((state) => state.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
       const approvalHashes = integrationDiffHash(diff, changes);
+      let finalRefState;
+      try {
+        finalRefState = captureRefState();
+      } catch {
+        return { ok: false, reason: "ref_snapshot_unavailable" };
+      }
+      if (finalRefState.head !== refCheck.head || finalRefState.refsHash !== refCheck.refsHash) {
+        return {
+          ok: false,
+          reason: "source_ref_changed",
+          refChanges: compareGitRefSnapshots(refCheck.refSnapshot, finalRefState.refSnapshot)
+        };
+      }
       return {
         ok: true,
         integrationPath,
         acceptedTaskIds: accepted,
+        sourceRefHash: refCheck.refsHash,
+        sourceRefSnapshot: refCheck.refSnapshot,
         diffHash: approvalHashes.diffHash,
         diffPreviewHash: approvalHashes.diffPreviewHash,
         changePayloadHash: approvalHashes.changePayloadHash,
@@ -1195,7 +1239,7 @@ export function createGitWorktreeBatchManager({
     }
   }
 
-  function revalidateIntegration({ batchId, originalBaseCommit, currentBaseCommit, originalSourceFileStates, changes, acceptedTasks, expectedRefHash, expectedDiffHash, expectedDiffPreviewHash, expectedChangePayloadHash }) {
+  function revalidateIntegration({ batchId, originalBaseCommit, currentBaseCommit, originalSourceFileStates, changes, acceptedTasks, expectedRefHash, expectedRefSnapshot, expectedDiffHash, expectedDiffPreviewHash, expectedChangePayloadHash }) {
     if (promotionRecoveryRequired) return { ok: false, reason: "promotion_recovery_required" };
     const clean = assertCleanSource();
     if (!clean.ok) return clean;
@@ -1206,7 +1250,13 @@ export function createGitWorktreeBatchManager({
       return { ok: false, reason: "source_head_unrelated" };
     }
     const initialRefState = captureRefState();
-    if (initialRefState.head !== currentBaseCommit || initialRefState.refsHash !== expectedRefHash) return { ok: false, reason: "source_ref_changed" };
+    if (initialRefState.head !== currentBaseCommit || initialRefState.refsHash !== expectedRefHash) {
+      return {
+        ok: false,
+        reason: "source_ref_changed",
+        refChanges: compareGitRefSnapshots(expectedRefSnapshot, initialRefState.refSnapshot)
+      };
+    }
     if (!/^[a-f0-9]{64}$/.test(expectedDiffHash || "") || !/^[a-f0-9]{64}$/.test(expectedDiffPreviewHash || "")
       || !/^[a-f0-9]{64}$/.test(expectedChangePayloadHash || "")
       || !Array.isArray(changes) || changes.length === 0 || !Array.isArray(acceptedTasks) || acceptedTasks.length === 0
@@ -1297,7 +1347,8 @@ export function createGitWorktreeBatchManager({
       batchId,
       baseCommit: currentBaseCommit,
       tasks: acceptedTasks,
-      expectedRefHash
+      expectedRefHash,
+      expectedRefSnapshot: initialRefState.refSnapshot
     });
     if (!preparation.ok) return preparation;
     if (preparation.diffHash !== expectedDiffHash || preparation.diffPreviewHash !== expectedDiffPreviewHash
@@ -1311,7 +1362,13 @@ export function createGitWorktreeBatchManager({
     const finalRefState = captureRefState();
     const finalSourceStates = captureSourceFileIdentityStates(expectedPaths);
     const finalClean = assertCleanSource();
-    if (finalRefState.head !== initialRefState.head || finalRefState.refsHash !== initialRefState.refsHash) return { ok: false, reason: "source_ref_changed" };
+    if (finalRefState.head !== initialRefState.head || finalRefState.refsHash !== initialRefState.refsHash) {
+      return {
+        ok: false,
+        reason: "source_ref_changed",
+        refChanges: compareGitRefSnapshots(initialRefState.refSnapshot, finalRefState.refSnapshot)
+      };
+    }
     if (!finalClean.ok || finalClean.head !== currentBaseCommit) return { ok: false, reason: finalClean.reason || "source_head_changed" };
     if (finalSourceStates.some((state) => state.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
     if (JSON.stringify(currentStates) !== JSON.stringify(finalSourceStates)) return { ok: false, reason: "source_file_identity_changed" };
@@ -1324,6 +1381,7 @@ export function createGitWorktreeBatchManager({
       ...preparation,
       baseCommit: currentBaseCommit,
       sourceRefHash: initialRefState.refsHash,
+      sourceRefSnapshot: initialRefState.refSnapshot,
       sourceFileIdentities: currentStates
     };
   }
@@ -1347,7 +1405,12 @@ export function createGitWorktreeBatchManager({
     }
     if (currentSourceState.head !== integration.baseCommit) return { ok: false, reason: "source_head_changed", message: "source HEAD changed after integration preparation" };
     if (integration.sourceRefHash && currentSourceState.refsHash !== integration.sourceRefHash) {
-      return { ok: false, reason: "source_ref_changed", message: "source refs changed after integration preparation" };
+      return {
+        ok: false,
+        reason: "source_ref_changed",
+        message: "source refs changed after integration preparation",
+        refChanges: compareGitRefSnapshots(integration.sourceRefSnapshot, currentSourceState.refSnapshot)
+      };
     }
     const beforeStates = captureSourceFileStates(integration.filesChanged);
     if (beforeStates.some((entry) => entry.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
@@ -1396,7 +1459,10 @@ export function createGitWorktreeBatchManager({
         throw Object.assign(new Error("source HEAD changed during promotion"), { failureClass: "source_head_changed" });
       }
       if (current.refsHash !== integration.sourceRefHash) {
-        throw Object.assign(new Error("source refs changed during promotion"), { failureClass: "source_ref_changed" });
+        throw Object.assign(new Error("source refs changed during promotion"), {
+          failureClass: "source_ref_changed",
+          refChanges: compareGitRefSnapshots(integration.sourceRefSnapshot, current.refSnapshot)
+        });
       }
     };
     try {
@@ -1501,7 +1567,8 @@ export function createGitWorktreeBatchManager({
       return {
         ok: false,
         reason: rollbackFailed ? "promotion_rollback_failed" : error.failureClass || "promotion_failed",
-        message: rollbackFailed ? "integration recovery is pending and source files require recovery" : error.message
+        message: rollbackFailed ? "integration recovery is pending and source files require recovery" : error.message,
+        ...(error.refChanges ? { refChanges: error.refChanges } : {})
       };
     }
     return {
@@ -1521,6 +1588,7 @@ export function createGitWorktreeBatchManager({
     captureHead,
     captureRefState,
     assertRefStateUnchanged,
+    compareRefSnapshots: compareGitRefSnapshots,
     assertCleanSource,
     createTaskWorktree,
     collectTaskDiff,

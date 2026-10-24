@@ -148,7 +148,7 @@ async function createReadyEditFixture(t) {
 
 async function createSourceRefRejectedFixture(t) {
   const fixture = await createReadyEditFixture(t);
-  git(fixture.workspace, ["tag", "refs/codex/revalidation-rejected-test"]);
+  git(fixture.workspace, ["update-ref", "refs/codex/turn-diffs/checkpoints/revalidation-rejected-test", fixture.baseCommit]);
   const rejected = await fixture.runtime.approveParallelIntegration({
     batchId: fixture.started.batchId,
     approvalRef: fixture.ready.approval.approvalRef,
@@ -156,6 +156,10 @@ async function createSourceRefRejectedFixture(t) {
   }, fixture.workspace);
   assert.equal(rejected.ok, false);
   assert.equal(rejected.reason, "source_ref_changed");
+  assert.equal(rejected.refChanges.addedCount, 1);
+  assert.equal(rejected.refChanges.changes[0].category, "codex_turn_checkpoint");
+  const rejectedSummary = await fixture.runtime.getParallelBatch({ batchId: fixture.started.batchId }, fixture.workspace);
+  assert.equal(rejectedSummary.summary.blockedDiagnostics.refChanges.addedCount, 1);
   return fixture;
 }
 
@@ -308,6 +312,35 @@ test("V2-INTEGRATION: source-ref rejection can be rebound to a descendant HEAD w
   assert.equal(fs.readFileSync(sourceTargetPath, "utf8"), "alpha\n");
 });
 
+test("V2-INTEGRATION: legacy ref-hash-only batches remain protected and report historical detail unavailable", async (t) => {
+  const fixture = await createReadyEditFixture(t);
+  const manifestPath = path.join(fixture.root, "runtime", "state", "parallel-batches", "batches", `${fixture.started.batchId}.json`);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  delete manifest.sourceRefSnapshot;
+  delete manifest.integration.sourceRefSnapshot;
+  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  git(fixture.workspace, ["update-ref", "refs/tags/legacy-snapshot-test", fixture.baseCommit]);
+  const rejected = await fixture.runtime.approveParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: fixture.ready.approval.approvalRef,
+    expectedDiffHash: fixture.ready.approval.diffHash
+  }, fixture.workspace);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, "source_ref_changed");
+  assert.equal(rejected.refChanges.status, "unavailable");
+  assert.equal(rejected.refChanges.reason, "legacy_snapshot_unavailable");
+  const rebound = await fixture.runtime.revalidateParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: fixture.ready.approval.approvalRef,
+    expectedDiffHash: fixture.ready.approval.diffHash
+  }, fixture.workspace);
+  assert.equal(rebound.ok, true, JSON.stringify(rebound));
+  assert.equal(rebound.summary.blockedDiagnostics.refChanges.status, "unavailable");
+  assert.equal(rebound.summary.blockedDiagnostics.refChanges.reason, "legacy_snapshot_unavailable");
+  assert.notEqual(rebound.summary.approval.approvalRef, fixture.ready.approval.approvalRef);
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+});
+
 test("V2-INTEGRATION: repeated source-ref changes can receive fresh bindings and approval", async (t) => {
   const fixture = await createSourceRefRejectedFixture(t);
   const originalApprovalRef = fixture.ready.approval.approvalRef;
@@ -319,8 +352,10 @@ test("V2-INTEGRATION: repeated source-ref changes can receive fresh bindings and
     expectedDiffHash: originalDiffHash
   }, fixture.workspace);
   assert.equal(firstRevalidation.ok, true, JSON.stringify(firstRevalidation));
+  assert.equal(firstRevalidation.summary.blockedDiagnostics.refChanges.addedCount, 1);
+  assert.equal(firstRevalidation.summary.blockedDiagnostics.refChanges.changes[0].category, "codex_turn_checkpoint");
   const firstRevalidatedApproval = firstRevalidation.summary.approval;
-  git(fixture.workspace, ["tag", "refs/codex/revalidation-second-rejection"]);
+  git(fixture.workspace, ["update-ref", "refs/codex/turn-diffs/checkpoints/revalidation-second-rejection", fixture.baseCommit]);
   const secondRefRejection = await fixture.runtime.approveParallelIntegration({
     batchId: fixture.started.batchId,
     approvalRef: firstRevalidatedApproval.approvalRef,
@@ -328,6 +363,8 @@ test("V2-INTEGRATION: repeated source-ref changes can receive fresh bindings and
   }, fixture.workspace);
   assert.equal(secondRefRejection.ok, false);
   assert.equal(secondRefRejection.reason, "source_ref_changed");
+  assert.equal(secondRefRejection.refChanges.addedCount, 1);
+  assert.equal(secondRefRejection.refChanges.changes[0].category, "codex_turn_checkpoint");
   assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
   const secondRevalidation = await fixture.runtime.revalidateParallelIntegration({
     batchId: fixture.started.batchId,

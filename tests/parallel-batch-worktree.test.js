@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createGitWorktreeBatchManager } from "../subagent-bridge/src/services/git-worktree-batch.js";
+import { compareGitRefSnapshots, createGitRefSnapshot, gitRefSnapshotMaxEntries, gitRefSnapshotMaxOutputBytes } from "../subagent-bridge/src/services/git-ref-snapshot.js";
 
 function git(repo, args) {
   return execFileSync("git", args, { cwd: repo, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
@@ -464,6 +465,133 @@ test("V2-WORKTREE: source ref changes are detected before integration", (t) => {
   const preparation = manager.prepareIntegration({ batchId: "f".repeat(32), baseCommit, tasks: [], expectedRefHash: refState.refsHash });
   assert.equal(preparation.ok, false);
   assert.equal(preparation.reason, "source_ref_changed");
+});
+
+test("V2-WORKTREE: Codex turn checkpoint ref churn changes all-ref binding with redacted comparison", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  const manager = createManager(root, repo);
+  const initialRefState = manager.captureRefState();
+  const initialSnapshot = initialRefState.refSnapshot;
+  const checkpointReference = `refs/codex/turn-diffs/checkpoints/${"c".repeat(32)}`;
+
+  git(repo, ["update-ref", checkpointReference, baseCommit]);
+
+  const checkpointCreatedRefState = manager.captureRefState();
+  const checkpointCreatedSnapshot = checkpointCreatedRefState.refSnapshot;
+  const checkpointCreatedChanges = manager.compareRefSnapshots(initialSnapshot, checkpointCreatedSnapshot);
+  assert.equal(checkpointCreatedRefState.head, initialRefState.head);
+  assert.notEqual(checkpointCreatedRefState.refsHash, initialRefState.refsHash);
+  const checkpointCreateGate = manager.assertRefStateUnchanged(initialRefState.refsHash, initialSnapshot);
+  assert.equal(checkpointCreateGate.reason, "source_ref_changed");
+  assert.deepEqual(checkpointCreateGate.refChanges, checkpointCreatedChanges);
+  assert.equal(checkpointCreatedChanges.addedCount, 1);
+  assert.equal(checkpointCreatedChanges.changes[0].operation, "added");
+  assert.equal(checkpointCreatedChanges.changes[0].category, "codex_turn_checkpoint");
+  assert.equal(checkpointCreatedChanges.removedCount, 0);
+  assert.equal(checkpointCreatedChanges.updatedCount, 0);
+  assert.equal(JSON.stringify(checkpointCreatedChanges).includes(checkpointReference), false);
+  assert.equal(JSON.stringify(checkpointCreatedChanges).includes(baseCommit), false);
+
+  const secondCommit = git(repo, ["commit-tree", `${baseCommit}^{tree}`, "-p", baseCommit, "-m", "checkpoint update"]).trim();
+  git(repo, ["update-ref", checkpointReference, secondCommit]);
+
+  const checkpointUpdatedRefState = manager.captureRefState();
+  const checkpointUpdatedSnapshot = checkpointUpdatedRefState.refSnapshot;
+  const checkpointUpdatedChanges = manager.compareRefSnapshots(checkpointCreatedSnapshot, checkpointUpdatedSnapshot);
+  assert.equal(checkpointUpdatedRefState.head, initialRefState.head);
+  assert.notEqual(checkpointUpdatedRefState.refsHash, checkpointCreatedRefState.refsHash);
+  const checkpointUpdateGate = manager.assertRefStateUnchanged(checkpointCreatedRefState.refsHash, checkpointCreatedSnapshot);
+  assert.equal(checkpointUpdateGate.reason, "source_ref_changed");
+  assert.deepEqual(checkpointUpdateGate.refChanges, checkpointUpdatedChanges);
+  assert.equal(checkpointUpdatedChanges.addedCount, 0);
+  assert.equal(checkpointUpdatedChanges.removedCount, 0);
+  assert.equal(checkpointUpdatedChanges.updatedCount, 1);
+  assert.equal(checkpointUpdatedChanges.changes[0].operation, "updated");
+  assert.equal(checkpointUpdatedChanges.changes[0].category, "codex_turn_checkpoint");
+  assert.equal(JSON.stringify(checkpointUpdatedChanges).includes(checkpointReference), false);
+  assert.equal(JSON.stringify(checkpointUpdatedChanges).includes(secondCommit), false);
+});
+
+test("V2-WORKTREE: ref snapshots classify branch and tag additions, removals and target updates", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  const manager = createManager(root, repo);
+  const initial = manager.captureRefState();
+  assert.deepEqual(manager.compareRefSnapshots(initial.refSnapshot, manager.captureRefState().refSnapshot), {
+    schemaVersion: 1,
+    status: "available",
+    reason: null,
+    addedCount: 0,
+    removedCount: 0,
+    updatedCount: 0,
+    truncated: false,
+    changes: []
+  });
+  const tagRef = "refs/tags/snapshot-test";
+  git(repo, ["update-ref", tagRef, baseCommit]);
+  const added = manager.compareRefSnapshots(initial.refSnapshot, manager.captureRefState().refSnapshot);
+  assert.equal(added.addedCount, 1);
+  assert.equal(added.changes[0].category, "tag");
+  assert.equal(added.changes[0].operation, "added");
+  const beforeTagUpdate = manager.captureRefState().refSnapshot;
+  const secondCommit = git(repo, ["commit-tree", `${baseCommit}^{tree}`, "-p", baseCommit, "-m", "ref target update"]).trim();
+  git(repo, ["update-ref", tagRef, secondCommit]);
+  const updated = manager.compareRefSnapshots(beforeTagUpdate, manager.captureRefState().refSnapshot);
+  assert.equal(updated.updatedCount, 1);
+  assert.equal(updated.changes[0].operation, "updated");
+  const beforeBranchAdd = manager.captureRefState().refSnapshot;
+  git(repo, ["update-ref", "refs/heads/snapshot-side", baseCommit]);
+  const branchAdded = manager.compareRefSnapshots(beforeBranchAdd, manager.captureRefState().refSnapshot);
+  assert.equal(branchAdded.addedCount, 1);
+  assert.equal(branchAdded.changes.some((change) => change.category === "branch"), true);
+  const beforeRemoval = manager.captureRefState().refSnapshot;
+  git(repo, ["update-ref", "-d", tagRef]);
+  git(repo, ["update-ref", "-d", "refs/heads/snapshot-side"]);
+  const removed = manager.compareRefSnapshots(beforeRemoval, manager.captureRefState().refSnapshot);
+  assert.equal(removed.removedCount, 2);
+  assert.equal(removed.updatedCount, 0);
+  assert.equal(removed.addedCount, 0);
+  const legacy = compareGitRefSnapshots(null, initial.refSnapshot);
+  assert.equal(legacy.status, "unavailable");
+  assert.equal(legacy.reason, "legacy_snapshot_unavailable");
+});
+
+test("V2-WORKTREE: ref snapshot parsing is bounded, strict and deterministic", () => {
+  const target = "a".repeat(40);
+  const enumeration = `refs/heads/z:${target}\nrefs/tags/a:${target}\n`;
+  const first = createGitRefSnapshot(enumeration);
+  const repeated = createGitRefSnapshot(enumeration);
+  assert.equal(first.ok, true);
+  assert.equal(repeated.ok, true);
+  assert.deepEqual(first.snapshot, repeated.snapshot);
+  assert.deepEqual(compareGitRefSnapshots(first.snapshot, repeated.snapshot).changes, []);
+  assert.deepEqual(createGitRefSnapshot("not-a-ref\n"), { ok: false, reason: "ref_snapshot_invalid" });
+  assert.deepEqual(createGitRefSnapshot(`refs/heads/a:${target}\n`.repeat(gitRefSnapshotMaxEntries + 1)), { ok: false, reason: "ref_snapshot_limit_exceeded" });
+  assert.deepEqual(createGitRefSnapshot("x".repeat(gitRefSnapshotMaxOutputBytes + 1)), { ok: false, reason: "ref_snapshot_limit_exceeded" });
+  const corrupted = { ...first.snapshot, refsHash: "b".repeat(64) };
+  assert.equal(compareGitRefSnapshots(corrupted, first.snapshot).reason, "snapshot_invalid");
+});
+
+test("V2-WORKTREE: ref snapshot capture fails closed when refs change during enumeration", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  let refEnumerationCount = 0;
+  const runGitCommand = (workspace, args, options = {}) => {
+    const result = execFileSync("git", args, {
+      cwd: workspace,
+      encoding: options.encoding || "utf8",
+      timeout: options.timeoutMs || 60000,
+      maxBuffer: options.maxBuffer || 64 * 1024 * 1024,
+      env: options.env || process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    if (args.includes("for-each-ref")) {
+      refEnumerationCount += 1;
+      if (refEnumerationCount === 1) git(repo, ["update-ref", "refs/tags/snapshot-race", baseCommit]);
+    }
+    return result;
+  };
+  const manager = createManager(root, repo, [], { runGitCommand });
+  assert.throws(() => manager.captureRefState(), (error) => error.failureClass === "ref_snapshot_inconsistent");
+  assert.equal(refEnumerationCount, 2);
 });
 
 test("V2-WORKTREE: revalidation rejects a source file identity change during host verification", (t) => {

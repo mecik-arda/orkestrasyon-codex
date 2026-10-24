@@ -112,6 +112,20 @@ test("V2-SCHEMA: batch summary rejects provider invoice claims", () => {
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "blocked", blockedReason: "task_diff_missing" }).success, true);
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "blocked", blockedReason: "C:\\private\\path" }).success, false);
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "blocked", blockedReason: "verification_failed", blockedDiagnostics: { verification: [{ commandHash: "f".repeat(64), exitCode: 2, outputBytes: 24, verificationStage: "index", failureKind: "nonzero_exit", processExitCode: 2, osErrorCode: null }] } }).success, true);
+  const refChanges = {
+    schemaVersion: 1,
+    status: "available",
+    reason: null,
+    addedCount: 1,
+    removedCount: 0,
+    updatedCount: 0,
+    truncated: false,
+    changes: [{ operation: "added", category: "codex_turn_checkpoint", referenceFingerprint: "a".repeat(64), previousTargetFingerprint: null, currentTargetFingerprint: "b".repeat(64) }]
+  };
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "ready_for_approval", blockedDiagnostics: { verification: [], refChanges } }).success, true);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, blockedDiagnostics: { verification: [], refChanges: { ...refChanges, changes: [{ ...refChanges.changes[0], referenceName: "refs/secret" }] } } }).success, false);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, blockedDiagnostics: { verification: [], refChanges: { ...refChanges, changes: [{ ...refChanges.changes[0], category: "refs/unknown" }] } } }).success, false);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, blockedDiagnostics: { verification: [], refChanges: { ...refChanges, truncated: true } } }).success, false);
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, blockedDiagnostics: { verification: [{ commandHash: "f".repeat(64), exitCode: 2, outputBytes: 24, verificationStage: "C:\\private\\path" }] } }).success, false);
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, blockedDiagnostics: { verification: [{ commandHash: "f".repeat(64), exitCode: 2, outputBytes: 24, stderr: "secret" }] } }).success, false);
   const { detailRef, ...approvalWithoutDiffPreview } = approval;

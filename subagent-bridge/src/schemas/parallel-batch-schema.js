@@ -234,8 +234,49 @@ export const parallelBatchApprovalSchema = z.object({
   filesChanged: z.array(z.string().min(1).max(500)).max(200)
 }).strict();
 
+export const parallelBatchRefChangeSchema = z.object({
+  operation: z.enum(["added", "removed", "updated"]),
+  category: z.enum(["branch", "remote_tracking", "tag", "codex_turn_checkpoint", "other"]),
+  referenceFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+  previousTargetFingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable(),
+  currentTargetFingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable()
+}).strict().superRefine((change, context) => {
+  if (change.operation === "added" && (change.previousTargetFingerprint !== null || change.currentTargetFingerprint === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["operation"], message: "added ref change has invalid target fingerprints" });
+  }
+  if (change.operation === "removed" && (change.previousTargetFingerprint === null || change.currentTargetFingerprint !== null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["operation"], message: "removed ref change has invalid target fingerprints" });
+  }
+  if (change.operation === "updated" && (change.previousTargetFingerprint === null || change.currentTargetFingerprint === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["operation"], message: "updated ref change has invalid target fingerprints" });
+  }
+});
+
+export const parallelBatchRefChangesSchema = z.object({
+  schemaVersion: z.literal(1),
+  status: z.enum(["available", "unavailable"]),
+  reason: z.enum(["legacy_snapshot_unavailable", "snapshot_invalid"]).nullable(),
+  addedCount: z.number().int().min(0).max(4096),
+  removedCount: z.number().int().min(0).max(4096),
+  updatedCount: z.number().int().min(0).max(4096),
+  truncated: z.boolean(),
+  changes: z.array(parallelBatchRefChangeSchema).max(24)
+}).strict().superRefine((comparison, context) => {
+  const totalChanges = comparison.addedCount + comparison.removedCount + comparison.updatedCount;
+  if (comparison.status === "available" && comparison.reason !== null) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["reason"], message: "available ref comparison cannot have an unavailable reason" });
+  }
+  if (comparison.status === "unavailable" && (comparison.reason === null || totalChanges !== 0 || comparison.changes.length > 0 || comparison.truncated)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["status"], message: "unavailable ref comparison cannot contain change details" });
+  }
+  if (comparison.status === "available" && (comparison.changes.length > totalChanges || comparison.truncated !== (totalChanges > comparison.changes.length))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["changes"], message: "ref comparison change counts are inconsistent" });
+  }
+});
+
 export const parallelBatchBlockedDiagnosticsSchema = z.object({
-  verification: z.array(parallelTaskVerificationSchema).max(20)
+  verification: z.array(parallelTaskVerificationSchema).max(20),
+  refChanges: parallelBatchRefChangesSchema.optional()
 }).strict().nullable();
 
 export const parallelBatchSummarySchema = z.object({

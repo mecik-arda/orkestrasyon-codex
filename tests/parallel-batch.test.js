@@ -1003,7 +1003,7 @@ test("V2-BATCH: pre-provider worktree failures preserve safe setup diagnostics",
   let providerStarts = 0;
   const worktreeManager = {
     assertCleanSource: () => ({ ok: true, head: "a".repeat(40) }),
-    captureRefState: () => ({ refsHash: "b".repeat(64) }),
+    captureRefState: () => ({ head: "a".repeat(40), refsHash: "b".repeat(64) }),
     createTaskWorktree: () => ({
       ok: false,
       reason: "worktree_create_failed",
@@ -1074,7 +1074,7 @@ test("V2-BATCH: setup artifact failures remain unstarted and release their alloc
   let providerStarts = 0;
   const worktreeManager = {
     assertCleanSource: () => ({ ok: true, head: "a".repeat(40) }),
-    captureRefState: () => ({ refsHash: "b".repeat(64) }),
+    captureRefState: () => ({ head: "a".repeat(40), refsHash: "b".repeat(64) }),
     createTaskWorktree: () => ({ ok: false, reason: "worktree_create_failed", diagnostics: { failureStage: "workspace_setup", providerCode: "process_error", osErrorCode: "EPERM" } }),
     collectTaskDiff: () => ({ ok: false, reason: "no_changes" }),
     runVerification: () => ({ ok: true, results: [] }),
@@ -1112,7 +1112,7 @@ test("V2-BATCH: setup artifact failures remain unstarted and release their alloc
 test("V2-BATCH: post-provider diff failures preserve host diagnostics without raw errors", async (t) => {
   const worktreeManager = {
     assertCleanSource: () => ({ ok: true, head: "c".repeat(40) }),
-    captureRefState: () => ({ refsHash: "d".repeat(64) }),
+    captureRefState: () => ({ head: "c".repeat(40), refsHash: "d".repeat(64) }),
     assertRefStateUnchanged: () => ({ ok: true }),
     createTaskWorktree: () => ({ ok: true, worktreePath: "C:\\temporary\\worktree", repositoryPath: "C:\\temporary\\repo", baseCommit: "c".repeat(40) }),
     collectTaskDiff: () => ({

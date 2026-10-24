@@ -1410,7 +1410,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
             configuredModels: agentConfiguration?.enabled === false ? [] : configuredModels(runtimeConfiguration, adapter.id),
             health: normalizeHealthResult(agentConfiguration?.enabled === false
               ? { installed: false, version: null, authValid: false, executable: "unavailable", error: "disabled" }
-              : await adapter.healthCheck(probeModels.length > 0 ? { recoverStaleSettings: false } : undefined))
+              : await adapter.healthCheck(adapter.id === "antigravity" ? { recoverStaleSettings: false } : undefined))
           }];
         } catch (error) {
           return [adapter.id, {

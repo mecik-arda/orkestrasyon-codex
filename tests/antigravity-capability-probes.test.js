@@ -384,7 +384,7 @@ test("CAP-RT-06: probe yeteneği olmayan adapter sessizce atlanır", async (t) =
   assert.equal(health.adapters.antigravity.health.capabilityProbes, undefined);
 });
 
-test("CAP-RT-07: probe çağrısı healthCheck recovery davranışını kapatır", async (t) => {
+test("CAP-RT-07: health kontrolleri Antigravity settings recovery davranışını kapatır", async (t) => {
   const root = fixtureDirectory(t, "runtime-recovery");
   const observedOptions = [];
   const antigravity = createFakeAdapter("antigravity", async () => probeFixtureResult({ modelAccess: "available" }));
@@ -397,7 +397,7 @@ test("CAP-RT-07: probe çağrısı healthCheck recovery davranışını kapatır
   assert.deepEqual(observedOptions, [{ recoverStaleSettings: false }]);
   observedOptions.length = 0;
   await runtime.health(["antigravity"]);
-  assert.deepEqual(observedOptions, [undefined]);
+  assert.deepEqual(observedOptions, [{ recoverStaleSettings: false }]);
 });
 
 test("CAP-MCP-01: MCP probe girdisi kapalı enum ve strict sınırlarla doğrulanır", () => {

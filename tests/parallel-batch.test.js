@@ -1721,6 +1721,46 @@ test("V2-BATCH: per-task input byte limit cannot exceed snapshot policy", async 
   assert.equal(prepared.reason, "readable_snapshot_too_large");
 });
 
+test("V2-BATCH: edit input byte limits fail before worktree or provider execution", async (t) => {
+  const worktreeOperations = [];
+  const worktreeManager = {
+    createTaskWorktree() { worktreeOperations.push("createTaskWorktree"); },
+    collectTaskDiff() { worktreeOperations.push("collectTaskDiff"); },
+    runVerification() { worktreeOperations.push("runVerification"); },
+    prepareIntegration() { worktreeOperations.push("prepareIntegration"); },
+    holdTaskDiff() { worktreeOperations.push("holdTaskDiff"); },
+    applyIntegration() { worktreeOperations.push("applyIntegration"); }
+  };
+  const fixture = createFixture(t, {
+    configurationOverrides: {
+      parallelBatch: {
+        editEnabled: true,
+        codexNetworkOffCapability: "available",
+        verificationCommands: ["git diff --check"]
+      }
+    },
+    worktreeManager
+  });
+  const prepared = await fixture.service.prepare({
+    objective: "Reject unsupported edit input limits before execution",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{
+      ...baseTask("edit-input-limit"),
+      role: "implementer",
+      mode: "edit",
+      files: ["src/a.txt"],
+      allowedPaths: ["src/a.txt"],
+      acceptanceCriteria: ["The selected fixture is changed"],
+      verificationCommands: ["git diff --check"],
+      maxInputBytes: 4096
+    }]
+  });
+  assert.equal(prepared.ok, false);
+  assert.equal(prepared.reason, "edit_input_limit_not_supported");
+  assert.deepEqual(fixture.runtime.executions, []);
+  assert.deepEqual(worktreeOperations, []);
+});
+
 test("V2-BATCH: task token limits fail closed when the resolved route lacks a proven cap", async (t) => {
   const inputFixture = createFixture(t);
   const inputTokenLimit = await inputFixture.service.prepare({

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -398,6 +399,82 @@ test("CAP-RT-07: health kontrolleri Antigravity settings recovery davranışın�
   observedOptions.length = 0;
   await runtime.health(["antigravity"]);
   assert.deepEqual(observedOptions, [{ recoverStaleSettings: false }]);
+});
+
+test("CAP-RT-08: runtime health gerçek Antigravity adapter'ında bayat settings sentinel'ine yazmaz", (t) => {
+  const root = fixtureDirectory(t, "runtime-isolated-settings");
+  const isolatedHome = path.join(root, "home");
+  const isolatedTemporaryDirectory = path.join(root, "temporary");
+  const settingsDirectory = path.join(isolatedHome, ".gemini", "antigravity-cli");
+  const settingsPath = path.join(settingsDirectory, "settings.json");
+  const sentinelPath = path.join(isolatedTemporaryDirectory, "agy-bridge-readonly-sentinel");
+  fs.mkdirSync(settingsDirectory, { recursive: true });
+  fs.mkdirSync(isolatedTemporaryDirectory, { recursive: true });
+  fs.writeFileSync(settingsPath, JSON.stringify({ permissions: { allow: ["read_url(*)"], deny: ["command(*)", "write_file(*)"] } }));
+  fs.writeFileSync(sentinelPath, JSON.stringify({
+    createdAt: Date.now() - 600000,
+    allow: ["read_url(*)"],
+    deny: ["command(*)", "write_file(*)"]
+  }));
+
+  const childEnvironment = Object.fromEntries(
+    ["PATH", "PATHEXT", "SystemRoot", "WINDIR", "COMSPEC", "ProgramData", "APPDATA", "LOCALAPPDATA"]
+      .filter((name) => process.env[name] !== undefined)
+      .map((name) => [name, process.env[name]])
+  );
+  Object.assign(childEnvironment, {
+    USERPROFILE: isolatedHome,
+    HOME: isolatedHome,
+    TMP: isolatedTemporaryDirectory,
+    TEMP: isolatedTemporaryDirectory,
+    AGY_TEST_ROOT: root,
+    AGY_FIXTURE_PATH: fixturePath
+  });
+
+  const runtimeScript = `
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { createAntigravityAdapter } from "./subagent-bridge/src/adapters/antigravity-adapter.js";
+import { createBridgeRuntime } from "./subagent-bridge/src/runtime/bridge-runtime.js";
+
+const root = process.env.AGY_TEST_ROOT;
+const settingsPath = path.join(os.homedir(), ".gemini", "antigravity-cli", "settings.json");
+const sentinelPath = path.join(os.tmpdir(), "agy-bridge-readonly-sentinel");
+const settingsBefore = fs.readFileSync(settingsPath);
+const sentinelBefore = fs.readFileSync(sentinelPath);
+const adapter = createAntigravityAdapter({
+  antigravity: {
+    executable: process.execPath,
+    execArgs: [process.env.AGY_FIXTURE_PATH],
+    probeTimeoutMs: 30000
+  }
+});
+const configuration = {
+  packageRoot: root,
+  statePaths: {
+    logs: path.join(root, "logs"),
+    state: path.join(root, "state"),
+    cache: path.join(root, "cache")
+  },
+  antigravity: { timeoutMs: 30000, maxRetries: 0 },
+  reliability: {},
+  orchestration: {}
+};
+const runtime = createBridgeRuntime({ configuration, adapters: { antigravity: adapter } });
+const health = await runtime.health(["antigravity"]);
+assert.equal(health.adapters.antigravity.health.installed, true);
+assert.deepEqual(fs.readFileSync(settingsPath), settingsBefore);
+assert.deepEqual(fs.readFileSync(sentinelPath), sentinelBefore);
+`;
+
+  const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  execFileSync(process.execPath, ["--input-type=module", "-e", runtimeScript], {
+    cwd: repositoryRoot,
+    env: childEnvironment,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
 });
 
 test("CAP-MCP-01: MCP probe girdisi kapalı enum ve strict sınırlarla doğrulanır", () => {

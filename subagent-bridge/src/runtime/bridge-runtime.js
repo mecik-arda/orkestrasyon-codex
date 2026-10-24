@@ -682,7 +682,10 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
         ? createGitWorktreeBatchManager({
           sourceWorkspace: canonicalWorkspace,
           worktreeRoot: parallelBatchConfiguration.worktreeRoot,
-          verificationCommands: parallelBatchConfiguration.verificationCommands || []
+          verificationCommands: parallelBatchConfiguration.verificationCommands || [],
+          maxFilesChanged: parallelBatchConfiguration.maxFilesChangedPerTask || 100,
+          maxFileBytes: parallelBatchConfiguration.maxFileBytesPerTask || 524288,
+          maxTotalDiffBytes: parallelBatchConfiguration.maxTotalDiffBytesPerTask || 2097152
         })
         : null;
       parallelWorkspaceServices.set(canonicalWorkspace, createParallelBatchService({
@@ -2231,6 +2234,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     getParallelTaskDetail: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).getTaskDetail(input),
     cancelParallelBatch: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).cancel(input),
     approveParallelIntegration: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).approveIntegration(input),
+    revalidateParallelIntegration: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).revalidateIntegration(input),
     parallelBatchEnabled: parallelBatchConfiguration.enabled === true,
     parallelBatchRecover: (trustedWorkspace) => trustedWorkspace
       ? parallelServiceFor(trustedWorkspace).recover()

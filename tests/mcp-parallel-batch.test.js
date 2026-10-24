@@ -57,6 +57,10 @@ function createStubRuntime(overrides = {}) {
       calls.push({ method: "approve", input });
       return { ok: false, reason: "integration_not_ready", message: "not ready" };
     },
+    async revalidateParallelIntegration(input) {
+      calls.push({ method: "revalidate", input });
+      return { ok: false, reason: "integration_revalidation_unavailable", message: "not ready" };
+    },
     ...overrides
   };
 }
@@ -69,6 +73,8 @@ test("V2-MCP: public parallel batch schemas reject bridge-owned metadata", () =>
   }
   assert.equal(publicToolSchemas.startParallelBatch.safeParse({ planId: "a".repeat(32), planHash: "b".repeat(64), workspace: "C:\\x" }).success, false);
   assert.equal(publicToolSchemas.getParallelBatch.safeParse({ batchId: "a".repeat(32) }).success, true);
+  assert.equal(publicToolSchemas.revalidateParallelIntegration.safeParse({ batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: "c".repeat(64) }).success, true);
+  assert.equal(publicToolSchemas.revalidateParallelIntegration.safeParse({ batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: "c".repeat(64), workspace: "C:\\x" }).success, false);
   assert.equal(publicToolSchemas.cancelParallelBatch.safeParse({ batchId: "a".repeat(32), force: true }).success, false);
 });
 
@@ -98,6 +104,10 @@ test("V2-MCP: start, get, detail, cancel and approve handlers map results and er
   const approved = await handlers.approveParallelIntegration({ batchId: "c".repeat(32), approvalRef: "e".repeat(64), expectedDiffHash: "f".repeat(64) });
   assert.equal(approved.isError, true);
   assert.equal(approved.structuredContent.reason, "integration_not_ready");
+  const revalidated = await handlers.revalidateParallelIntegration({ batchId: "c".repeat(32), approvalRef: "e".repeat(64), expectedDiffHash: "f".repeat(64) });
+  assert.equal(revalidated.isError, true);
+  assert.equal(revalidated.structuredContent.reason, "integration_revalidation_unavailable");
+  assert.equal(runtime.calls.at(-1).method, "revalidate");
 });
 
 test("V2-MCP: handlers reject injected bridge fields before runtime access", async () => {
@@ -194,7 +204,7 @@ test("V2-MCP: parallel tools are registered only under the enabled and approval 
     trustedWorkspace: process.cwd(),
     enableOrchestratorApproval: true
   }));
-  for (const name of ["prepare_parallel_batch", "start_parallel_batch", "get_parallel_batch", "get_parallel_task_detail", "cancel_parallel_batch", "approve_parallel_integration"]) {
+  for (const name of ["prepare_parallel_batch", "start_parallel_batch", "get_parallel_batch", "get_parallel_task_detail", "cancel_parallel_batch", "approve_parallel_integration", "revalidate_parallel_integration"]) {
     assert.equal(enabledTools.includes(name), true, `${name} should be registered`);
   }
   const noApprovalTools = await listRegisteredToolNames(createSubagentMcpServer({
@@ -205,6 +215,7 @@ test("V2-MCP: parallel tools are registered only under the enabled and approval 
   }));
   assert.equal(noApprovalTools.includes("prepare_parallel_batch"), true);
   assert.equal(noApprovalTools.includes("approve_parallel_integration"), false);
+  assert.equal(noApprovalTools.includes("revalidate_parallel_integration"), false);
   const disabledTools = await listRegisteredToolNames(createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration: { parallelBatch: { enabled: false } },

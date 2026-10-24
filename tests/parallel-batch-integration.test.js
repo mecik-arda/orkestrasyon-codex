@@ -133,6 +133,32 @@ function editTask(verificationCommands = ["git diff --check"]) {
   };
 }
 
+async function createReadyEditFixture(t) {
+  const repository = createRepository(t);
+  const configuration = createConfiguration(repository.root);
+  const observedRequests = [];
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex: createEditAdapter(observedRequests) }, sleep: async () => {} });
+  const prepared = await runtime.prepareParallelBatch({ objective: "Edit the file", batchMaxReservedCostUsd: 1, tasks: [editTask()] }, repository.workspace);
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await runtime.startParallelBatch({ planId: prepared.planId, planHash: prepared.planHash }, repository.workspace);
+  assert.equal(started.ok, true);
+  const ready = await waitForBatch(runtime, repository.workspace, started.batchId, ["ready_for_approval", "blocked", "failed"]);
+  return { ...repository, configuration, observedRequests, runtime, started, ready };
+}
+
+async function createSourceRefRejectedFixture(t) {
+  const fixture = await createReadyEditFixture(t);
+  git(fixture.workspace, ["tag", "refs/codex/revalidation-rejected-test"]);
+  const rejected = await fixture.runtime.approveParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: fixture.ready.approval.approvalRef,
+    expectedDiffHash: fixture.ready.approval.diffHash
+  }, fixture.workspace);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, "source_ref_changed");
+  return fixture;
+}
+
 test("V2-INTEGRATION: edit batch prepares an approval-bound diff and applies it atomically", async (t) => {
   const { root, workspace, baseCommit } = createRepository(t);
   const configuration = createConfiguration(root);
@@ -220,6 +246,174 @@ test("V2-INTEGRATION: edit batch prepares an approval-bound diff and applies it 
   const pendingJournalFiles = fs.readdirSync(promotionRoot).flatMap((workspaceHash) =>
     fs.readdirSync(path.join(promotionRoot, workspaceHash)).filter((entry) => entry.endsWith(".json")));
   assert.deepEqual(pendingJournalFiles, []);
+});
+
+test("V2-INTEGRATION: source-ref rejection can be rebound to a descendant HEAD without applying source files", async (t) => {
+  const { workspace, baseCommit, runtime, observedRequests, started, ready } = await createReadyEditFixture(t);
+  const taskDiagnostic = ready.tasks[0].detailRef
+    ? await runtime.getParallelTaskDetail({ batchId: started.batchId, taskId: ready.tasks[0].taskId, detailRef: ready.tasks[0].detailRef }, workspace)
+    : null;
+  const diagnosticPayload = taskDiagnostic?.ok ? JSON.parse(taskDiagnostic.page.content) : null;
+  assert.equal(ready.status, "ready_for_approval", JSON.stringify({ summary: ready, diagnostics: diagnosticPayload ? { failureClass: diagnosticPayload.failureClass, diagnostics: diagnosticPayload.diagnostics, hostDiagnostics: diagnosticPayload.hostDiagnostics, hostOperation: diagnosticPayload.hostOperation, gitFailureCode: diagnosticPayload.gitFailureCode } : null }));
+  const originalApprovalRef = ready.approval.approvalRef;
+  const originalDiffHash = ready.approval.diffHash;
+  const providerRequestCount = observedRequests.length;
+  git(workspace, ["tag", "refs/codex/revalidation-test"]);
+  const rejected = await runtime.approveParallelIntegration({ batchId: started.batchId, approvalRef: originalApprovalRef, expectedDiffHash: originalDiffHash }, workspace);
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, "source_ref_changed");
+  fs.writeFileSync(path.join(workspace, "src", "unrelated.txt"), "unrelated progress\n", "utf8");
+  git(workspace, ["add", "src/unrelated.txt"]);
+  git(workspace, ["commit", "-qm", "unrelated source progress"]);
+  const currentHead = git(workspace, ["rev-parse", "HEAD"]).trim();
+  assert.notEqual(currentHead, baseCommit);
+  const rebound = await runtime.revalidateParallelIntegration({ batchId: started.batchId, approvalRef: originalApprovalRef, expectedDiffHash: originalDiffHash }, workspace);
+  assert.equal(rebound.ok, true, JSON.stringify(rebound));
+  assert.equal(rebound.summary.status, "ready_for_approval");
+  assert.notEqual(rebound.summary.approval.approvalRef, originalApprovalRef);
+  assert.equal(rebound.summary.approval.diffHash, originalDiffHash);
+  assert.deepEqual(rebound.summary.approval.filesChanged, ["src/a.txt"]);
+  assert.equal(git(workspace, ["rev-parse", "HEAD"]).trim(), currentHead);
+  assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(fs.readFileSync(path.join(workspace, "src", "unrelated.txt"), "utf8"), "unrelated progress\n");
+  assert.equal(observedRequests.length, providerRequestCount);
+  const oldApproval = await runtime.approveParallelIntegration({ batchId: started.batchId, approvalRef: originalApprovalRef, expectedDiffHash: originalDiffHash }, workspace);
+  assert.equal(oldApproval.ok, false);
+  assert.equal(oldApproval.reason, "approval_ref_mismatch");
+  const newDetail = await runtime.getParallelTaskDetail({
+    batchId: started.batchId,
+    taskId: "integration",
+    detailRef: rebound.summary.approval.detailRef
+  }, workspace);
+  assert.equal(newDetail.ok, true);
+  const detailPayload = JSON.parse(newDetail.page.content);
+  assert.equal(detailPayload.baseCommit, currentHead);
+  assert.equal(detailPayload.diffHash, originalDiffHash);
+  assert.match(detailPayload.diff, /edited by worker/);
+  const storedManifest = await runtime.getParallelBatch({ batchId: started.batchId }, workspace);
+  assert.equal(storedManifest.ok, true);
+  assert.equal(storedManifest.summary.approval.approvalRef, rebound.summary.approval.approvalRef);
+  const sourceTargetPath = path.join(workspace, "src", "a.txt");
+  const replacementTargetPath = path.join(workspace, "src", ".a.txt-replacement");
+  fs.writeFileSync(replacementTargetPath, "alpha\n", "utf8");
+  fs.rmSync(sourceTargetPath);
+  fs.renameSync(replacementTargetPath, sourceTargetPath);
+  const changedIdentityApproval = await runtime.approveParallelIntegration({
+    batchId: started.batchId,
+    approvalRef: rebound.summary.approval.approvalRef,
+    expectedDiffHash: rebound.summary.approval.diffHash
+  }, workspace);
+  assert.equal(changedIdentityApproval.ok, false);
+  assert.equal(changedIdentityApproval.reason, "source_file_identity_changed");
+  assert.equal(fs.readFileSync(sourceTargetPath, "utf8"), "alpha\n");
+});
+
+test("V2-INTEGRATION: source target content drift is rejected during revalidation", async (t) => {
+  const { workspace, runtime, started, ready, observedRequests } = await createReadyEditFixture(t);
+  git(workspace, ["tag", "refs/codex/target-drift-test"]);
+  const sourceRefRejected = await runtime.approveParallelIntegration({
+    batchId: started.batchId,
+    approvalRef: ready.approval.approvalRef,
+    expectedDiffHash: ready.approval.diffHash
+  }, workspace);
+  assert.equal(sourceRefRejected.reason, "source_ref_changed");
+  fs.writeFileSync(path.join(workspace, "src", "a.txt"), "changed source target\n", "utf8");
+  git(workspace, ["add", "src/a.txt"]);
+  git(workspace, ["commit", "-qm", "change protected target"]);
+  const revalidated = await runtime.revalidateParallelIntegration({
+    batchId: started.batchId,
+    approvalRef: ready.approval.approvalRef,
+    expectedDiffHash: ready.approval.diffHash
+  }, workspace);
+  assert.equal(revalidated.ok, false);
+  assert.equal(revalidated.reason, "source_file_state_changed");
+  assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "changed source target\n");
+  assert.equal(observedRequests.length, 1);
+});
+
+test("V2-INTEGRATION: source target Git mode drift is rejected during revalidation", async (t) => {
+  const { workspace, runtime, started, ready, observedRequests } = await createSourceRefRejectedFixture(t);
+  git(workspace, ["update-index", "--chmod=+x", "src/a.txt"]);
+  git(workspace, ["commit", "-qm", "change protected target mode"]);
+  const revalidated = await runtime.revalidateParallelIntegration({
+    batchId: started.batchId,
+    approvalRef: ready.approval.approvalRef,
+    expectedDiffHash: ready.approval.diffHash
+  }, workspace);
+  assert.equal(revalidated.ok, false);
+  assert.equal(revalidated.reason, "source_file_state_changed");
+  assert.equal(observedRequests.length, 1);
+});
+
+test("V2-INTEGRATION: missing and corrupt stored detail artifacts fail closed", async (t) => {
+  const missingFixture = await createSourceRefRejectedFixture(t);
+  const missingArtifactPath = path.join(missingFixture.configuration.statePaths.state, "parallel-artifacts", `${missingFixture.ready.approval.detailRef}.json`);
+  fs.rmSync(missingArtifactPath);
+  const missing = await missingFixture.runtime.revalidateParallelIntegration({
+    batchId: missingFixture.started.batchId,
+    approvalRef: missingFixture.ready.approval.approvalRef,
+    expectedDiffHash: missingFixture.ready.approval.diffHash
+  }, missingFixture.workspace);
+  assert.equal(missing.ok, false);
+  assert.equal(missing.reason, "integration_artifact_unavailable");
+  assert.equal(fs.readFileSync(path.join(missingFixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+
+  const corruptFixture = await createSourceRefRejectedFixture(t);
+  const corruptArtifactPath = path.join(corruptFixture.configuration.statePaths.state, "parallel-artifacts", `${corruptFixture.ready.approval.detailRef}.json`);
+  const envelope = JSON.parse(fs.readFileSync(corruptArtifactPath, "utf8"));
+  envelope.content = "{}";
+  fs.writeFileSync(corruptArtifactPath, JSON.stringify(envelope), "utf8");
+  const corrupt = await corruptFixture.runtime.revalidateParallelIntegration({
+    batchId: corruptFixture.started.batchId,
+    approvalRef: corruptFixture.ready.approval.approvalRef,
+    expectedDiffHash: corruptFixture.ready.approval.diffHash
+  }, corruptFixture.workspace);
+  assert.equal(corrupt.ok, false);
+  assert.equal(corrupt.reason, "integration_artifact_invalid");
+  assert.equal(fs.readFileSync(path.join(corruptFixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(missingFixture.observedRequests.length, 1);
+  assert.equal(corruptFixture.observedRequests.length, 1);
+});
+
+test("V2-INTEGRATION: expired stored detail artifact cannot be rebound", async (t) => {
+  const fixture = await createSourceRefRejectedFixture(t);
+  const artifactPath = path.join(fixture.configuration.statePaths.state, "parallel-artifacts", `${fixture.ready.approval.detailRef}.json`);
+  const envelope = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+  envelope.expiresAt = new Date(0).toISOString();
+  fs.writeFileSync(artifactPath, JSON.stringify(envelope), "utf8");
+  const revalidated = await fixture.runtime.revalidateParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: fixture.ready.approval.approvalRef,
+    expectedDiffHash: fixture.ready.approval.diffHash
+  }, fixture.workspace);
+  assert.equal(revalidated.ok, false);
+  assert.equal(revalidated.reason, "integration_artifact_expired");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(fixture.observedRequests.length, 1);
+});
+
+test("V2-INTEGRATION: unrelated HEAD cannot receive a stored integration payload", async (t) => {
+  const { workspace, runtime, started, ready, observedRequests } = await createReadyEditFixture(t);
+  git(workspace, ["tag", "refs/codex/unrelated-head-test"]);
+  const sourceRefRejected = await runtime.approveParallelIntegration({
+    batchId: started.batchId,
+    approvalRef: ready.approval.approvalRef,
+    expectedDiffHash: ready.approval.diffHash
+  }, workspace);
+  assert.equal(sourceRefRejected.reason, "source_ref_changed");
+  git(workspace, ["checkout", "--orphan", "unrelated-head"]);
+  git(workspace, ["rm", "-r", "--cached", "--ignore-unmatch", "."]);
+  git(workspace, ["add", "-A"]);
+  git(workspace, ["commit", "-qm", "unrelated root"]);
+  const revalidated = await runtime.revalidateParallelIntegration({
+    batchId: started.batchId,
+    approvalRef: ready.approval.approvalRef,
+    expectedDiffHash: ready.approval.diffHash
+  }, workspace);
+  assert.equal(revalidated.ok, false);
+  assert.equal(revalidated.reason, "source_head_unrelated");
+  assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(observedRequests.length, 1);
 });
 
 test("V2-INTEGRATION: JSON fixture edit preserves every non-label field before source approval", async (t) => {
@@ -427,7 +621,18 @@ test("V2-INTEGRATION: trailing whitespace remains rejected before integration ap
   assert.equal(started.ok, true);
   const failed = await waitForBatch(runtime, workspace, started.batchId, ["blocked", "failed"]);
   assert.notEqual(failed.status, "ready_for_approval");
-  assert.equal(failed.tasks[0].failureClass, "verification_failed");
+  const failureDetail = failed.tasks[0].detailRef
+    ? await runtime.getParallelTaskDetail({ batchId: started.batchId, taskId: failed.tasks[0].taskId, detailRef: failed.tasks[0].detailRef }, workspace)
+    : null;
+  const failurePayload = failureDetail?.ok ? JSON.parse(failureDetail.page.content) : null;
+  const failureDiagnostics = failurePayload ? {
+    failureClass: failurePayload.failureClass,
+    diagnostics: failurePayload.diagnostics,
+    hostDiagnostics: failurePayload.hostDiagnostics,
+    hostOperation: failurePayload.hostOperation,
+    gitFailureCode: failurePayload.gitFailureCode
+  } : null;
+  assert.equal(failed.tasks[0].failureClass, "verification_failed", JSON.stringify({ failed, failureDiagnostics }));
   assert.equal(failed.tasks[0].verification[0].verificationStage, "working_tree");
   assert.equal(failed.tasks[0].verification[0].exitCode, 2);
   assert.deepEqual(failed.tasks[0].filesChanged, []);

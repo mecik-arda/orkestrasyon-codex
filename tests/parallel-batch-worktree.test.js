@@ -466,6 +466,86 @@ test("V2-WORKTREE: source ref changes are detected before integration", (t) => {
   assert.equal(preparation.reason, "source_ref_changed");
 });
 
+test("V2-WORKTREE: revalidation rejects a source file identity change during host verification", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  let mutateSourceIdentity = false;
+  const manager = createManager(root, repo, ["git diff --check"], {
+    runVerificationCommand(workspace) {
+      if (mutateSourceIdentity && path.basename(workspace) === "integration") {
+        const targetPath = path.join(repo, "src", "a.txt");
+        const replacementPath = path.join(repo, "src", ".a.txt-replacement");
+        fs.writeFileSync(replacementPath, "alpha\n", "utf8");
+        fs.rmSync(targetPath);
+        fs.renameSync(replacementPath, targetPath);
+      }
+      return "";
+    }
+  });
+  const batchId = "c".repeat(32);
+  const created = manager.createTaskWorktree({ batchId, taskId: "task-one", baseCommit });
+  fs.writeFileSync(path.join(created.worktreePath, "src", "a.txt"), "replacement\n", "utf8");
+  const diff = manager.collectTaskDiff({ worktreePath: created.worktreePath, allowedPaths: ["src/a.txt"] });
+  manager.holdTaskDiff({ batchId, taskId: "task-one", changes: diff.changes });
+  manager.cleanupTaskWorktree({ batchId, taskId: "task-one" });
+  const original = manager.prepareIntegration({ batchId, baseCommit, tasks: [{ taskId: "task-one", status: "completed" }] });
+  assert.equal(original.ok, true);
+  const refState = manager.captureRefState();
+  mutateSourceIdentity = true;
+  const revalidated = manager.revalidateIntegration({
+    batchId,
+    originalBaseCommit: baseCommit,
+    currentBaseCommit: baseCommit,
+    originalSourceFileStates: original.sourceFileStates,
+    changes: original.changes,
+    acceptedTasks: [{ taskId: "task-one", status: "completed", filesChanged: ["src/a.txt"] }],
+    expectedDiffHash: original.diffHash,
+    expectedDiffPreviewHash: original.diffPreviewHash,
+    expectedChangePayloadHash: original.changePayloadHash,
+    expectedRefHash: refState.refsHash
+  });
+  assert.equal(revalidated.ok, false);
+  assert.equal(revalidated.reason, "source_file_identity_changed");
+  assert.equal(fs.readFileSync(path.join(repo, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(manager.assertCleanSource().ok, true);
+});
+
+test("V2-WORKTREE: revalidation rejects all-ref changes during host verification", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  let mutateSourceRef = false;
+  const manager = createManager(root, repo, ["git diff --check"], {
+    runVerificationCommand(workspace) {
+      if (mutateSourceRef && path.basename(workspace) === "integration") git(repo, ["tag", "refs/codex/revalidation-drift"]);
+      return "";
+    }
+  });
+  const batchId = "d".repeat(32);
+  const created = manager.createTaskWorktree({ batchId, taskId: "task-one", baseCommit });
+  fs.writeFileSync(path.join(created.worktreePath, "src", "a.txt"), "replacement\n", "utf8");
+  const diff = manager.collectTaskDiff({ worktreePath: created.worktreePath, allowedPaths: ["src/a.txt"] });
+  manager.holdTaskDiff({ batchId, taskId: "task-one", changes: diff.changes });
+  manager.cleanupTaskWorktree({ batchId, taskId: "task-one" });
+  const original = manager.prepareIntegration({ batchId, baseCommit, tasks: [{ taskId: "task-one", status: "completed" }] });
+  assert.equal(original.ok, true);
+  const refState = manager.captureRefState();
+  mutateSourceRef = true;
+  const revalidated = manager.revalidateIntegration({
+    batchId,
+    originalBaseCommit: baseCommit,
+    currentBaseCommit: baseCommit,
+    originalSourceFileStates: original.sourceFileStates,
+    changes: original.changes,
+    acceptedTasks: [{ taskId: "task-one", status: "completed", filesChanged: ["src/a.txt"] }],
+    expectedDiffHash: original.diffHash,
+    expectedDiffPreviewHash: original.diffPreviewHash,
+    expectedChangePayloadHash: original.changePayloadHash,
+    expectedRefHash: refState.refsHash
+  });
+  assert.equal(revalidated.ok, false);
+  assert.equal(revalidated.reason, "source_ref_changed");
+  assert.equal(fs.readFileSync(path.join(repo, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(manager.assertCleanSource().ok, true);
+});
+
 test("V2-WORKTREE: integration approval verifies diff hash and source HEAD before promotion", (t) => {
   const { root, repo, baseCommit } = createRepository(t);
   const manager = createManager(root, repo);

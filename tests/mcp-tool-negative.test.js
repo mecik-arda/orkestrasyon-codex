@@ -19,6 +19,7 @@ const wrongTypePayloads = {
   getParallelTaskDetail: { batchId: "a".repeat(32), taskId: "task-one", detailRef: 42 },
   cancelParallelBatch: { batchId: false },
   approveParallelIntegration: { batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: 42 },
+  revalidateParallelIntegration: { batchId: "a".repeat(32), approvalRef: 42, expectedDiffHash: "b".repeat(64) },
   checkProviderCapability: { provider: 42 }
 };
 

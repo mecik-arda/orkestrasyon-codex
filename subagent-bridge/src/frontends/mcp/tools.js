@@ -11,6 +11,7 @@ import {
   getParallelBatchRequestSchema,
   getParallelTaskDetailRequestSchema,
   prepareParallelBatchRequestSchema,
+  revalidateParallelIntegrationRequestSchema,
   startParallelBatchRequestSchema
 } from "../../schemas/parallel-batch-schema.js";
 
@@ -146,6 +147,7 @@ export const publicToolSchemas = {
   getParallelTaskDetail: getParallelTaskDetailRequestSchema,
   cancelParallelBatch: cancelParallelBatchRequestSchema,
   approveParallelIntegration: approveParallelIntegrationRequestSchema,
+  revalidateParallelIntegration: revalidateParallelIntegrationRequestSchema,
   checkProviderCapability: z.object({
     provider: z.enum(["antigravity", "codex", "claude_code"]),
     model: z.string().min(1).max(120).optional(),
@@ -368,6 +370,10 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
     async approveParallelIntegration(input) {
       const parsed = parse(publicToolSchemas.approveParallelIntegration, input);
       return toParallelBatchResult(await runtime.approveParallelIntegration(parsed, trustedWorkspace));
+    },
+    async revalidateParallelIntegration(input) {
+      const parsed = parse(publicToolSchemas.revalidateParallelIntegration, input);
+      return toParallelBatchResult(await runtime.revalidateParallelIntegration(parsed, trustedWorkspace));
     },
     async checkProviderCapability(input) {
       const parsed = parse(publicToolSchemas.checkProviderCapability, input);

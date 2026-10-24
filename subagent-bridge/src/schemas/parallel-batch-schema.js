@@ -41,6 +41,10 @@ export const parallelBatchBlockedReasonValues = [
   "source_ref_changed",
   "source_workspace_dirty",
   "source_head_changed",
+  "source_head_unrelated",
+  "source_snapshot_invalid",
+  "source_file_identity_changed",
+  "source_file_state_changed",
   "integration_worktree_failed",
   "task_diff_missing",
   "integration_path_ownership_conflict",
@@ -159,6 +163,12 @@ export const cancelParallelBatchRequestSchema = z.object({
 }).strict();
 
 export const approveParallelIntegrationRequestSchema = z.object({
+  batchId: z.string().regex(/^[a-f0-9]{16,64}$/),
+  approvalRef: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedDiffHash: z.string().regex(/^[a-f0-9]{64}$/)
+}).strict();
+
+export const revalidateParallelIntegrationRequestSchema = z.object({
   batchId: z.string().regex(/^[a-f0-9]{16,64}$/),
   approvalRef: z.string().regex(/^[a-f0-9]{64}$/),
   expectedDiffHash: z.string().regex(/^[a-f0-9]{64}$/)

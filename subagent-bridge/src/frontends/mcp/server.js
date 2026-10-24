@@ -411,6 +411,12 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
       annotations: executionAnnotations
     }, safe(handlers.cancelParallelBatch));
     if (enableOrchestratorApproval === true) {
+      server.registerTool("revalidate_parallel_integration", {
+        title: "Paralel entegrasyon kaynağını yeniden doğrula",
+        description: "Yalnız source_ref_changed nedeniyle eski onayı reddedilmiş edit batch payload'unu güncel, temiz ve özgün baseCommit'in devamı olan kaynak üzerinde sağlayıcı çağrısı ve kaynak dosyalarına uygulama yapmadan yeniden doğrular. Tüm Git ref'leri, hedef dosyaların tarihsel SHA-256/modu ve Git blob kimliği, dosya sahipliği ve host doğrulaması korunur. Başarı yeni kaynak bağına bağlı yeni approvalRef üretir; ayrıca kullanıcı entegrasyon onayı gerekir.",
+        inputSchema: publicToolInputShape(publicToolSchemas.revalidateParallelIntegration),
+        annotations: executionAnnotations
+      }, safe(handlers.revalidateParallelIntegration));
       server.registerTool("approve_parallel_integration", {
         title: "Paralel entegrasyon diff'ini onayla ve uygula",
         description: "Yalnız edit batch'i ready_for_approval durumundayken, kaynak HEAD ve dosya durumu doğrulandıktan sonra saklanan birleşik diff'i atomik dosya promosyonuyla kaynak workspace'e uygular; Git commit veya push yapmaz.",

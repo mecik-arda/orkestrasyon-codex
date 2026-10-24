@@ -13,7 +13,7 @@ function hashValue(value) {
 function runGit(workspace, args, options = {}) {
   return execFileSync("git", args, {
     cwd: workspace,
-    encoding: "utf8",
+    encoding: options.encoding || "utf8",
     timeout: options.timeoutMs || 60000,
     maxBuffer: options.maxBuffer || 64 * 1024 * 1024,
     env: options.env || process.env,
@@ -155,7 +155,7 @@ function readLocalGitFilterNames(workspace) {
   return [...names];
 }
 
-function integrationPayloadHash(changes) {
+export function integrationPayloadHash(changes) {
   const payload = changes
     .map((change) => ({
       relativePath: change.relativePath,
@@ -167,7 +167,7 @@ function integrationPayloadHash(changes) {
   return hashValue(JSON.stringify(payload));
 }
 
-function integrationApprovalHash(diffPreviewHash, changePayloadHash) {
+export function integrationApprovalHash(diffPreviewHash, changePayloadHash) {
   return hashValue(JSON.stringify({ diffPreviewHash, changePayloadHash }));
 }
 
@@ -203,7 +203,10 @@ export function createGitWorktreeBatchManager({
   renamePromotionFile = fs.renameSync,
   removePromotionFile = (filePath, options) => fs.rmSync(filePath, options),
   removeTaskPath = (filePath, options) => fs.rmSync(filePath, options),
-  restorePromotionFile = fs.writeFileSync
+  restorePromotionFile = fs.writeFileSync,
+  maxFilesChanged = 100,
+  maxFileBytes = 524288,
+  maxTotalDiffBytes = 2097152
 } = {}) {
   if (!sourceWorkspace) throw new Error("source workspace is required");
   if (!worktreeRoot) throw new Error("worktree root is required");
@@ -1127,6 +1130,204 @@ export function createGitWorktreeBatchManager({
     });
   }
 
+  function captureSourceFileIdentityStates(relativePaths) {
+    return relativePaths.map((relativePath) => {
+      const normalized = normalizeRelativePath(relativePath);
+      const inspected = inspectSourcePath(normalized);
+      if (!inspected.ok) return { relativePath: normalized, state: "rejected" };
+      if (inspected.state === "absent") return { relativePath: normalized, state: "absent" };
+      if (!inspected.status.isFile() || inspected.status.nlink !== 1) return { relativePath: normalized, state: "rejected" };
+      const before = inspected.status;
+      let descriptor;
+      try {
+        descriptor = fs.openSync(inspected.path, fs.constants.O_RDONLY);
+        const opened = fs.fstatSync(descriptor);
+        if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino) {
+          return { relativePath: normalized, state: "rejected" };
+        }
+        const content = fs.readFileSync(descriptor);
+        const after = fs.fstatSync(descriptor);
+        const currentPath = fs.lstatSync(inspected.path);
+        if (!currentPath.isFile() || currentPath.isSymbolicLink() || currentPath.nlink !== 1
+          || after.dev !== before.dev || after.ino !== before.ino || currentPath.dev !== before.dev || currentPath.ino !== before.ino
+          || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
+          || after.size !== currentPath.size || after.mtimeMs !== currentPath.mtimeMs || after.ctimeMs !== currentPath.ctimeMs) {
+          return { relativePath: normalized, state: "rejected" };
+        }
+        return {
+          relativePath: normalized,
+          state: "present",
+          sha256: hashValue(content),
+          fileMode: fileModeFromStatus(after),
+          dev: after.dev,
+          ino: after.ino
+        };
+      } catch {
+        return { relativePath: normalized, state: "rejected" };
+      } finally {
+        if (descriptor !== undefined) fs.closeSync(descriptor);
+      }
+    });
+  }
+
+  function committedFileState(commit, relativePath) {
+    if (!/^[a-f0-9]{40,64}$/.test(commit)) return { ok: false, reason: "source_snapshot_invalid" };
+    const normalized = normalizeRelativePath(relativePath);
+    if (!normalized || normalized !== relativePath || normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)
+      || normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")) {
+      return { ok: false, reason: "source_snapshot_invalid" };
+    }
+    try {
+      const output = git(["ls-tree", "-z", commit, "--", `:(literal)${normalized}`]);
+      const records = output.split("\0").filter(Boolean);
+      if (records.length === 0) return { ok: true, state: "absent" };
+      if (records.length !== 1) return { ok: false, reason: "source_snapshot_invalid" };
+      const separator = records[0].indexOf("\t");
+      if (separator < 0 || records[0].slice(separator + 1) !== normalized) return { ok: false, reason: "source_snapshot_invalid" };
+      const [mode, objectType, objectId] = records[0].slice(0, separator).split(" ");
+      if (objectType !== "blob" || !["100644", "100755"].includes(mode) || !/^[a-f0-9]{40,64}$/.test(objectId)) {
+        return { ok: false, reason: "source_snapshot_invalid" };
+      }
+      const content = git(["cat-file", "blob", objectId], { encoding: "buffer" });
+      return { ok: true, state: "present", objectId, fileMode: mode, sha256: hashValue(content) };
+    } catch {
+      return { ok: false, reason: "source_snapshot_invalid" };
+    }
+  }
+
+  function revalidateIntegration({ batchId, originalBaseCommit, currentBaseCommit, originalSourceFileStates, changes, acceptedTasks, expectedRefHash, expectedDiffHash, expectedDiffPreviewHash, expectedChangePayloadHash }) {
+    if (promotionRecoveryRequired) return { ok: false, reason: "promotion_recovery_required" };
+    const clean = assertCleanSource();
+    if (!clean.ok) return clean;
+    if (clean.head !== currentBaseCommit || !/^[a-f0-9]{40,64}$/.test(originalBaseCommit || "")) return { ok: false, reason: "source_head_changed" };
+    try {
+      git(["merge-base", "--is-ancestor", originalBaseCommit, currentBaseCommit]);
+    } catch {
+      return { ok: false, reason: "source_head_unrelated" };
+    }
+    const initialRefState = captureRefState();
+    if (initialRefState.head !== currentBaseCommit || initialRefState.refsHash !== expectedRefHash) return { ok: false, reason: "source_ref_changed" };
+    if (!/^[a-f0-9]{64}$/.test(expectedDiffHash || "") || !/^[a-f0-9]{64}$/.test(expectedDiffPreviewHash || "")
+      || !/^[a-f0-9]{64}$/.test(expectedChangePayloadHash || "")
+      || !Array.isArray(changes) || changes.length === 0 || !Array.isArray(acceptedTasks) || acceptedTasks.length === 0
+      || changes.length > maxFilesChanged * acceptedTasks.length
+      || !Array.isArray(originalSourceFileStates) || originalSourceFileStates.length !== changes.length) {
+      return { ok: false, reason: "integration_payload_invalid" };
+    }
+    const expectedPaths = [...changes].map((change) => change?.relativePath).sort();
+    if (expectedPaths.some((relativePath, index) => typeof relativePath !== "string" || (index > 0 && relativePath === expectedPaths[index - 1]))) {
+      return { ok: false, reason: "integration_payload_invalid" };
+    }
+    const oldStates = new Map();
+    for (const state of originalSourceFileStates) {
+      if (!state || typeof state.relativePath !== "string" || oldStates.has(state.relativePath)
+        || !["present", "absent"].includes(state.state)
+        || Object.hasOwn(state, "dev") || Object.hasOwn(state, "ino")) {
+        return { ok: false, reason: "source_snapshot_invalid" };
+      }
+      if (state.state === "present" && (!/^[a-f0-9]{64}$/.test(state.sha256 || "") || !["100644", "100755"].includes(state.fileMode))) {
+        return { ok: false, reason: "source_snapshot_invalid" };
+      }
+      const expectedStateKeys = state.state === "present"
+        ? ["fileMode", "relativePath", "sha256", "state"]
+        : ["relativePath", "state"];
+      if (Object.keys(state).sort().join("|") !== expectedStateKeys.join("|")) return { ok: false, reason: "source_snapshot_invalid" };
+      if (state.state === "absent" && (Object.hasOwn(state, "sha256") || Object.hasOwn(state, "fileMode"))) {
+        return { ok: false, reason: "source_snapshot_invalid" };
+      }
+      oldStates.set(state.relativePath, state);
+    }
+    if (oldStates.size !== expectedPaths.length || expectedPaths.some((relativePath) => !oldStates.has(relativePath))) {
+      return { ok: false, reason: "source_snapshot_invalid" };
+    }
+    const currentStates = captureSourceFileIdentityStates(expectedPaths);
+    if (currentStates.some((state) => state.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
+    for (const relativePath of expectedPaths) {
+      const original = oldStates.get(relativePath);
+      const originalGit = committedFileState(originalBaseCommit, relativePath);
+      const currentGit = committedFileState(currentBaseCommit, relativePath);
+      const current = currentStates.find((state) => state.relativePath === relativePath);
+      if (!originalGit.ok || !currentGit.ok) return { ok: false, reason: "source_snapshot_invalid" };
+      if (original.state !== originalGit.state || original.state !== currentGit.state
+        || (original.state === "present" && (original.sha256 !== originalGit.sha256 || original.fileMode !== originalGit.fileMode
+          || originalGit.objectId !== currentGit.objectId || originalGit.fileMode !== currentGit.fileMode
+          || current.sha256 !== original.sha256 || current.fileMode !== original.fileMode))
+        || (original.state === "absent" && current.state !== "absent")) {
+        return { ok: false, reason: "source_file_state_changed" };
+      }
+    }
+    const taskOwners = new Map();
+    for (const task of acceptedTasks) {
+      if (!task || typeof task.taskId !== "string" || task.status !== "completed" || !Array.isArray(task.filesChanged)) {
+        return { ok: false, reason: "integration_payload_invalid" };
+      }
+      for (const relativePath of task.filesChanged) {
+        if (taskOwners.has(relativePath)) return { ok: false, reason: "integration_path_ownership_conflict" };
+        taskOwners.set(relativePath, task.taskId);
+      }
+    }
+    const changeOwners = new Map();
+    for (const change of changes) {
+      const relativePath = change?.relativePath;
+      if (typeof relativePath !== "string" || taskOwners.get(relativePath) === undefined
+        || changeOwners.has(relativePath) || !["replace", "delete"].includes(change.mode)
+        || !["created", "modified", "deleted"].includes(change.changeType)) {
+        return { ok: false, reason: "integration_payload_invalid" };
+      }
+      if (Object.keys(change).sort().join("|") !== "changeType|contentBase64|fileMode|mode|relativePath") {
+        return { ok: false, reason: "integration_payload_invalid" };
+      }
+      if (change.mode === "replace") {
+        if (!(["100644", "100755"].includes(change.fileMode)) || typeof change.contentBase64 !== "string") return { ok: false, reason: "integration_payload_invalid" };
+        const content = Buffer.from(change.contentBase64, "base64");
+        if (content.toString("base64") !== change.contentBase64 || content.length > maxFileBytes) return { ok: false, reason: "integration_payload_invalid" };
+      } else if (change.fileMode !== null || change.contentBase64 !== null) {
+        return { ok: false, reason: "integration_payload_invalid" };
+      }
+      changeOwners.set(relativePath, taskOwners.get(relativePath));
+    }
+    if (taskOwners.size !== changeOwners.size || [...taskOwners.keys()].some((relativePath) => !changeOwners.has(relativePath))) {
+      return { ok: false, reason: "integration_payload_invalid" };
+    }
+    for (const task of acceptedTasks) {
+      const taskChanges = changes.filter((change) => changeOwners.get(change.relativePath) === task.taskId);
+      if (taskChanges.length > 0) holdTaskDiff({ batchId, taskId: task.taskId, changes: taskChanges });
+    }
+    const preparation = prepareIntegration({
+      batchId,
+      baseCommit: currentBaseCommit,
+      tasks: acceptedTasks,
+      expectedRefHash
+    });
+    if (!preparation.ok) return preparation;
+    if (preparation.diffHash !== expectedDiffHash || preparation.diffPreviewHash !== expectedDiffPreviewHash
+      || preparation.changePayloadHash !== expectedChangePayloadHash || preparation.changePayloadHash !== integrationPayloadHash(changes)) {
+      return { ok: false, reason: "integration_payload_mismatch" };
+    }
+    if (preparation.filesChanged.length > maxFilesChanged * acceptedTasks.length
+      || Buffer.byteLength(preparation.diff, "utf8") > maxTotalDiffBytes * acceptedTasks.length) {
+      return { ok: false, reason: "integration_artifact_too_large" };
+    }
+    const finalRefState = captureRefState();
+    const finalSourceStates = captureSourceFileIdentityStates(expectedPaths);
+    const finalClean = assertCleanSource();
+    if (finalRefState.head !== initialRefState.head || finalRefState.refsHash !== initialRefState.refsHash) return { ok: false, reason: "source_ref_changed" };
+    if (!finalClean.ok || finalClean.head !== currentBaseCommit) return { ok: false, reason: finalClean.reason || "source_head_changed" };
+    if (finalSourceStates.some((state) => state.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
+    if (JSON.stringify(currentStates) !== JSON.stringify(finalSourceStates)) return { ok: false, reason: "source_file_identity_changed" };
+    if (preparation.sourceFileStates.some((state, index) => state.relativePath !== currentStates[index].relativePath
+      || state.state !== currentStates[index].state
+      || (state.state === "present" && (state.sha256 !== currentStates[index].sha256 || state.fileMode !== currentStates[index].fileMode)))) {
+      return { ok: false, reason: "source_file_state_changed" };
+    }
+    return {
+      ...preparation,
+      baseCommit: currentBaseCommit,
+      sourceRefHash: initialRefState.refsHash,
+      sourceFileIdentities: currentStates
+    };
+  }
+
   function applyIntegration({ batchId, approvalRef, expectedDiffHash, manifest, assertLockOwner = () => true }) {
     if (promotionRecoveryRequired) return { ok: false, reason: "promotion_recovery_required", message: "promotion recovery must finish before another integration" };
     if (assertLockOwner() !== true) return { ok: false, reason: "workspace_lock_lost", message: "workspace integration lock is no longer owned" };
@@ -1151,6 +1352,17 @@ export function createGitWorktreeBatchManager({
     }
     const beforeStates = captureSourceFileStates(integration.filesChanged);
     if (beforeStates.some((entry) => entry.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
+    if (integration.revalidation?.schemaVersion === 1) {
+      const expectedIdentities = integration.revalidation.sourceFileIdentities;
+      if (!Array.isArray(expectedIdentities) || expectedIdentities.length !== integration.filesChanged.length) {
+        return { ok: false, reason: "source_file_identity_changed", message: "source file identity snapshot is unavailable" };
+      }
+      const currentIdentities = captureSourceFileIdentityStates(integration.filesChanged);
+      if (currentIdentities.some((state) => state.state === "rejected")
+        || JSON.stringify(currentIdentities) !== JSON.stringify(expectedIdentities)) {
+        return { ok: false, reason: "source_file_identity_changed", message: "source files changed after revalidation" };
+      }
+    }
     if (!Array.isArray(integration.sourceFileStates) || integration.sourceFileStates.length !== beforeStates.length) {
       return { ok: false, reason: "source_state_unavailable", message: "source file state snapshot is missing" };
     }
@@ -1293,6 +1505,8 @@ export function createGitWorktreeBatchManager({
     collectTaskDiff,
     cleanupTaskWorktree,
     prepareIntegration,
+    revalidateIntegration,
+    captureSourceFileIdentityStates,
     holdTaskDiff,
     releaseBatchTaskDiffs,
     applyIntegration,

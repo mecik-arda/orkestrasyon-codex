@@ -17,6 +17,7 @@ import { classifyChangeSet } from "./approval-boundary.js";
 import { resolveReliabilityBudget } from "./reliability-budget.js";
 import { parallelBatchTerminalStatuses, parallelTaskTerminalStatuses } from "./parallel-batch-registry.js";
 import { createWorkspaceCoordinator } from "./workspace-coordinator.js";
+import { integrationApprovalHash, integrationPayloadHash } from "./git-worktree-batch.js";
 
 const safeHostVerificationCommands = new Set(["git diff --check"]);
 const safeParallelBatchBlockedReasons = new Set(parallelBatchBlockedReasonValues);
@@ -1922,7 +1923,7 @@ export function createParallelBatchService({
           if (workspaceCoordinator.assertOwner(trustedWorkspace, lockId) !== true) return false;
           if (candidate.status !== "integrating" || candidate.ownerId !== batchOwnerId || candidate.ownerEpoch !== integrationOwnerEpoch) return false;
           candidate.integrationFailure = result.reason;
-          candidate.status = new Set(["source_file_state_changed", "source_head_changed", "source_ref_changed"]).has(result.reason)
+          candidate.status = new Set(["source_file_identity_changed", "source_file_state_changed", "source_head_changed", "source_ref_changed"]).has(result.reason)
             ? "ready_for_approval"
             : "blocked";
           return candidate;
@@ -1968,6 +1969,233 @@ export function createParallelBatchService({
         ? "integration applied; durable recovery record cleanup is pending"
         : "integration applied to source workspace";
       return { ok: true, summary: buildSummary(updated.manifest, null, message) };
+    } finally {
+      workspaceCoordinator.release(lockId);
+    }
+  }
+
+  async function revalidateIntegration(rawInput) {
+    await ensureRecovered();
+    const request = rawInput && typeof rawInput === "object" ? rawInput : {};
+    if (batchConfiguration.enabled !== true) return { ok: false, reason: "parallel_batch_disabled", message: "parallel batch is disabled" };
+    if (batchConfiguration.editEnabled !== true) return { ok: false, reason: "edit_not_enabled", message: "parallel integration approval is disabled" };
+    if (!worktreeManager || typeof worktreeManager.revalidateIntegration !== "function") {
+      return { ok: false, reason: "edit_route_unsupported", message: "integration revalidation manager is unavailable" };
+    }
+    if (!workspaceCoordinator || typeof workspaceCoordinator.acquire !== "function" || typeof workspaceCoordinator.release !== "function" || typeof workspaceCoordinator.assertOwner !== "function") {
+      return { ok: false, reason: "source_workspace_lock_unavailable", message: "source workspace integration lock is unavailable" };
+    }
+    const lockId = crypto.randomUUID();
+    const lock = await workspaceCoordinator.acquire(trustedWorkspace, "edit", lockId);
+    if (!lock) return { ok: false, reason: "source_workspace_lock_unavailable", message: "source workspace integration lock is unavailable" };
+    try {
+      const manifest = await registry.getBatch(request.batchId);
+      if (!manifest || manifest.workspaceHash !== workspaceHash) return { ok: false, reason: "batch_not_found", message: "batch is unknown" };
+      const previous = manifest.integration;
+      if (manifest.status !== "ready_for_approval" || manifest.integrationFailure !== "source_ref_changed") {
+        return { ok: false, reason: "integration_revalidation_unavailable", message: "only a source-ref-rejected approval can be revalidated" };
+      }
+      if (manifest.cancelRequestedAt) return { ok: false, reason: "batch_cancelled", message: "cancelled batch cannot be revalidated" };
+      if (!previous || previous.approvalRef !== request.approvalRef) return { ok: false, reason: "approval_ref_mismatch", message: "approval reference does not match" };
+      if (previous.diffHash !== request.expectedDiffHash) return { ok: false, reason: "integration_hash_mismatch", message: "integration diff hash does not match" };
+      const approvalSummary = buildSummary(manifest, null);
+      if (!approvalSummary.approvalRequired || approvalSummary.status !== "ready_for_approval") {
+        return { ok: false, reason: "integration_summary_unavailable", message: "integration is withheld because the public batch summary cannot show its approval details within the configured byte limit" };
+      }
+      if (!Array.isArray(previous.changes) || previous.changePayloadHash !== integrationPayloadHash(previous.changes)
+        || previous.diffHash !== integrationApprovalHash(previous.diffPreviewHash, previous.changePayloadHash)
+        || !Array.isArray(previous.filesChanged) || !Array.isArray(previous.acceptedTaskIds)
+        || !Array.isArray(previous.sourceFileStates) || previous.baseCommit !== manifest.baseCommit
+        || previous.sourceRefHash !== manifest.sourceRefHash) {
+        return { ok: false, reason: "integration_payload_invalid", message: "stored integration payload or historical binding is invalid" };
+      }
+      const priorArtifact = artifactStore.read({
+        detailRef: previous.detailRef,
+        callerHash,
+        workspaceHash,
+        batchIdHash: hashValue(request.batchId),
+        taskIdHash: hashValue("integration"),
+        cursor: 0,
+        maxBytes: batchConfiguration.maxArtifactBytes || 65536
+      });
+      if (!priorArtifact.ok || priorArtifact.nextCursor !== null || priorArtifact.totalBytes !== Buffer.byteLength(priorArtifact.content || "", "utf8")) {
+        return { ok: false, reason: priorArtifact.reason === "artifact_expired" ? "integration_artifact_expired" : "integration_artifact_unavailable", message: "stored integration detail artifact is unavailable" };
+      }
+      let previousDetail;
+      try {
+        previousDetail = JSON.parse(priorArtifact.content);
+      } catch {
+        return { ok: false, reason: "integration_artifact_invalid", message: "stored integration detail artifact is invalid" };
+      }
+      const expectedDetailKeys = ["baseCommit", "changePayloadHash", "diff", "diffHash", "diffPreviewHash", "filesChanged", "verification"];
+      if (!previousDetail || typeof previousDetail !== "object" || Array.isArray(previousDetail)
+        || Object.keys(previousDetail).sort().join("|") !== expectedDetailKeys.sort().join("|")
+        || previousDetail.baseCommit !== previous.baseCommit
+        || previousDetail.diffHash !== previous.diffHash
+        || previousDetail.diffPreviewHash !== previous.diffPreviewHash
+        || previousDetail.changePayloadHash !== previous.changePayloadHash
+        || JSON.stringify(previousDetail.filesChanged) !== JSON.stringify(previous.filesChanged)
+        || typeof previousDetail.diff !== "string"
+        || hashValue(previousDetail.diff) !== previous.diffPreviewHash
+        || !Array.isArray(previousDetail.verification)) {
+        return { ok: false, reason: "integration_artifact_invalid", message: "stored integration detail artifact does not match the approval payload" };
+      }
+      const acceptedTasks = previous.acceptedTaskIds.map((taskId) => {
+        const task = manifest.tasks?.[taskId];
+        return task ? { taskId, status: task.status, filesChanged: task.filesChanged } : null;
+      });
+      if (acceptedTasks.some((task) => !task)) return { ok: false, reason: "integration_payload_invalid", message: "stored task ownership metadata is incomplete" };
+      let currentRefState;
+      let cleanSourceAtStart;
+      try {
+        cleanSourceAtStart = worktreeManager.assertCleanSource();
+        if (!cleanSourceAtStart.ok) return { ok: false, reason: cleanSourceAtStart.reason, message: "source workspace must be clean before integration revalidation" };
+        currentRefState = worktreeManager.captureRefState();
+      } catch {
+        return { ok: false, reason: "source_ref_changed", message: "source Git state could not be captured safely" };
+      }
+      if (currentRefState.head !== cleanSourceAtStart.head) return { ok: false, reason: "source_head_changed", message: "source HEAD changed while revalidation started" };
+      const preparation = worktreeManager.revalidateIntegration({
+        batchId: request.batchId,
+        originalBaseCommit: previous.baseCommit,
+        currentBaseCommit: currentRefState.head,
+        originalSourceFileStates: previous.sourceFileStates,
+        changes: previous.changes,
+        acceptedTasks,
+        expectedDiffHash: previous.diffHash,
+        expectedDiffPreviewHash: previous.diffPreviewHash,
+        expectedChangePayloadHash: previous.changePayloadHash,
+        expectedRefHash: currentRefState.refsHash
+      });
+      if (!preparation.ok) return { ok: false, reason: preparation.reason, message: "stored integration could not be safely rebound to the current source" };
+      if (workspaceCoordinator.assertOwner(trustedWorkspace, lockId) !== true) return { ok: false, reason: "workspace_lock_lost", message: "source workspace integration lock is no longer owned" };
+      const approvalHashes = { diffHash: preparation.diffHash, diffPreviewHash: preparation.diffPreviewHash, changePayloadHash: preparation.changePayloadHash };
+      const newDetail = artifactStore.store({
+        callerHash,
+        workspaceHash,
+        batchIdHash: hashValue(request.batchId),
+        taskIdHash: hashValue("integration"),
+        content: JSON.stringify({
+          diff: preparation.diff,
+          ...approvalHashes,
+          baseCommit: preparation.baseCommit,
+          filesChanged: preparation.filesChanged,
+          verification: preparation.verification
+        })
+      });
+      if (!newDetail.stored) return { ok: false, reason: `integration_artifact_${newDetail.reason}`, message: "new integration detail artifact could not be stored" };
+      const newApprovalRef = hashValue(JSON.stringify({
+        version: 1,
+        batchId: request.batchId,
+        diffHash: preparation.diffHash,
+        baseCommit: preparation.baseCommit,
+        sourceRefHash: preparation.sourceRefHash,
+        detailRef: newDetail.detailRef,
+        nonce: crypto.randomBytes(32).toString("hex")
+      }));
+      const createdAt = nowIso();
+      const revalidationRecord = {
+        schemaVersion: 1,
+        reason: "source_ref_changed",
+        previousBaseCommit: previous.baseCommit,
+        previousSourceRefHash: previous.sourceRefHash,
+        previousApprovalRef: previous.approvalRef,
+        previousDiffHash: previous.diffHash,
+        baseCommit: preparation.baseCommit,
+        sourceRefHash: preparation.sourceRefHash,
+        approvalRef: newApprovalRef,
+        diffHash: preparation.diffHash,
+        diffPreviewHash: preparation.diffPreviewHash,
+        changePayloadHash: preparation.changePayloadHash,
+        sourceFileIdentities: preparation.sourceFileIdentities,
+        createdAt,
+        expiresAt: newDetail.expiresAt
+      };
+      const newIntegration = {
+        ...previous,
+        ...approvalHashes,
+        approvalRef: newApprovalRef,
+        detailRef: newDetail.detailRef,
+        baseCommit: preparation.baseCommit,
+        sourceRefHash: preparation.sourceRefHash,
+        filesChanged: preparation.filesChanged,
+        sourceFileStates: preparation.sourceFileStates,
+        acceptedTaskIds: preparation.acceptedTaskIds,
+        changes: preparation.changes,
+        verification: preparation.verification,
+        revalidation: revalidationRecord,
+        preparedAt: createdAt
+      };
+      const beforeCommit = worktreeManager.captureRefState();
+      const cleanBeforeCommit = worktreeManager.assertCleanSource();
+      const stableIdentity = worktreeManager.captureSourceFileIdentityStates?.(preparation.filesChanged);
+      if (beforeCommit.head !== preparation.baseCommit || beforeCommit.refsHash !== preparation.sourceRefHash
+        || !cleanBeforeCommit.ok || cleanBeforeCommit.head !== preparation.baseCommit
+        || !Array.isArray(stableIdentity) || JSON.stringify(stableIdentity) !== JSON.stringify(preparation.sourceFileIdentities)) {
+        return { ok: false, reason: "source_ref_changed", message: "source state changed before the new approval binding was recorded" };
+      }
+      let commitValidationReason = null;
+      const updated = await registry.updateBatch(request.batchId, (candidate) => {
+        if (workspaceCoordinator.assertOwner(trustedWorkspace, lockId) !== true
+          || candidate.workspaceHash !== workspaceHash
+          || candidate.status !== "ready_for_approval"
+          || candidate.integrationFailure !== "source_ref_changed"
+          || candidate.cancelRequestedAt
+          || candidate.integration?.approvalRef !== request.approvalRef
+          || candidate.integration?.diffHash !== request.expectedDiffHash) return false;
+        try {
+          const refState = worktreeManager.captureRefState();
+          const cleanSource = worktreeManager.assertCleanSource();
+          const fileIdentities = worktreeManager.captureSourceFileIdentityStates(preparation.filesChanged);
+          if (refState.head !== preparation.baseCommit || refState.refsHash !== preparation.sourceRefHash
+            || !cleanSource.ok || cleanSource.head !== preparation.baseCommit
+            || JSON.stringify(fileIdentities) !== JSON.stringify(preparation.sourceFileIdentities)) {
+            commitValidationReason = "source_ref_changed";
+            return false;
+          }
+        } catch {
+          commitValidationReason = "source_ref_changed";
+          return false;
+        }
+        candidate.integrationRevalidations = [...(candidate.integrationRevalidations || []), revalidationRecord].slice(-8);
+        candidate.integration = newIntegration;
+        candidate.integrationFailure = null;
+        return candidate;
+      }, { assertOwner: () => workspaceCoordinator.assertOwner(trustedWorkspace, lockId) });
+      if (!updated.ok) return { ok: false, reason: commitValidationReason || updated.reason, message: "new approval binding could not be recorded" };
+      let afterCommit;
+      let cleanAfterCommit;
+      let identityAfterCommit;
+      try {
+        afterCommit = worktreeManager.captureRefState();
+        cleanAfterCommit = worktreeManager.assertCleanSource();
+        identityAfterCommit = worktreeManager.captureSourceFileIdentityStates(preparation.filesChanged);
+      } catch {
+        afterCommit = { head: null, refsHash: null };
+        cleanAfterCommit = { ok: false, reason: "source_ref_changed" };
+        identityAfterCommit = [];
+      }
+      if (afterCommit.head !== preparation.baseCommit || afterCommit.refsHash !== preparation.sourceRefHash
+        || !cleanAfterCommit.ok || cleanAfterCommit.head !== preparation.baseCommit
+        || JSON.stringify(identityAfterCommit) !== JSON.stringify(preparation.sourceFileIdentities)) {
+        const failureReason = afterCommit.head !== preparation.baseCommit || afterCommit.refsHash !== preparation.sourceRefHash
+          ? "source_ref_changed"
+          : !cleanAfterCommit.ok
+            ? cleanAfterCommit.reason
+          : identityAfterCommit.some((state) => state.state === "rejected")
+            ? "source_file_identity_changed"
+            : "source_file_state_changed";
+        await registry.updateBatch(request.batchId, (candidate) => {
+          if (workspaceCoordinator.assertOwner(trustedWorkspace, lockId) !== true
+            || candidate.status !== "ready_for_approval"
+            || candidate.integration?.approvalRef !== newApprovalRef) return false;
+          candidate.status = "blocked";
+          candidate.integrationFailure = failureReason;
+          return candidate;
+        }, { assertOwner: () => workspaceCoordinator.assertOwner(trustedWorkspace, lockId) });
+        return { ok: false, reason: failureReason, message: "source changed while the new approval binding was recorded" };
+      }
+      return { ok: true, summary: buildSummary(updated.manifest, null, "stored integration was revalidated; separate user approval is required") };
     } finally {
       workspaceCoordinator.release(lockId);
     }
@@ -2051,6 +2279,7 @@ export function createParallelBatchService({
     getTaskDetail,
     cancel,
     approveIntegration,
+    revalidateIntegration,
     recover,
     callerHash,
     workspaceHash

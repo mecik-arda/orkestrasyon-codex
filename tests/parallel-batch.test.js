@@ -144,6 +144,74 @@ async function waitForBatch(service, batchId, statuses, timeoutMs = 8000) {
   throw new Error(`timeout waiting for batch statuses: ${statuses.join(", ")}`);
 }
 
+async function runEditBatchWithIntegrationFailure(t, prepareIntegration) {
+  const fixture = createFixture(t, {
+    configurationOverrides: {
+      parallelBatch: {
+        editEnabled: true,
+        codexNetworkOffCapability: "available",
+        verificationCommands: ["git diff --check"]
+      }
+    },
+    worktreeManager: {
+      assertCleanSource() {
+        return { ok: true, head: "a".repeat(40) };
+      },
+      captureRefState() {
+        return { head: "a".repeat(40), refsHash: "b".repeat(64) };
+      },
+      assertRefStateUnchanged() {
+        return { ok: true };
+      },
+      createTaskWorktree() {
+        return { ok: true, worktreePath: "task-edit" };
+      },
+      runVerification() {
+        return { ok: true, results: [{ commandHash: "c".repeat(64), exitCode: 0, outputBytes: 0 }] };
+      },
+      collectTaskDiff() {
+        return {
+          ok: true,
+          diff: "bounded fixture diff",
+          diffHash: "d".repeat(64),
+          filesChanged: ["src/a.txt"],
+          changes: [{ relativePath: "src/a.txt", mode: "replace", contentBase64: Buffer.from("edited\n").toString("base64") }]
+        };
+      },
+      cleanupTaskWorktree() {
+        return { cleaned: true };
+      },
+      holdTaskDiff() {},
+      prepareIntegration,
+      releaseBatchTaskDiffs() {},
+      applyIntegration() {
+        return { ok: false, reason: "not_expected" };
+      }
+    }
+  });
+  const prepared = await fixture.service.prepare({
+    objective: "Run one isolated fixture edit",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{
+      taskId: "edit-one",
+      role: "implementer",
+      mode: "edit",
+      target: "codex",
+      objective: "Change the selected fixture",
+      files: ["src/a.txt"],
+      acceptanceCriteria: ["The selected file changes"],
+      verificationCommands: ["git diff --check"]
+    }]
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await fixture.service.start({ planId: prepared.planId, planHash: prepared.planHash });
+  assert.equal(started.ok, true);
+  const summary = await waitForBatch(fixture.service, started.batchId, ["blocked"]);
+  assert.equal(summary.tasks[0].status, "completed");
+  assert.equal(summary.approvalRequired, false);
+  return { summary, manifest: await fixture.registry.getBatch(started.batchId) };
+}
+
 test("V2-BATCH: prepare validates and returns a bounded plan without starting workers", async (t) => {
   const { service, runtime } = createFixture(t);
   const result = await service.prepare({
@@ -1497,6 +1565,53 @@ test("V2-BATCH: minimum-cap summary stays bounded with five maximum-length task 
   assert.equal(result.summary.contentBytes, Buffer.byteLength(JSON.stringify(result.summary), "utf8"));
   assert.equal(result.summary.tasks.length, 5);
   assert.equal(result.summary.tasks.every((task) => task.filesChanged.length === 0 && task.verification.length === 0), true);
+});
+
+test("V2-BATCH: integration preparation block reason is exposed through the bounded summary", async (t) => {
+  const { summary, manifest } = await runEditBatchWithIntegrationFailure(t, () => ({
+    ok: false,
+    reason: "verification_failed",
+    verification: [{
+      commandHash: "e".repeat(64),
+      exitCode: 2,
+      outputBytes: 28,
+      verificationStage: "index",
+      failureKind: "nonzero_exit",
+      processExitCode: 2,
+      osErrorCode: null,
+      stderr: "C:\\private\\workspace\\secret"
+    }]
+  }));
+  assert.equal(summary.status, "blocked");
+  assert.equal(summary.blockedReason, "verification_failed");
+  assert.deepEqual(summary.blockedDiagnostics, {
+    verification: [{
+      commandHash: "e".repeat(64),
+      exitCode: 2,
+      outputBytes: 28,
+      verificationStage: "index",
+      failureKind: "nonzero_exit",
+      processExitCode: 2,
+      osErrorCode: null
+    }]
+  });
+  assert.equal(JSON.stringify(summary.blockedDiagnostics).includes("private"), false);
+  assert.equal(JSON.stringify(summary.blockedDiagnostics).includes("secret"), false);
+  assert.deepEqual(manifest.integrationVerification, summary.blockedDiagnostics.verification);
+  assert.equal(JSON.stringify(manifest.integrationVerification).includes("private"), false);
+  assert.equal(JSON.stringify(manifest.integrationVerification).includes("secret"), false);
+});
+
+test("V2-BATCH: unexpected integration errors become a safe blocked reason without exposing error text", async (t) => {
+  const { summary, manifest } = await runEditBatchWithIntegrationFailure(t, () => {
+    throw new Error("C:\\private\\workspace\\sensitive");
+  });
+  assert.equal(summary.status, "blocked");
+  assert.equal(summary.blockedReason, "batch_execution_unexpected_error");
+  assert.equal(summary.blockedDiagnostics, null);
+  assert.equal(JSON.stringify(summary).includes("private"), false);
+  assert.equal(JSON.stringify(summary).includes("sensitive"), false);
+  assert.equal(manifest.integrationVerification, null);
 });
 
 test("V2-BATCH: oversized integration summary withholds approval", async (t) => {

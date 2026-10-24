@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
+  parallelBatchBlockedReasonValues,
+  parallelTaskVerificationSchema,
   parallelBatchSchemaVersion,
   validatePrepareParallelBatchRequest,
   validateParallelWorkerSummary,
@@ -17,6 +19,7 @@ import { parallelBatchTerminalStatuses, parallelTaskTerminalStatuses } from "./p
 import { createWorkspaceCoordinator } from "./workspace-coordinator.js";
 
 const safeHostVerificationCommands = new Set(["git diff --check"]);
+const safeParallelBatchBlockedReasons = new Set(parallelBatchBlockedReasonValues);
 const hostFailureOperations = new Set(["prepare_directories", "clone", "remove_origin", "add_worktree", "capture_git_metadata", "change_manifest", "read_tree", "index_stage", "hash_object", "update_index", "diff_render"]);
 const hostGitFailureCodes = new Set(["process_start", "filesystem_permission", "git_lock", "git_repository", "git_object", "git_path", "git_index", "git_process_error"]);
 const recoveryEligibleBatchStatuses = new Set(["queued", "running", "cancel_requested", "cancelling", "integrating"]);
@@ -31,6 +34,36 @@ function nowIso() {
 
 function roundCost(value) {
   return Number(Math.max(0, value).toFixed(12));
+}
+
+function blockedReasonForManifest(manifest) {
+  if (manifest.status !== "blocked") return null;
+  return safeParallelBatchBlockedReasons.has(manifest.integrationFailure)
+    ? manifest.integrationFailure
+    : "blocked_reason_unavailable";
+}
+
+function safeVerificationResults(results) {
+  if (!Array.isArray(results)) return null;
+  const normalized = results.slice(0, 20).map((result) => {
+    const candidate = {
+      commandHash: result?.commandHash,
+      exitCode: Number.isInteger(result?.exitCode) ? result.exitCode : null,
+      outputBytes: Number.isInteger(result?.outputBytes) && result.outputBytes >= 0 ? result.outputBytes : -1
+    };
+    for (const field of ["verificationStage", "failureKind", "processExitCode", "osErrorCode"]) {
+      if (Object.hasOwn(result || {}, field)) candidate[field] = result[field];
+    }
+    const parsed = parallelTaskVerificationSchema.safeParse(candidate);
+    return parsed.success ? parsed.data : null;
+  }).filter(Boolean);
+  return normalized.length > 0 ? normalized : null;
+}
+
+function blockedDiagnosticsForManifest(manifest) {
+  if (manifest.status !== "blocked" || manifest.integrationFailure !== "verification_failed") return null;
+  const verification = safeVerificationResults(manifest.integrationVerification);
+  return verification ? { verification } : null;
 }
 
 function normalizeHostFailureDiagnostics(diagnostics) {
@@ -728,6 +761,8 @@ export function createParallelBatchService({
           filesChanged: manifest.integration.filesChanged || []
         }
         : null,
+      blockedReason: blockedReasonForManifest(manifest),
+      blockedDiagnostics: blockedDiagnosticsForManifest(manifest),
       message: message || (tasks.some((task) => task.failureClass === "output_limit")
         ? "output_limit: inspect task detail outputLimitScope/Stream and byte diagnostics before preparing a new plan; process, JSONL record and final-result limits differ from public summary limits. Do not repeat the unchanged plan; a new plan requires separate start approval."
         : null),
@@ -770,7 +805,9 @@ export function createParallelBatchService({
       }));
       summary.approval = null;
       summary.approvalRequired = false;
+      summary.blockedDiagnostics = null;
       summary.status = manifest.status === "ready_for_approval" ? "blocked" : manifest.status;
+      if (summary.status === "blocked" && manifest.status === "ready_for_approval") summary.blockedReason = "public_summary_limit";
       summary.message = "batch summary exceeds the configured public byte limit; details and approval are withheld";
       serialized = serialize();
     }
@@ -1138,6 +1175,8 @@ export function createParallelBatchService({
         manifest.status = "failed";
       } else if (manifest.status === "result_ready" || manifest.status === "ready_for_approval" || manifest.status === "integrating") {
         manifest.status = "blocked";
+        manifest.integrationFailure = "batch_execution_unexpected_error";
+        manifest.integrationVerification = null;
       }
       manifest.endedAt = nowIso();
       return manifest;
@@ -1588,6 +1627,9 @@ export function createParallelBatchService({
         await requireBatchUpdate(batchId, (manifest) => {
           manifest.status = "blocked";
           manifest.integrationFailure = preparation.reason;
+          manifest.integrationVerification = preparation.reason === "verification_failed"
+            ? safeVerificationResults(preparation.verification)
+            : null;
           return manifest;
         });
       } else {

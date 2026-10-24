@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { operatingSystemErrorCodeValues } from "./core-schemas.js";
 
 export const parallelBatchSchemaVersion = 1;
 
@@ -31,6 +32,48 @@ export const parallelTaskStatusValues = [
 export const parallelSummaryStatusValues = ["full", "summary_truncated", "schema_invalid", "output_limit", "not_available"];
 export const parallelActionRequiredValues = ["none", "needs_approval", "needs_more_detail", "blocked"];
 export const parallelTaskRoleValues = ["analyst", "researcher", "reviewer", "planner", "implementer"];
+export const parallelBatchBlockedReasonValues = [
+  "blocked_reason_unavailable",
+  "batch_execution_unexpected_error",
+  "promotion_recovery_required",
+  "source_workspace_not_git",
+  "source_workspace_rebound",
+  "source_ref_changed",
+  "source_workspace_dirty",
+  "source_head_changed",
+  "integration_worktree_failed",
+  "task_diff_missing",
+  "integration_path_ownership_conflict",
+  "task_diff_payload_missing",
+  "path_rejected",
+  "workspace_unavailable",
+  "path_unreadable",
+  "symlink_rejected",
+  "path_escape_rejected",
+  "path_parent_rejected",
+  "integration_target_rejected",
+  "integration_payload_invalid",
+  "integration_payload_write_failed",
+  "integration_payload_mismatch",
+  "integration_contains_unowned_files",
+  "integration_file_state_rejected",
+  "task_git_metadata_unavailable",
+  "task_git_metadata_changed",
+  "task_git_metadata_unreadable",
+  "verification_filter_config_unsupported",
+  "verification_command_not_allowed",
+  "verification_command_unsafe",
+  "verification_failed",
+  "verification_created_unowned_files",
+  "verification_changed_integration_files",
+  "integration_empty_diff",
+  "source_state_rejected",
+  "integration_artifact_binding_invalid",
+  "integration_artifact_too_large",
+  "integration_artifact_secret_detected",
+  "integration_artifact_quota_exceeded",
+  "public_summary_limit"
+];
 
 const relativePathSchema = z.string().min(1).max(500).refine((value) => {
   const normalized = value.replaceAll("\\", "/");
@@ -130,7 +173,11 @@ export const parallelWorkerSummarySchema = z.object({
 export const parallelTaskVerificationSchema = z.object({
   commandHash: z.string().regex(/^[a-f0-9]{64}$/),
   exitCode: z.number().int().nullable(),
-  outputBytes: z.number().int().min(0)
+  outputBytes: z.number().int().min(0).max(33554432),
+  verificationStage: z.enum(["working_tree", "index"]).nullable().optional(),
+  failureKind: z.enum(["nonzero_exit", "timeout", "process_start", "output_limit", "unknown"]).optional(),
+  processExitCode: z.number().int().nullable().optional(),
+  osErrorCode: z.enum(operatingSystemErrorCodeValues).nullable().optional()
 }).strict();
 
 export const parallelRiskLevelValues = ["low_impact", "new_file", "multiple_files", "policy_config", "external_service", "irreversible"];
@@ -177,6 +224,10 @@ export const parallelBatchApprovalSchema = z.object({
   filesChanged: z.array(z.string().min(1).max(500)).max(200)
 }).strict();
 
+export const parallelBatchBlockedDiagnosticsSchema = z.object({
+  verification: z.array(parallelTaskVerificationSchema).max(20)
+}).strict().nullable();
+
 export const parallelBatchSummarySchema = z.object({
   schemaVersion: z.literal(parallelBatchSchemaVersion),
   batchId: z.string().regex(/^[a-f0-9]{16,64}$/).nullable(),
@@ -194,6 +245,8 @@ export const parallelBatchSummarySchema = z.object({
   budget: parallelBatchBudgetSchema,
   approvalRequired: z.boolean(),
   approval: parallelBatchApprovalSchema.nullable(),
+  blockedReason: z.enum(parallelBatchBlockedReasonValues).nullable(),
+  blockedDiagnostics: parallelBatchBlockedDiagnosticsSchema,
   message: z.string().max(2048).nullable(),
   contentBytes: z.number().int().min(0)
 }).strict();

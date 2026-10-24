@@ -742,13 +742,28 @@ export function createGitWorktreeBatchManager({
 
   function readTaskWorktreeState(worktreePath, repositoryPath) {
     const markerPath = path.join(worktreePath, ".git");
-    const configPath = path.join(repositoryPath, ".git", "config");
+    const gitDirectory = path.join(repositoryPath, ".git");
+    const configPath = path.join(gitDirectory, "config");
+    const infoDirectory = path.join(gitDirectory, "info");
+    const attributesPath = path.join(infoDirectory, "attributes");
     const markerStatus = fs.lstatSync(markerPath);
     const configStatus = fs.lstatSync(configPath);
-    if (!markerStatus.isFile() || markerStatus.isSymbolicLink() || !configStatus.isFile() || configStatus.isSymbolicLink()) return null;
+    const infoStatus = fs.lstatSync(infoDirectory);
+    if (!markerStatus.isFile() || markerStatus.isSymbolicLink() || markerStatus.nlink !== 1
+      || !configStatus.isFile() || configStatus.isSymbolicLink() || configStatus.nlink !== 1
+      || !infoStatus.isDirectory() || infoStatus.isSymbolicLink()) return null;
+    let attributesHash = null;
+    try {
+      const attributesStatus = fs.lstatSync(attributesPath);
+      if (!attributesStatus.isFile() || attributesStatus.isSymbolicLink() || attributesStatus.nlink !== 1 || attributesStatus.size > 65536) return null;
+      attributesHash = crypto.createHash("sha256").update(fs.readFileSync(attributesPath)).digest("hex");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
     return {
       markerHash: crypto.createHash("sha256").update(fs.readFileSync(markerPath)).digest("hex"),
       configHash: crypto.createHash("sha256").update(fs.readFileSync(configPath)).digest("hex"),
+      attributesHash,
       repositoryPath
     };
   }
@@ -758,7 +773,7 @@ export function createGitWorktreeBatchManager({
     if (!expected) return { ok: false, reason: "task_git_metadata_unavailable" };
     try {
       const current = readTaskWorktreeState(worktreePath, expected.repositoryPath);
-      if (!current || current.markerHash !== expected.markerHash || current.configHash !== expected.configHash) {
+      if (!current || current.markerHash !== expected.markerHash || current.configHash !== expected.configHash || current.attributesHash !== expected.attributesHash) {
         return { ok: false, reason: "task_git_metadata_changed" };
       }
     } catch {
@@ -955,7 +970,25 @@ export function createGitWorktreeBatchManager({
         results.push({ commandHash: hashValue(command), exitCode: 0, outputBytes: Buffer.byteLength(stdout, "utf8") });
       } catch (error) {
         const outputBytes = Buffer.byteLength(`${error.stdout || ""}${error.stderr || ""}`, "utf8");
-        results.push({ commandHash: hashValue(command), exitCode: Number.isInteger(error.status) ? error.status : 1, outputBytes, verificationStage: error.verificationStage || null });
+        const osErrorCode = operatingSystemErrorCodeValues.includes(error.code) ? error.code : null;
+        const failureKind = error.code === "ETIMEDOUT" || error.killed === true
+          ? "timeout"
+          : error.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+            ? "output_limit"
+            : osErrorCode !== null
+              ? "process_start"
+              : Number.isInteger(error.status)
+                ? "nonzero_exit"
+                : "unknown";
+        results.push({
+          commandHash: hashValue(command),
+          exitCode: Number.isInteger(error.status) ? error.status : 1,
+          outputBytes,
+          verificationStage: ["working_tree", "index"].includes(error.verificationStage) ? error.verificationStage : null,
+          failureKind,
+          processExitCode: Number.isInteger(error.status) ? error.status : null,
+          osErrorCode
+        });
         return { ok: false, reason: "verification_failed", results };
       }
     }

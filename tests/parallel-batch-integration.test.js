@@ -6,6 +6,10 @@ import os from "node:os";
 import path from "node:path";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { createParallelArtifactStore } from "../subagent-bridge/src/services/parallel-artifact-store.js";
+import { createParallelBatchRegistry } from "../subagent-bridge/src/services/parallel-batch-registry.js";
+import { createParallelBatchService } from "../subagent-bridge/src/services/parallel-batch.js";
+import { createGitWorktreeBatchManager } from "../subagent-bridge/src/services/git-worktree-batch.js";
 import { createWorkspaceCoordinator } from "../subagent-bridge/src/services/workspace-coordinator.js";
 
 function git(repo, args) {
@@ -218,6 +222,73 @@ test("V2-INTEGRATION: edit batch prepares an approval-bound diff and applies it 
   assert.deepEqual(pendingJournalFiles, []);
 });
 
+test("V2-INTEGRATION: JSON fixture edit preserves every non-label field before source approval", async (t) => {
+  const { root, workspace } = createRepository(t);
+  const fixturePath = "src/a.txt";
+  const originalValue = { schemaVersion: 1, label: "bounded-read-only-acceptance", left: 6, right: 7, expectedProduct: 42 };
+  fs.writeFileSync(path.join(workspace, fixturePath), `${JSON.stringify(originalValue)}\n`, "utf8");
+  git(workspace, ["add", fixturePath]);
+  git(workspace, ["commit", "-qm", "add JSON edit fixture"]);
+  const baseCommit = git(workspace, ["rev-parse", "HEAD"]).trim();
+  const configuration = createConfiguration(root);
+  const adapter = createAdapter("codex", { canRead: true, canWrite: true, supportsSandbox: true, supportsModelSelection: true });
+  adapter.execute = async (request) => {
+    const fixtureAbsolutePath = path.join(request.workspace, fixturePath);
+    const value = JSON.parse(fs.readFileSync(fixtureAbsolutePath, "utf8"));
+    value.label = "bounded-edit-acceptance";
+    fs.writeFileSync(fixtureAbsolutePath, `${JSON.stringify(value)}\n`, "utf8");
+    return {
+      ok: true,
+      backend: "codex",
+      model: request.model,
+      result: JSON.stringify({ status: "ok", summary: "fixture label changed", action_required: "none" }),
+      error: null,
+      retryable: false,
+      timedOut: false,
+      exitCode: 0,
+      durationMs: 5,
+      metrics: { retries: 0, totalCostUsd: 0.01 }
+    };
+  };
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex: adapter }, sleep: async () => {} });
+  const prepared = await runtime.prepareParallelBatch({
+    objective: "Update the disposable JSON fixture label",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{
+      taskId: "json-label-edit",
+      role: "implementer",
+      mode: "edit",
+      target: "codex",
+      objective: "Change only the label field and preserve every other JSON value",
+      files: [fixturePath],
+      acceptanceCriteria: ["Only label changes to bounded-edit-acceptance"],
+      verificationCommands: ["git diff --check"]
+    }]
+  }, workspace);
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await runtime.startParallelBatch({ planId: prepared.planId, planHash: prepared.planHash }, workspace);
+  assert.equal(started.ok, true);
+  const ready = await waitForBatch(runtime, workspace, started.batchId, ["ready_for_approval", "blocked", "failed"]);
+  assert.equal(ready.status, "ready_for_approval", JSON.stringify(ready));
+  assert.equal(ready.tasks[0].verification[0].exitCode, 0);
+  assert.deepEqual(ready.tasks[0].filesChanged, [fixturePath]);
+  const integrationDetail = await runtime.getParallelTaskDetail({
+    batchId: started.batchId,
+    taskId: "integration",
+    detailRef: ready.approval.detailRef
+  }, workspace);
+  assert.equal(integrationDetail.ok, true);
+  const integrationPayload = JSON.parse(integrationDetail.page.content);
+  assert.equal(integrationPayload.diffHash, ready.approval.diffHash);
+  const addedJsonLines = integrationPayload.diff.split(/\r?\n/).filter((line) => line.startsWith("+") && !line.startsWith("+++"));
+  assert.equal(addedJsonLines.length, 1);
+  const integratedValue = JSON.parse(addedJsonLines[0].slice(1));
+  assert.deepEqual(integratedValue, { ...originalValue, label: "bounded-edit-acceptance" });
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(workspace, fixturePath), "utf8")), originalValue);
+  assert.equal(git(workspace, ["rev-parse", "HEAD"]).trim(), baseCommit);
+  assert.equal(git(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]).trim(), "");
+});
+
 test("V2-INTEGRATION: edit prompt uses host diff limits when task limits are omitted", async (t) => {
   const { root, workspace } = createRepository(t);
   const configuration = createConfiguration(root);
@@ -407,4 +478,118 @@ test("V2-INTEGRATION: edit admission excludes profile fallbacks the runtime will
   }, workspace);
   assert.equal(prepared.ok, true, JSON.stringify(prepared));
   assert.equal(prepared.allocation.estimatedUsd, 0.1);
+});
+
+test("V2-INTEGRATION: task-local Git attributes cannot weaken integration verification", async (t) => {
+  const { root, workspace } = createRepository(t);
+  const fixturePath = "tests/fixtures/parallel-batch-acceptance.json";
+  const fixtureAbsolutePath = path.join(workspace, fixturePath);
+  fs.mkdirSync(path.dirname(fixtureAbsolutePath), { recursive: true });
+  const originalFixture = "{\"schemaVersion\":1,\"label\":\"bounded-read-only-acceptance\",\"left\":6,\"right\":7,\"expectedProduct\":42} \n";
+  fs.writeFileSync(fixtureAbsolutePath, originalFixture, "utf8");
+  git(workspace, ["add", "-A"]);
+  git(workspace, ["commit", "-qm", "add JSON acceptance fixture"]);
+  const originalValue = JSON.parse(originalFixture);
+  const stateRoot = path.join(root, "runtime");
+  const configuration = createConfiguration(root);
+  configuration.parallelBatch.editEnabled = true;
+  configuration.parallelBatch.codexNetworkOffCapability = "available";
+  configuration.parallelBatch.verificationCommands = ["git diff --check"];
+  const registry = createParallelBatchRegistry({ stateDirectory: path.join(stateRoot, "state", "parallel-batches") });
+  const artifactStore = createParallelArtifactStore({ rootDirectory: path.join(stateRoot, "state", "parallel-artifacts"), ttlMs: 60000, maxArtifactBytes: 65536, maxTotalBytes: 1048576 });
+  const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(stateRoot, "cache", "locks"), staleLockMs: 60000, leaseHeartbeatMs: 1000 });
+  const worktreeManager = createGitWorktreeBatchManager({
+    sourceWorkspace: workspace,
+    worktreeRoot: configuration.parallelBatch.worktreeRoot,
+    verificationCommands: configuration.parallelBatch.verificationCommands
+  });
+  worktreeManager.recoverPendingPromotions();
+  let fakeAdapterCalls = 0;
+  let adapterValue = null;
+  const runtime = {
+    async run(request) {
+      fakeAdapterCalls += 1;
+      const value = JSON.parse(fs.readFileSync(path.join(request.trustedWorkspace, fixturePath), "utf8"));
+      value.label = "bounded-edit-acceptance";
+      adapterValue = value;
+      fs.writeFileSync(path.join(request.trustedWorkspace, fixturePath), `${JSON.stringify(value)} \n`, "utf8");
+      const gitDirectory = path.resolve(request.trustedWorkspace, git(request.trustedWorkspace, ["rev-parse", "--git-common-dir"]).trim());
+      const attributesPath = path.join(gitDirectory, "info", "attributes");
+      fs.mkdirSync(path.dirname(attributesPath), { recursive: true });
+      fs.writeFileSync(attributesPath, "*.json whitespace=-blank-at-eol\n", "utf8");
+      return {
+        ok: true,
+        backend: "codex",
+        model: request.model,
+        result: JSON.stringify({ status: "ok", summary: "fixture label changed", action_required: "none" }),
+        error: null,
+        reason: null,
+        retryable: false,
+        timedOut: false,
+        exitCode: 0,
+        durationMs: 5,
+        metrics: { retries: 0, totalCostUsd: 0.01 }
+      };
+    },
+    async cancel() {
+      return true;
+    }
+  };
+  const service = createParallelBatchService({
+    configuration,
+    registry,
+    artifactStore,
+    runtime,
+    trustedWorkspace: workspace,
+    caller: "codexDesktop",
+    worktreeManager,
+    workspaceCoordinator
+  });
+  const prepared = await service.prepare({
+    objective: "Update the fixture label in an isolated worktree",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{
+      taskId: "attribute-fixture-edit",
+      role: "implementer",
+      mode: "edit",
+      target: "codex",
+      objective: "Change only the fixture label and preserve all other JSON fields",
+      files: [fixturePath],
+      acceptanceCriteria: ["Only the label field changes"],
+      verificationCommands: ["git diff --check"],
+      resourceClaims: ["fixture:git-attribute-verification"]
+    }]
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
+  assert.equal(started.ok, true);
+  const deadline = Date.now() + 30000;
+  let terminal = null;
+  while (Date.now() < deadline) {
+    const current = await service.getBatch({ batchId: started.batchId });
+    if (current.ok && ["ready_for_approval", "blocked", "failed"].includes(current.summary.status)) {
+      terminal = current.summary;
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.ok(terminal);
+  const parsedFixture = JSON.parse(fs.readFileSync(fixtureAbsolutePath, "utf8"));
+  assert.deepEqual(parsedFixture, originalValue);
+  assert.deepEqual(adapterValue, { ...originalValue, label: "bounded-edit-acceptance" });
+  assert.equal(git(workspace, ["status", "--porcelain=v1", "--untracked-files=all"]).trim(), "");
+  assert.equal(fakeAdapterCalls, 1);
+  assert.equal(terminal.status, "failed");
+  assert.equal(terminal.tasks[0].failureClass, "task_git_metadata_changed");
+  assert.equal(terminal.blockedReason, null);
+  assert.equal(terminal.approvalRequired, false);
+  assert.equal(fs.existsSync(path.join(configuration.parallelBatch.worktreeRoot, started.batchId, "attribute-fixture-edit")), false);
+  assert.equal(fs.existsSync(path.join(configuration.parallelBatch.worktreeRoot, started.batchId, "integration")), false);
+  const integrationDetail = await service.getTaskDetail({ batchId: started.batchId, taskId: "integration", detailRef: "0".repeat(64) });
+  assert.equal(integrationDetail.ok, false);
+  assert.equal(integrationDetail.reason, "integration_detail_not_found");
+  const recoveryReaderId = "verification-failure-lock-check";
+  const recoveryReadGrant = await workspaceCoordinator.acquire(workspace, "read_only", recoveryReaderId);
+  assert.ok(recoveryReadGrant);
+  workspaceCoordinator.release(recoveryReaderId);
 });

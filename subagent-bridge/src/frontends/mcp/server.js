@@ -394,7 +394,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     }, safe(handlers.startParallelBatch));
     server.registerTool("get_parallel_batch", {
       title: "Paralel batch durumunu sorgula",
-      description: "Batch durumu, çözümlenmiş task'lardan hesaplanan ilerleme yüzdesi, per-task statü ve batch-local admission bütçesinin sınırlı yapılandırılmış özetini döndürür. Task içi token ilerlemesi ölçülmez. Tam worker çıktısı yalnız get_parallel_task_detail ile alınır; admission tutarı sağlayıcı faturası değildir.",
+      description: "Batch durumu, çözümlenmiş task'lardan hesaplanan ilerleme yüzdesi, per-task statü, batch-local admission bütçesi ve blocked batch'ler için yalnız güvenli blockedReason ile doğrulama aşaması, hata sınıfı, exit code ve byte sayısı gibi içeriksiz tanılama metadata'sı içeren sınırlı yapılandırılmış özet döndürür. Ham doğrulama çıktısı açıklanmaz. Task içi token ilerlemesi ölçülmez. Tam worker çıktısı yalnız get_parallel_task_detail ile alınır; admission tutarı sağlayıcı faturası değildir.",
       inputSchema: publicToolInputShape(publicToolSchemas.getParallelBatch),
       annotations: readOnlyAnnotations
     }, safe(handlers.getParallelBatch));

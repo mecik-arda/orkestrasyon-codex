@@ -100,6 +100,8 @@ test("V2-SCHEMA: batch summary rejects provider invoice claims", () => {
     budget: { capUsd: 1, reservedUsd: 0, settledKnownUsd: 0, unknownReservedUsd: 0, refundedUsd: 0, remainingUsd: 1, isProviderInvoice: false },
     approvalRequired: false,
     approval: null,
+    blockedReason: null,
+    blockedDiagnostics: null,
     message: null,
     contentBytes: 0
   };
@@ -107,6 +109,11 @@ test("V2-SCHEMA: batch summary rejects provider invoice claims", () => {
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, budget: { ...summary.budget, isProviderInvoice: true } }).success, false);
   const approval = { approvalRef: "c".repeat(64), diffHash: "d".repeat(64), detailRef: "e".repeat(64), filesChanged: ["src/a.txt"] };
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "ready_for_approval", approvalRequired: true, approval }).success, true);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "blocked", blockedReason: "task_diff_missing" }).success, true);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "blocked", blockedReason: "C:\\private\\path" }).success, false);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "blocked", blockedReason: "verification_failed", blockedDiagnostics: { verification: [{ commandHash: "f".repeat(64), exitCode: 2, outputBytes: 24, verificationStage: "index", failureKind: "nonzero_exit", processExitCode: 2, osErrorCode: null }] } }).success, true);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, blockedDiagnostics: { verification: [{ commandHash: "f".repeat(64), exitCode: 2, outputBytes: 24, verificationStage: "C:\\private\\path" }] } }).success, false);
+  assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, blockedDiagnostics: { verification: [{ commandHash: "f".repeat(64), exitCode: 2, outputBytes: 24, stderr: "secret" }] } }).success, false);
   const { detailRef, ...approvalWithoutDiffPreview } = approval;
   assert.equal(parallelBatchSummarySchema.safeParse({ ...summary, status: "ready_for_approval", approvalRequired: true, approval: approvalWithoutDiffPreview }).success, false);
 });

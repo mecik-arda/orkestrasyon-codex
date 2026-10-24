@@ -204,6 +204,23 @@ test("V2-WORKTREE: arbitrary host verification commands never execute", (t) => {
   assert.equal(executions, 0);
 });
 
+test("V2-WORKTREE: real index verification failures retain only bounded diagnostic metadata", (t) => {
+  const { root, repo } = createRepository(t);
+  const manager = createManager(root, repo, ["git diff --check"]);
+  fs.writeFileSync(path.join(repo, "src", "a.txt"), "staged trailing whitespace \n", "utf8");
+  git(repo, ["add", "src/a.txt"]);
+  const result = manager.runVerification(repo, ["git diff --check"]);
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "verification_failed");
+  assert.equal(result.results.length, 1);
+  assert.equal(result.results[0].verificationStage, "index");
+  assert.equal(result.results[0].failureKind, "nonzero_exit");
+  assert.equal(result.results[0].processExitCode, result.results[0].exitCode);
+  assert.equal(result.results[0].outputBytes > 0, true);
+  assert.equal(Object.hasOwn(result.results[0], "stderr"), false);
+  assert.equal(Object.hasOwn(result.results[0], "stdout"), false);
+});
+
 test("V2-WORKTREE: integration applies task diffs and verification failures leave the source untouched", (t) => {
   const { root, repo, baseCommit } = createRepository(t);
   const manager = createManager(root, repo);

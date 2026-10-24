@@ -308,6 +308,55 @@ test("V2-INTEGRATION: source-ref rejection can be rebound to a descendant HEAD w
   assert.equal(fs.readFileSync(sourceTargetPath, "utf8"), "alpha\n");
 });
 
+test("V2-INTEGRATION: repeated source-ref changes can receive fresh bindings and approval", async (t) => {
+  const fixture = await createSourceRefRejectedFixture(t);
+  const originalApprovalRef = fixture.ready.approval.approvalRef;
+  const originalDiffHash = fixture.ready.approval.diffHash;
+  const providerRequestCount = fixture.observedRequests.length;
+  const firstRevalidation = await fixture.runtime.revalidateParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: originalApprovalRef,
+    expectedDiffHash: originalDiffHash
+  }, fixture.workspace);
+  assert.equal(firstRevalidation.ok, true, JSON.stringify(firstRevalidation));
+  const firstRevalidatedApproval = firstRevalidation.summary.approval;
+  git(fixture.workspace, ["tag", "refs/codex/revalidation-second-rejection"]);
+  const secondRefRejection = await fixture.runtime.approveParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: firstRevalidatedApproval.approvalRef,
+    expectedDiffHash: firstRevalidatedApproval.diffHash
+  }, fixture.workspace);
+  assert.equal(secondRefRejection.ok, false);
+  assert.equal(secondRefRejection.reason, "source_ref_changed");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  const secondRevalidation = await fixture.runtime.revalidateParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: firstRevalidatedApproval.approvalRef,
+    expectedDiffHash: firstRevalidatedApproval.diffHash
+  }, fixture.workspace);
+  assert.equal(secondRevalidation.ok, true, JSON.stringify(secondRevalidation));
+  const secondRevalidatedApproval = secondRevalidation.summary.approval;
+  assert.notEqual(secondRevalidatedApproval.approvalRef, firstRevalidatedApproval.approvalRef);
+  assert.equal(secondRevalidatedApproval.diffHash, originalDiffHash);
+  const staleApproval = await fixture.runtime.approveParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: firstRevalidatedApproval.approvalRef,
+    expectedDiffHash: firstRevalidatedApproval.diffHash
+  }, fixture.workspace);
+  assert.equal(staleApproval.ok, false);
+  assert.equal(staleApproval.reason, "approval_ref_mismatch");
+  const applied = await fixture.runtime.approveParallelIntegration({
+    batchId: fixture.started.batchId,
+    approvalRef: secondRevalidatedApproval.approvalRef,
+    expectedDiffHash: secondRevalidatedApproval.diffHash
+  }, fixture.workspace);
+  assert.equal(applied.ok, true, JSON.stringify(applied));
+  assert.equal(applied.summary.status, "integrated");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8").replaceAll("\r\n", "\n"), "edited by worker\n");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "b.txt"), "utf8"), "beta\n");
+  assert.equal(fixture.observedRequests.length, providerRequestCount);
+});
+
 test("V2-INTEGRATION: source target content drift is rejected during revalidation", async (t) => {
   const { workspace, runtime, started, ready, observedRequests } = await createReadyEditFixture(t);
   git(workspace, ["tag", "refs/codex/target-drift-test"]);

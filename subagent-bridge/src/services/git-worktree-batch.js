@@ -1339,16 +1339,15 @@ export function createGitWorktreeBatchManager({
       return { ok: false, reason: "integration_payload_hash_mismatch", message: "integration payload does not match its approval hash" };
     }
     if (!approvalRef || integration.approvalRef !== approvalRef) return { ok: false, reason: "approval_ref_mismatch", message: "approval reference does not match" };
-    let currentHead;
+    let currentSourceState;
     try {
-      currentHead = captureHead();
+      currentSourceState = captureRefState();
     } catch (error) {
-      return { ok: false, reason: "source_head_unavailable", message: error.message };
+      return { ok: false, reason: "source_ref_changed", message: "source Git state is unavailable" };
     }
-    if (currentHead !== integration.baseCommit) return { ok: false, reason: "source_head_changed", message: "source HEAD changed after integration preparation" };
-    if (integration.sourceRefHash) {
-      const refCheck = assertRefStateUnchanged(integration.sourceRefHash);
-      if (!refCheck.ok) return { ok: false, reason: refCheck.reason, message: "source refs changed after integration preparation" };
+    if (currentSourceState.head !== integration.baseCommit) return { ok: false, reason: "source_head_changed", message: "source HEAD changed after integration preparation" };
+    if (integration.sourceRefHash && currentSourceState.refsHash !== integration.sourceRefHash) {
+      return { ok: false, reason: "source_ref_changed", message: "source refs changed after integration preparation" };
     }
     const beforeStates = captureSourceFileStates(integration.filesChanged);
     if (beforeStates.some((entry) => entry.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
@@ -1385,9 +1384,26 @@ export function createGitWorktreeBatchManager({
     }
     const temporaryPaths = new Set();
     let committed = false;
+    const assertSourceBinding = () => {
+      if (!integration.sourceRefHash) return;
+      let current;
+      try {
+        current = captureRefState();
+      } catch {
+        throw Object.assign(new Error("source Git state changed during promotion"), { failureClass: "source_ref_changed" });
+      }
+      if (current.head !== integration.baseCommit) {
+        throw Object.assign(new Error("source HEAD changed during promotion"), { failureClass: "source_head_changed" });
+      }
+      if (current.refsHash !== integration.sourceRefHash) {
+        throw Object.assign(new Error("source refs changed during promotion"), { failureClass: "source_ref_changed" });
+      }
+    };
     try {
+      assertSourceBinding();
       for (const change of integration.changes) {
         assertPromotionOwner(assertLockOwner);
+        assertSourceBinding();
         const beforeCreation = inspectSourcePath(change.relativePath);
         if (!beforeCreation.ok) throw Object.assign(new Error("promotion path rejected"), { failureClass: beforeCreation.reason });
         const candidate = beforeCreation.path;
@@ -1408,7 +1424,9 @@ export function createGitWorktreeBatchManager({
         if (change.mode === "delete") {
           if (beforeWrite.state === "present") {
             assertPromotionOwner(assertLockOwner);
+            assertSourceBinding();
             removePromotionFile(candidate, { force: true });
+            assertSourceBinding();
           }
           assertPromotionOwner(assertLockOwner);
           syncDirectory(path.dirname(candidate));
@@ -1425,13 +1443,16 @@ export function createGitWorktreeBatchManager({
           assertPromotionOwner(assertLockOwner);
           syncFile(temporaryPath);
           assertPromotionOwner(assertLockOwner);
+          assertSourceBinding();
           renamePromotionFile(temporaryPath, candidate);
+          assertSourceBinding();
           assertPromotionOwner(assertLockOwner);
           temporaryPaths.delete(temporaryPath);
           syncDirectory(path.dirname(candidate));
         }
       }
       if (assertLockOwner() !== true) throw Object.assign(new Error("workspace integration lock was lost"), { failureClass: "workspace_lock_lost" });
+      assertSourceBinding();
       writeDurableJson(promotionCommitPath(batchId), {
         version: 1,
         batchId,

@@ -769,6 +769,57 @@ test("V2-WORKTREE: promotion stops and recovers after its workspace lock fence i
   assert.equal(fs.readFileSync(path.join(repo, "src", "a.txt"), "utf8"), "alpha\n");
 });
 
+test("V2-WORKTREE: source ref drift during promotion rolls back the source files", (t) => {
+  const { root, repo, baseCommit } = createRepository(t);
+  let refAdded = false;
+  const manager = createManager(root, repo, [], {
+    renamePromotionFile(sourcePath, targetPath) {
+      fs.renameSync(sourcePath, targetPath);
+      if (!refAdded && targetPath === path.join(repo, "src", "a.txt")) {
+        git(repo, ["tag", "refs/codex/promotion-ref-race"]);
+        refAdded = true;
+      }
+    }
+  });
+  const batchId = "c".repeat(32);
+  const task = manager.createTaskWorktree({ batchId, taskId: "task-one", baseCommit });
+  fs.writeFileSync(path.join(task.worktreePath, "src", "a.txt"), "edited by worker\n", "utf8");
+  const diff = manager.collectTaskDiff({ worktreePath: task.worktreePath, allowedPaths: ["src/a.txt"] });
+  assert.equal(diff.ok, true);
+  manager.holdTaskDiff({ batchId, taskId: "task-one", changes: diff.changes });
+  manager.cleanupTaskWorktree({ batchId, taskId: "task-one" });
+  const sourceBeforePreparation = manager.captureRefState();
+  const prepared = manager.prepareIntegration({
+    batchId,
+    baseCommit,
+    tasks: [{ taskId: "task-one", status: "completed", filesChanged: ["src/a.txt"] }],
+    expectedRefHash: sourceBeforePreparation.refsHash
+  });
+  assert.equal(prepared.ok, true, JSON.stringify(prepared));
+  const approvalRef = "d".repeat(64);
+  const applied = manager.applyIntegration({
+    batchId,
+    approvalRef,
+    expectedDiffHash: prepared.diffHash,
+    manifest: {
+      baseCommit,
+      integration: {
+        ...prepared,
+        baseCommit,
+        approvalRef,
+        sourceRefHash: sourceBeforePreparation.refsHash
+      }
+    }
+  });
+  assert.equal(refAdded, true);
+  assert.equal(applied.ok, false);
+  assert.equal(applied.reason, "source_ref_changed");
+  assert.equal(fs.readFileSync(path.join(repo, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(fs.readFileSync(path.join(repo, "src", "b.txt"), "utf8"), "beta\n");
+  assert.equal(git(repo, ["status", "--porcelain=v1", "--untracked-files=all"]).trim(), "");
+  assert.equal(manager.promotionRecoveryStatus().ok, true);
+});
+
 test("V2-WORKTREE: promotion recovery stops between files when its workspace lock is replaced", (t) => {
   const { root, repo, baseCommit } = createRepository(t);
   let ownerHeld = true;

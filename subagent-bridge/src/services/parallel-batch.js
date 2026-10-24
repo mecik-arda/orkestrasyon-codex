@@ -98,6 +98,67 @@ function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+function integrationRevalidationMatchesManifest(manifest, integration) {
+  const revalidation = integration?.revalidation;
+  if (revalidation === undefined) {
+    return integration?.baseCommit === manifest.baseCommit
+      && integration?.sourceRefHash === manifest.sourceRefHash
+      && (!Array.isArray(manifest.integrationRevalidations) || manifest.integrationRevalidations.length === 0);
+  }
+  const expectedKeys = [
+    "approvalRef",
+    "baseCommit",
+    "changePayloadHash",
+    "createdAt",
+    "diffHash",
+    "diffPreviewHash",
+    "expiresAt",
+    "previousApprovalRef",
+    "previousBaseCommit",
+    "previousDiffHash",
+    "previousSourceRefHash",
+    "reason",
+    "schemaVersion",
+    "sourceFileIdentities",
+    "sourceRefHash"
+  ];
+  const records = manifest.integrationRevalidations;
+  if (!revalidation || typeof revalidation !== "object" || Array.isArray(revalidation)
+    || Object.keys(revalidation).sort().join("|") !== expectedKeys.join("|")
+    || !Array.isArray(records) || records.length === 0 || records.length > 8
+    || canonicalJson(records.at(-1)) !== canonicalJson(revalidation)
+    || revalidation.schemaVersion !== 1 || revalidation.reason !== "source_ref_changed"
+    || !/^[a-f0-9]{40,64}$/.test(revalidation.baseCommit || "")
+    || !/^[a-f0-9]{40,64}$/.test(revalidation.previousBaseCommit || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.sourceRefHash || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.previousSourceRefHash || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.approvalRef || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.previousApprovalRef || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.diffHash || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.previousDiffHash || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.diffPreviewHash || "")
+    || !/^[a-f0-9]{64}$/.test(revalidation.changePayloadHash || "")
+    || !Array.isArray(revalidation.sourceFileIdentities)
+    || !Array.isArray(integration.filesChanged)
+    || revalidation.sourceFileIdentities.length !== integration.filesChanged.length
+    || revalidation.sourceFileIdentities.some((state, index) => state?.relativePath !== integration.filesChanged[index])
+    || !Number.isFinite(Date.parse(revalidation.createdAt || ""))
+    || !Number.isFinite(Date.parse(revalidation.expiresAt || ""))) return false;
+  const priorBinding = records.length > 1
+    ? records.at(-2)
+    : { baseCommit: manifest.baseCommit, sourceRefHash: manifest.sourceRefHash };
+  return revalidation.baseCommit === integration.baseCommit
+    && revalidation.sourceRefHash === integration.sourceRefHash
+    && revalidation.approvalRef === integration.approvalRef
+    && revalidation.diffHash === integration.diffHash
+    && revalidation.diffPreviewHash === integration.diffPreviewHash
+    && revalidation.changePayloadHash === integration.changePayloadHash
+    && revalidation.previousBaseCommit === priorBinding.baseCommit
+    && revalidation.previousSourceRefHash === priorBinding.sourceRefHash
+    && (records.length === 1 || (revalidation.previousApprovalRef === priorBinding.approvalRef
+      && revalidation.previousDiffHash === priorBinding.diffHash));
+}
+
 function normalizeRelativePath(value) {
   return value.replaceAll("\\", "/");
 }
@@ -2005,8 +2066,8 @@ export function createParallelBatchService({
       if (!Array.isArray(previous.changes) || previous.changePayloadHash !== integrationPayloadHash(previous.changes)
         || previous.diffHash !== integrationApprovalHash(previous.diffPreviewHash, previous.changePayloadHash)
         || !Array.isArray(previous.filesChanged) || !Array.isArray(previous.acceptedTaskIds)
-        || !Array.isArray(previous.sourceFileStates) || previous.baseCommit !== manifest.baseCommit
-        || previous.sourceRefHash !== manifest.sourceRefHash) {
+        || !Array.isArray(previous.sourceFileStates)
+        || !integrationRevalidationMatchesManifest(manifest, previous)) {
         return { ok: false, reason: "integration_payload_invalid", message: "stored integration payload or historical binding is invalid" };
       }
       const priorArtifact = artifactStore.read({

@@ -272,7 +272,7 @@ export function createGitWorktreeBatchManager({
     if (!["100644", "100755"].includes(fileMode)) throw new Error("promotion file mode is invalid");
     let objectId;
     try {
-      objectId = gitAt(workspace, ["hash-object", "-w", "--no-filters", "--", relativePath]).trim();
+      objectId = gitAt(workspace, ["hash-object", "-w", `--path=${relativePath}`, "--", relativePath]).trim();
     } catch (error) {
       error.failureOperation = "hash_object";
       throw error;

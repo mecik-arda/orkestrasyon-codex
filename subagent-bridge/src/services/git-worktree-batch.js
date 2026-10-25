@@ -112,7 +112,13 @@ function changeTypeFor(entry) {
 }
 
 function fileModeFromStatus(status) {
-  return (status.mode & 0o111) === 0 ? "100644" : "100755";
+  const executable = typeof status.mode === "bigint" ? (status.mode & BigInt(0o111)) !== 0n : (status.mode & 0o111) !== 0;
+  return executable ? "100755" : "100644";
+}
+
+function sameFileIdentity(state, identity) {
+  return state?.state === "present" && identity !== null && identity !== undefined
+    && state.dev === identity.dev && state.ino === identity.ino;
 }
 
 function permissionsFromFileMode(fileMode) {
@@ -361,6 +367,11 @@ export function createGitWorktreeBatchManager({
     return hashValue(JSON.stringify(journal));
   }
 
+  function updatePromotionJournal(batchId, journal, assertOwner = () => true) {
+    writeDurableJson(promotionJournalPath(batchId), journal, assertOwner);
+    return hashValue(JSON.stringify(journal));
+  }
+
   function assertPromotionOwner(assertOwner) {
     if (assertOwner() !== true) throw Object.assign(new Error("workspace integration lock was lost"), { failureClass: "workspace_lock_lost" });
   }
@@ -382,7 +393,7 @@ export function createGitWorktreeBatchManager({
     }
     const serialized = fs.readFileSync(journalPath, "utf8");
     const journal = JSON.parse(serialized);
-    if (![1, 2].includes(journal?.version) || journal.batchId !== batchId || journal.sourceWorkspaceHash !== sourceWorkspaceHash || !["applying", "committed"].includes(journal.phase)) {
+    if (![1, 2, 3].includes(journal?.version) || journal.batchId !== batchId || journal.sourceWorkspaceHash !== sourceWorkspaceHash || !["applying", "committed"].includes(journal.phase)) {
       throw new Error("promotion journal metadata is invalid");
     }
     if (!/^[a-f0-9]{64}$/.test(journal.diffHash || "")) throw new Error("promotion journal diff hash is invalid");
@@ -429,6 +440,16 @@ export function createGitWorktreeBatchManager({
       } else {
         throw new Error("promotion journal promoted state is invalid");
       }
+      if (journal.version >= 3) {
+        const previousPresent = file.previousContentBase64 !== null;
+        const validIdentity = (identity) => identity && typeof identity === "object" && !Array.isArray(identity)
+          && Object.keys(identity).sort().join("|") === "dev|ino"
+          && typeof identity.dev === "string" && /^(0|[1-9][0-9]*)$/.test(identity.dev)
+          && typeof identity.ino === "string" && /^(0|[1-9][0-9]*)$/.test(identity.ino);
+        if ((previousPresent && !validIdentity(file.previousIdentity)) || (!previousPresent && file.previousIdentity !== null)
+          || (file.promotedIdentity !== null && !validIdentity(file.promotedIdentity))
+          || (file.promotedState === "absent" && file.promotedIdentity !== null)) throw new Error("promotion journal file identity is invalid");
+      }
     }
     for (const file of journal.files) {
       if (seenPaths.has(file.temporaryRelativePath)) throw new Error("promotion journal temporary path overlaps a target");
@@ -437,7 +458,7 @@ export function createGitWorktreeBatchManager({
     return { journal, journalHash: hashValue(JSON.stringify(journal)) };
   }
 
-  function restorePromotionJournalFile(file, assertOwner = () => true) {
+  function restorePromotionJournalFile(file, assertOwner = () => true, journalVersion = 2) {
     assertPromotionOwner(assertOwner);
     const temporary = inspectSourcePath(file.temporaryRelativePath);
     if (!temporary.ok) throw new Error("promotion recovery temporary path rejected");
@@ -449,7 +470,14 @@ export function createGitWorktreeBatchManager({
     }
     const inspected = inspectSourcePath(file.relativePath);
     if (!inspected.ok) throw new Error("promotion recovery path rejected");
-    const actualState = inspected.state === "absent"
+    const currentIdentity = journalVersion >= 3 ? captureSourceFileIdentityStates([file.relativePath])[0] : null;
+    const actualState = journalVersion >= 3
+      ? currentIdentity.state === "absent"
+        ? { state: "absent", sha256: null, fileMode: null }
+        : currentIdentity.state === "present"
+          ? { state: "present", sha256: currentIdentity.sha256, fileMode: currentIdentity.fileMode }
+          : { state: "rejected", sha256: null, fileMode: null }
+      : inspected.state === "absent"
       ? { state: "absent", sha256: null, fileMode: null }
       : inspected.status.isFile() && inspected.status.nlink === 1
         ? { state: "present", sha256: hashValue(fs.readFileSync(inspected.path)), fileMode: fileModeFromStatus(inspected.status) }
@@ -458,7 +486,8 @@ export function createGitWorktreeBatchManager({
     const previousMatches = actualState.state === previousState
       && (previousState !== "present" || (actualState.sha256 === file.previousSha256 && (!file.previousFileMode || actualState.fileMode === file.previousFileMode)));
     const promotedMatches = actualState.state === file.promotedState
-      && (file.promotedState !== "present" || (actualState.sha256 === file.promotedSha256 && (!file.promotedFileMode || actualState.fileMode === file.promotedFileMode)));
+      && (file.promotedState !== "present" || (actualState.sha256 === file.promotedSha256 && (!file.promotedFileMode || actualState.fileMode === file.promotedFileMode)))
+      && (journalVersion < 3 || file.promotedState !== "present" || (file.promotedIdentity && sameFileIdentity(currentIdentity, file.promotedIdentity)));
     if (previousMatches) return;
     if (!promotedMatches) throw new Error("promotion recovery target changed independently");
     if (file.previousContentBase64 === null) {
@@ -543,7 +572,14 @@ export function createGitWorktreeBatchManager({
     for (const file of stored.journal.files) {
       const inspected = inspectSourcePath(file.relativePath);
       if (!inspected.ok) throw new Error("promotion recovery path rejected");
-      const actualState = inspected.state === "absent"
+      const actualIdentity = stored.journal.version >= 3 ? captureSourceFileIdentityStates([file.relativePath])[0] : null;
+      const actualState = stored.journal.version >= 3
+        ? actualIdentity.state === "absent"
+          ? { state: "absent", sha256: null, fileMode: null }
+          : actualIdentity.state === "present"
+            ? { state: "present", sha256: actualIdentity.sha256, fileMode: actualIdentity.fileMode }
+            : { state: "rejected", sha256: null, fileMode: null }
+        : inspected.state === "absent"
         ? { state: "absent", sha256: null, fileMode: null }
         : inspected.status.isFile() && inspected.status.nlink === 1
           ? { state: "present", sha256: hashValue(fs.readFileSync(inspected.path)), fileMode: fileModeFromStatus(inspected.status) }
@@ -552,10 +588,11 @@ export function createGitWorktreeBatchManager({
       const previousMatches = actualState.state === previousState
         && (previousState !== "present" || (actualState.sha256 === file.previousSha256 && (!file.previousFileMode || actualState.fileMode === file.previousFileMode)));
       const promotedMatches = actualState.state === file.promotedState
-        && (file.promotedState !== "present" || (actualState.sha256 === file.promotedSha256 && (!file.promotedFileMode || actualState.fileMode === file.promotedFileMode)));
+        && (file.promotedState !== "present" || (actualState.sha256 === file.promotedSha256 && (!file.promotedFileMode || actualState.fileMode === file.promotedFileMode)))
+        && (stored.journal.version < 3 || file.promotedState !== "present" || (file.promotedIdentity && sameFileIdentity(actualIdentity, file.promotedIdentity)));
       if (!previousMatches && !promotedMatches) throw new Error("promotion recovery found a conflicting source change");
     }
-    for (const file of [...stored.journal.files].reverse()) restorePromotionJournalFile(file, assertOwner);
+    for (const file of [...stored.journal.files].reverse()) restorePromotionJournalFile(file, assertOwner, stored.journal.version);
     removePromotionJournal(batchId, assertOwner);
     return committed;
   }
@@ -619,12 +656,19 @@ export function createGitWorktreeBatchManager({
       let previousContentBase64 = null;
       let previousSha256 = null;
       let previousFileMode = null;
+      let previousIdentity = null;
       if (inspected.state === "present") {
         if (!inspected.status.isFile() || inspected.status.nlink !== 1) throw Object.assign(new Error("promotion journal target rejected"), { failureClass: "promotion_target_rejected" });
         const previousContent = fs.readFileSync(inspected.path);
+        const previousIdentityState = captureSourceFileIdentityStates([change.relativePath])[0];
+        if (previousIdentityState.state !== "present" || previousIdentityState.sha256 !== hashValue(previousContent)
+          || previousIdentityState.fileMode !== fileModeFromStatus(inspected.status)) {
+          throw Object.assign(new Error("promotion journal source identity changed"), { failureClass: "source_file_identity_changed" });
+        }
         previousContentBase64 = previousContent.toString("base64");
         previousSha256 = hashValue(previousContent);
         previousFileMode = fileModeFromStatus(inspected.status);
+        previousIdentity = { dev: previousIdentityState.dev, ino: previousIdentityState.ino };
       }
       const promotedContent = change.mode === "delete" ? null : Buffer.from(change.contentBase64, "base64");
       const promotedFileMode = promotedContent === null ? null : change.fileMode;
@@ -637,10 +681,12 @@ export function createGitWorktreeBatchManager({
         previousContentBase64,
         previousSha256,
         previousFileMode,
+        previousIdentity,
         promotedState: promotedContent === null ? "absent" : "present",
         promotedContentBase64: promotedContent?.toString("base64") ?? null,
         promotedSha256: promotedContent === null ? null : hashValue(promotedContent),
-        promotedFileMode
+        promotedFileMode,
+        promotedIdentity: null
       };
     });
     const expectedStates = new Map((integration.sourceFileStates || []).map((state) => [state.relativePath, state]));
@@ -651,7 +697,7 @@ export function createGitWorktreeBatchManager({
         throw Object.assign(new Error("source file changed while preparing promotion recovery"), { failureClass: "source_file_state_changed" });
       }
     }
-    return { version: 2, batchId, sourceWorkspaceHash, phase: "applying", diffHash: integration.diffHash, files };
+    return { version: 3, batchId, sourceWorkspaceHash, phase: "applying", diffHash: integration.diffHash, files };
   }
 
   function isGitRepository() {
@@ -1181,21 +1227,22 @@ export function createGitWorktreeBatchManager({
       if (!inspected.ok) return { relativePath: normalized, state: "rejected" };
       if (inspected.state === "absent") return { relativePath: normalized, state: "absent" };
       if (!inspected.status.isFile() || inspected.status.nlink !== 1) return { relativePath: normalized, state: "rejected" };
-      const before = inspected.status;
+      const before = fs.lstatSync(inspected.path, { bigint: true });
+      if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n) return { relativePath: normalized, state: "rejected" };
       let descriptor;
       try {
         descriptor = fs.openSync(inspected.path, fs.constants.O_RDONLY);
-        const opened = fs.fstatSync(descriptor);
-        if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino) {
+        const opened = fs.fstatSync(descriptor, { bigint: true });
+        if (!opened.isFile() || opened.nlink !== 1n || opened.dev !== before.dev || opened.ino !== before.ino) {
           return { relativePath: normalized, state: "rejected" };
         }
         const content = fs.readFileSync(descriptor);
-        const after = fs.fstatSync(descriptor);
-        const currentPath = fs.lstatSync(inspected.path);
-        if (!currentPath.isFile() || currentPath.isSymbolicLink() || currentPath.nlink !== 1
+        const after = fs.fstatSync(descriptor, { bigint: true });
+        const currentPath = fs.lstatSync(inspected.path, { bigint: true });
+        if (!currentPath.isFile() || currentPath.isSymbolicLink() || currentPath.nlink !== 1n
           || after.dev !== before.dev || after.ino !== before.ino || currentPath.dev !== before.dev || currentPath.ino !== before.ino
-          || before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs
-          || after.size !== currentPath.size || after.mtimeMs !== currentPath.mtimeMs || after.ctimeMs !== currentPath.ctimeMs) {
+          || before.size !== after.size || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs
+          || after.size !== currentPath.size || after.mtimeNs !== currentPath.mtimeNs || after.ctimeNs !== currentPath.ctimeNs) {
           return { relativePath: normalized, state: "rejected" };
         }
         return {
@@ -1203,8 +1250,8 @@ export function createGitWorktreeBatchManager({
           state: "present",
           sha256: hashValue(content),
           fileMode: fileModeFromStatus(after),
-          dev: after.dev,
-          ino: after.ino
+          dev: after.dev.toString(),
+          ino: after.ino.toString()
         };
       } catch {
         return { relativePath: normalized, state: "rejected" };
@@ -1414,6 +1461,7 @@ export function createGitWorktreeBatchManager({
     }
     const beforeStates = captureSourceFileStates(integration.filesChanged);
     if (beforeStates.some((entry) => entry.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
+    let expectedSourceIdentities = null;
     if (integration.revalidation?.schemaVersion === 1) {
       const expectedIdentities = integration.revalidation.sourceFileIdentities;
       if (!Array.isArray(expectedIdentities) || expectedIdentities.length !== integration.filesChanged.length) {
@@ -1424,6 +1472,7 @@ export function createGitWorktreeBatchManager({
         || JSON.stringify(currentIdentities) !== JSON.stringify(expectedIdentities)) {
         return { ok: false, reason: "source_file_identity_changed", message: "source files changed after revalidation" };
       }
+      expectedSourceIdentities = new Map(currentIdentities.map((state) => [state.relativePath, state]));
     }
     if (!Array.isArray(integration.sourceFileStates) || integration.sourceFileStates.length !== beforeStates.length) {
       return { ok: false, reason: "source_state_unavailable", message: "source file state snapshot is missing" };
@@ -1465,11 +1514,54 @@ export function createGitWorktreeBatchManager({
         });
       }
     };
+    const assertSourceFileIdentity = (relativePath) => {
+      if (!expectedSourceIdentities) return;
+      const expected = expectedSourceIdentities.get(relativePath);
+      const current = captureSourceFileIdentityStates([relativePath])[0];
+      if (!expected || current.state === "rejected" || JSON.stringify(current) !== JSON.stringify(expected)) {
+        throw Object.assign(new Error("source file identity changed during promotion"), { failureClass: "source_file_identity_changed" });
+      }
+    };
+    const assertJournalSourceIdentity = (relativePath) => {
+      if (journal.version < 3) return;
+      const journalFile = journal.files.find((file) => file.relativePath === relativePath);
+      const current = captureSourceFileIdentityStates([relativePath])[0];
+      const matches = journalFile?.previousIdentity
+        ? sameFileIdentity(current, journalFile.previousIdentity)
+        : current.state === "absent";
+      if (!journalFile || !matches) {
+        throw Object.assign(new Error("source file identity changed during promotion"), { failureClass: "source_file_identity_changed" });
+      }
+    };
+    const capturePromotedSourceIdentity = (relativePath) => {
+      if (!expectedSourceIdentities) return;
+      const current = captureSourceFileIdentityStates([relativePath])[0];
+      if (current.state === "rejected") {
+        throw Object.assign(new Error("promoted source file identity could not be captured"), { failureClass: "source_file_identity_changed" });
+      }
+      expectedSourceIdentities.set(relativePath, current);
+    };
+    const assertPromotedSourcePayload = () => {
+      const currentStates = captureSourceFileStates(integration.filesChanged);
+      if (currentStates.some((state) => state.state === "rejected")) {
+        throw Object.assign(new Error("promoted source state could not be verified"), { failureClass: "source_state_rejected" });
+      }
+      for (const change of integration.changes) {
+        const current = currentStates.find((state) => state.relativePath === change.relativePath);
+        const expectedHash = change.mode === "replace" ? hashValue(Buffer.from(change.contentBase64, "base64")) : null;
+        if (!current || (change.mode === "delete" && current.state !== "absent")
+          || (change.mode === "replace" && (current.state !== "present" || current.sha256 !== expectedHash || current.fileMode !== change.fileMode))) {
+          throw Object.assign(new Error("promoted source payload changed during integration"), { failureClass: "source_file_state_changed" });
+        }
+      }
+    };
     try {
       assertSourceBinding();
       for (const change of integration.changes) {
         assertPromotionOwner(assertLockOwner);
         assertSourceBinding();
+        assertSourceFileIdentity(change.relativePath);
+        assertJournalSourceIdentity(change.relativePath);
         const beforeCreation = inspectSourcePath(change.relativePath);
         if (!beforeCreation.ok) throw Object.assign(new Error("promotion path rejected"), { failureClass: beforeCreation.reason });
         const candidate = beforeCreation.path;
@@ -1491,9 +1583,12 @@ export function createGitWorktreeBatchManager({
           if (beforeWrite.state === "present") {
             assertPromotionOwner(assertLockOwner);
             assertSourceBinding();
+            assertSourceFileIdentity(change.relativePath);
+            assertJournalSourceIdentity(change.relativePath);
             removePromotionFile(candidate, { force: true });
             assertSourceBinding();
           }
+          capturePromotedSourceIdentity(change.relativePath);
           assertPromotionOwner(assertLockOwner);
           syncDirectory(path.dirname(candidate));
         } else {
@@ -1510,15 +1605,26 @@ export function createGitWorktreeBatchManager({
           syncFile(temporaryPath);
           assertPromotionOwner(assertLockOwner);
           assertSourceBinding();
+          assertSourceFileIdentity(change.relativePath);
+          assertJournalSourceIdentity(change.relativePath);
+          const temporaryIdentity = captureSourceFileIdentityStates([journalFile.temporaryRelativePath])[0];
+          if (temporaryIdentity.state !== "present") throw Object.assign(new Error("promotion temporary identity is unavailable"), { failureClass: "promotion_path_rejected" });
+          journalFile.promotedIdentity = { dev: temporaryIdentity.dev, ino: temporaryIdentity.ino };
+          updatePromotionJournal(batchId, journal, assertLockOwner);
           renamePromotionFile(temporaryPath, candidate);
           assertSourceBinding();
           assertPromotionOwner(assertLockOwner);
+          capturePromotedSourceIdentity(change.relativePath);
           temporaryPaths.delete(temporaryPath);
           syncDirectory(path.dirname(candidate));
         }
       }
       if (assertLockOwner() !== true) throw Object.assign(new Error("workspace integration lock was lost"), { failureClass: "workspace_lock_lost" });
       assertSourceBinding();
+      if (expectedSourceIdentities) {
+        for (const relativePath of integration.filesChanged) assertSourceFileIdentity(relativePath);
+      }
+      assertPromotedSourcePayload();
       writeDurableJson(promotionCommitPath(batchId), {
         version: 1,
         batchId,

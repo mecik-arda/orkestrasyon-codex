@@ -355,6 +355,7 @@ test("V2-INTEGRATION: repeated source-ref changes can receive fresh bindings and
   assert.equal(firstRevalidation.summary.blockedDiagnostics.refChanges.addedCount, 1);
   assert.equal(firstRevalidation.summary.blockedDiagnostics.refChanges.changes[0].category, "codex_turn_checkpoint");
   const firstRevalidatedApproval = firstRevalidation.summary.approval;
+  git(fixture.workspace, ["update-ref", "-d", "refs/codex/turn-diffs/checkpoints/revalidation-rejected-test"]);
   git(fixture.workspace, ["update-ref", "refs/codex/turn-diffs/checkpoints/revalidation-second-rejection", fixture.baseCommit]);
   const secondRefRejection = await fixture.runtime.approveParallelIntegration({
     batchId: fixture.started.batchId,
@@ -364,7 +365,12 @@ test("V2-INTEGRATION: repeated source-ref changes can receive fresh bindings and
   assert.equal(secondRefRejection.ok, false);
   assert.equal(secondRefRejection.reason, "source_ref_changed");
   assert.equal(secondRefRejection.refChanges.addedCount, 1);
-  assert.equal(secondRefRejection.refChanges.changes[0].category, "codex_turn_checkpoint");
+  assert.equal(secondRefRejection.refChanges.removedCount, 1);
+  assert.equal(secondRefRejection.refChanges.updatedCount, 0);
+  assert.deepEqual(secondRefRejection.refChanges.changes.map((change) => change.category), ["codex_turn_checkpoint", "codex_turn_checkpoint"]);
+  const addedCheckpoint = secondRefRejection.refChanges.changes.find((change) => change.operation === "added");
+  const removedCheckpoint = secondRefRejection.refChanges.changes.find((change) => change.operation === "removed");
+  assert.equal(addedCheckpoint.currentTargetFingerprint, removedCheckpoint.previousTargetFingerprint);
   assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
   const secondRevalidation = await fixture.runtime.revalidateParallelIntegration({
     batchId: fixture.started.batchId,

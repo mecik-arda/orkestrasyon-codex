@@ -120,7 +120,8 @@ function crashChildAfterPromotionBoundary(scenario, crashMode, expectedExit) {
     `const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory });`,
     `const ticketStore = createPreauthorizedIntegrationTicketStore({ directory: ticketDirectory });`,
     `const prototype = createPreauthorizedIntegrationPrototype({ manager, workspaceCoordinator, ticketStore, trustedWorkspace: sourceWorkspace, workspaceHash });`,
-    `await prototype.execute({ grantId, callerHash, request: { batchId, expectedDiffHash: diffHash }, hooks: crashMode === "committed" ? { afterApplyBeforeReceipt() { process.exit(72); } } : {} });`,
+    `const hooks = crashMode === "decision" ? { afterCommitDecision() { process.exit(73); } } : crashMode === "committed" ? { afterApplyBeforeReceipt() { process.exit(72); } } : {};`,
+    `await prototype.execute({ grantId, callerHash, request: { batchId, expectedDiffHash: diffHash }, hooks });`,
     `process.exit(74);`
   ].join("\n");
   try {
@@ -454,6 +455,27 @@ test("Option B isolated prototype recovery does not duplicate a committed apply"
 });
 
 test("Option B isolated prototype recovers after actual process exit at partial and committed boundaries", async (t) => {
+  const beforeApply = createScenario(t);
+  crashChildAfterPromotionBoundary(beforeApply, "decision", 73);
+  assert.deepEqual(sourceContents(beforeApply.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+  assert.equal(beforeApply.ticketStore.read(beforeApply.issued.grantId).status, "committing");
+  const beforeApplyManager = createGitWorktreeBatchManager({ sourceWorkspace: beforeApply.repository, worktreeRoot: beforeApply.worktreeRoot });
+  const beforeApplyStore = createPreauthorizedIntegrationTicketStore({ directory: path.join(beforeApply.root, "tickets") });
+  const beforeApplyRecovery = createPreauthorizedIntegrationPrototype({
+    manager: beforeApplyManager,
+    workspaceCoordinator: createWorkspaceCoordinator({ lockDirectory: path.join(beforeApply.root, "locks") }),
+    ticketStore: beforeApplyStore,
+    trustedWorkspace: beforeApply.repository,
+    workspaceHash: beforeApply.workspaceHash
+  });
+  const rejectedBeforeApply = await beforeApplyRecovery.recover({ grantId: beforeApply.issued.grantId, callerHash, batchId: beforeApply.batchId });
+  assert.deepEqual(rejectedBeforeApply, { ok: true, recovered: "rolled_back", applied: false });
+  assert.equal(beforeApplyStore.read(beforeApply.issued.grantId).status, "rejected");
+  assert.deepEqual(sourceContents(beforeApply.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+  const beforeApplyReplay = await beforeApplyRecovery.execute({ grantId: beforeApply.issued.grantId, callerHash, request: { batchId: beforeApply.batchId, expectedDiffHash: beforeApply.preview.diffHash } });
+  assert.equal(beforeApplyReplay.ok, false);
+  assert.deepEqual(sourceContents(beforeApply.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+
   const partial = createScenario(t);
   crashChildAfterPromotionBoundary(partial, "partial", 71);
   assert.deepEqual(sourceContents(partial.repository), ["{\"value\":10}\n", "{\"value\":2}\n"]);

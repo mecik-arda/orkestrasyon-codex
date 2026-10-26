@@ -23,7 +23,7 @@ function git(repository, args) {
   return execFileSync("git", args, { cwd: repository, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
 
-function createScenario(t, managerOverrides = {}) {
+function createScenario(t, managerOverrides = {}, prototypeOptions = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "preauthorized-integration-prototype-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const repository = path.join(root, "repository");
@@ -31,10 +31,16 @@ function createScenario(t, managerOverrides = {}) {
   git(root, ["init", "-q", "repository"]);
   git(repository, ["config", "user.email", "prototype@example.invalid"]);
   git(repository, ["config", "user.name", "Prototype Test"]);
+  if (prototypeOptions.autocrlf) fs.writeFileSync(path.join(repository, ".gitattributes"), "*.json text eol=crlf\n", "utf8");
   fs.writeFileSync(path.join(repository, "src", "a.json"), "{\"value\":1}\n", "utf8");
   fs.writeFileSync(path.join(repository, "src", "b.json"), "{\"value\":2}\n", "utf8");
   git(repository, ["add", "-A"]);
   git(repository, ["commit", "-qm", "initial"]);
+  if (prototypeOptions.autocrlf) {
+    for (const relativePath of ["src/a.json", "src/b.json"]) fs.rmSync(path.join(repository, relativePath));
+    git(repository, ["checkout", "--", "src/a.json", "src/b.json"]);
+    assert.equal(git(repository, ["status", "--porcelain=v1"]), "");
+  }
   const baseCommit = git(repository, ["rev-parse", "HEAD"]);
   git(repository, ["update-ref", oldRotationRef, baseCommit]);
   const currentWorkspaceHash = crypto.createHash("sha256").update(fs.realpathSync(repository)).digest("hex");
@@ -62,7 +68,7 @@ function createScenario(t, managerOverrides = {}) {
   assert.equal(preview.ok, true, JSON.stringify(preview));
   const ticketDirectory = path.join(root, "tickets");
   const testClock = { now: Date.now() };
-  const ticketStore = createPreauthorizedIntegrationTicketStore({ directory: ticketDirectory, clock: () => testClock.now });
+  const ticketStore = createPreauthorizedIntegrationTicketStore({ directory: ticketDirectory, clock: () => testClock.now, beforeAtomicReplace: prototypeOptions.beforeAtomicReplace });
   const issued = ticketStore.issue({
     callerHash,
     workspaceHash: currentWorkspaceHash,
@@ -71,7 +77,7 @@ function createScenario(t, managerOverrides = {}) {
     acceptedTasks: [{ taskId: "task-one", status: "completed", filesChanged: diff.filesChanged }],
     sourceRefHash: preview.sourceRefHash,
     sourceRefSnapshot: preview.sourceRefSnapshot,
-    permittedRefTransitions: [{
+    permittedRefTransitions: prototypeOptions.permittedRefTransitions ?? [{
       category: "codex_turn_checkpoint",
       fromFingerprint: fingerprint(oldRotationRef),
       toFingerprint: fingerprint(newRotationRef),
@@ -118,9 +124,9 @@ function crashChildAfterPromotionBoundary(scenario, crashMode, expectedExit) {
     `const manager = createGitWorktreeBatchManager({ sourceWorkspace, worktreeRoot, renamePromotionFile(source, target) { fs.renameSync(source, target); renameCount += 1; if (crashMode === "partial" && renameCount === 1) process.exit(71); } });`,
     `if (!manager.recoverPendingPromotions().ok) process.exit(73);`,
     `const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory });`,
-    `const ticketStore = createPreauthorizedIntegrationTicketStore({ directory: ticketDirectory });`,
+    `const ticketStore = createPreauthorizedIntegrationTicketStore({ directory: ticketDirectory, beforeAtomicReplace({ status }) { if (crashMode === "ticket_claim_before" && status === "applying") process.exit(75); }, afterAtomicPublish({ status }) { if (crashMode === "ticket_claim_after" && status === "applying") process.exit(76); } });`,
     `const prototype = createPreauthorizedIntegrationPrototype({ manager, workspaceCoordinator, ticketStore, trustedWorkspace: sourceWorkspace, workspaceHash });`,
-    `const hooks = crashMode === "decision" ? { afterCommitDecision() { process.exit(73); } } : crashMode === "committed" ? { afterApplyBeforeReceipt() { process.exit(72); } } : {};`,
+    `const hooks = crashMode === "revalidation" ? { afterRevalidation() { process.exit(70); } } : crashMode === "decision" ? { afterCommitDecision() { process.exit(73); } } : crashMode === "committed" ? { afterApplyBeforeReceipt() { process.exit(72); } } : {};`,
     `await prototype.execute({ grantId, callerHash, request: { batchId, expectedDiffHash: diffHash }, hooks });`,
     `process.exit(74);`
   ].join("\n");
@@ -136,7 +142,7 @@ function crashChildAfterPromotionBoundary(scenario, crashMode, expectedExit) {
   }
 }
 
-test("Option B isolated prototype applies only the exact granted diff after same-target ref rotation", async (t) => {
+test("Option B isolated prototype applies the exact grant only when its separate ref transition was authorized", async (t) => {
   const scenario = createScenario(t);
   const before = sourceContents(scenario.repository);
   git(scenario.repository, ["update-ref", "-d", oldRotationRef]);
@@ -149,6 +155,88 @@ test("Option B isolated prototype applies only the exact granted diff after same
   assert.equal(Object.hasOwn(result.result, "approvalRef"), false);
   assert.equal(JSON.stringify(result).includes("refs/"), false);
   assert.equal(JSON.stringify(result).includes(scenario.baseCommit), false);
+});
+
+test("Option B exact diff authorization does not implicitly permit same-target ref rotation", async (t) => {
+  const scenario = createScenario(t, {}, { permittedRefTransitions: [] });
+  const originalContents = sourceContents(scenario.repository);
+  git(scenario.repository, ["update-ref", "-d", oldRotationRef]);
+  git(scenario.repository, ["update-ref", newRotationRef, scenario.baseCommit]);
+  const result = await scenario.execute();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "source_ref_changed");
+  assert.deepEqual(sourceContents(scenario.repository), originalContents);
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "rejected");
+});
+
+test("Option B recovery rejects tickets with missing caller or batch bindings and mismatched record IDs", async (t) => {
+  const missingBindings = createScenario(t);
+  assert.equal(missingBindings.ticketStore.claim({
+    grantId: missingBindings.issued.grantId,
+    callerHash,
+    workspaceHash: missingBindings.workspaceHash,
+    batchId: missingBindings.batchId,
+    expectedDiffHash: missingBindings.preview.diffHash
+  }).ok, true);
+  const missingBindingsPath = path.join(missingBindings.root, "tickets", `${missingBindings.issued.grantId}.json`);
+  const incompleteTicket = JSON.parse(fs.readFileSync(missingBindingsPath, "utf8"));
+  delete incompleteTicket.callerHash;
+  delete incompleteTicket.batchId;
+  fs.writeFileSync(missingBindingsPath, JSON.stringify(incompleteTicket), "utf8");
+  let recoveryCalls = 0;
+  const originalRecovery = missingBindings.manager.recoverPendingPromotions.bind(missingBindings.manager);
+  missingBindings.manager.recoverPendingPromotions = (...args) => {
+    recoveryCalls += 1;
+    return originalRecovery(...args);
+  };
+  const incompleteRecovery = await missingBindings.prototype.recover({ grantId: missingBindings.issued.grantId });
+  assert.deepEqual(incompleteRecovery, { ok: false, reason: "prototype_recovery_not_required" });
+  assert.equal(recoveryCalls, 0);
+  assert.deepEqual(sourceContents(missingBindings.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+
+  const mismatchedRecord = createScenario(t);
+  assert.equal(mismatchedRecord.ticketStore.claim({
+    grantId: mismatchedRecord.issued.grantId,
+    callerHash,
+    workspaceHash: mismatchedRecord.workspaceHash,
+    batchId: mismatchedRecord.batchId,
+    expectedDiffHash: mismatchedRecord.preview.diffHash
+  }).ok, true);
+  const mismatchedPath = path.join(mismatchedRecord.root, "tickets", `${mismatchedRecord.issued.grantId}.json`);
+  const mismatchedTicket = JSON.parse(fs.readFileSync(mismatchedPath, "utf8"));
+  mismatchedTicket.grantId = "f".repeat(32);
+  fs.writeFileSync(mismatchedPath, JSON.stringify(mismatchedTicket), "utf8");
+  assert.deepEqual(await mismatchedRecord.prototype.recover({ grantId: mismatchedRecord.issued.grantId, callerHash, batchId: mismatchedRecord.batchId }), {
+    ok: false,
+    reason: "prototype_recovery_not_required"
+  });
+  assert.deepEqual(sourceContents(mismatchedRecord.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+});
+
+test("production revalidation accepts a clean CRLF checkout after unrelated ref drift", async (t) => {
+  const scenario = createScenario(t, {}, { autocrlf: true });
+  git(scenario.repository, ["update-ref", "refs/tags/unrelated-ref-drift", scenario.baseCommit]);
+  const currentRefs = scenario.manager.captureRefState();
+  const revalidated = scenario.manager.revalidateIntegration({
+    batchId: scenario.batchId,
+    originalBaseCommit: scenario.baseCommit,
+    currentBaseCommit: scenario.baseCommit,
+    originalSourceFileStates: scenario.preview.sourceFileStates,
+    changes: scenario.preview.changes,
+    acceptedTasks: [{ taskId: "task-one", status: "completed", filesChanged: scenario.preview.filesChanged }],
+    expectedDiffHash: scenario.preview.diffHash,
+    expectedDiffPreviewHash: scenario.preview.diffPreviewHash,
+    expectedChangePayloadHash: scenario.preview.changePayloadHash,
+    expectedRefHash: currentRefs.refsHash,
+    expectedRefSnapshot: currentRefs.refSnapshot
+  });
+  assert.equal(currentRefs.head, scenario.baseCommit);
+  assert.equal(scenario.manager.assertCleanSource().ok, true);
+  const committedBytes = execFileSync("git", ["show", `${scenario.baseCommit}:${scenario.preview.filesChanged[0]}`], { cwd: scenario.repository, encoding: "buffer" });
+  assert.notEqual(scenario.preview.sourceFileStates[0].sha256, crypto.createHash("sha256").update(committedBytes).digest("hex"));
+  assert.equal(revalidated.ok, true, JSON.stringify(revalidated));
+  assert.equal(revalidated.diffHash, scenario.preview.diffHash);
+  assert.deepEqual(sourceContents(scenario.repository), ["{\"value\":1}\r\n", "{\"value\":2}\r\n"]);
 });
 
 test("Option B isolated prototype rejects a changed request and source file identity drift", async (t) => {
@@ -177,6 +265,13 @@ test("Option B isolated prototype rejects a changed request and source file iden
     request: { batchId: changedRequest.batchId, expectedDiffHash: changedRequest.preview.diffHash }
   });
   assert.equal(missingArtifact.ok, false);
+  const corruptArtifact = createScenario(t);
+  const corruptTicketPath = path.join(corruptArtifact.root, "tickets", `${corruptArtifact.issued.grantId}.json`);
+  fs.writeFileSync(corruptTicketPath, "{invalid", "utf8");
+  const corruptResult = await corruptArtifact.execute();
+  assert.equal(corruptResult.ok, false);
+  assert.deepEqual(await corruptArtifact.prototype.recover({ grantId: corruptArtifact.issued.grantId, callerHash, batchId: corruptArtifact.batchId }), { ok: false, reason: "prototype_recovery_not_required" });
+  assert.deepEqual(sourceContents(corruptArtifact.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
   const driftedSource = createScenario(t);
   const target = path.join(driftedSource.repository, "src", "a.json");
   fs.writeFileSync(target, "{\"value\":9}\n", "utf8");
@@ -194,6 +289,216 @@ test("Option B isolated prototype rejects a grant expiring before the atomic com
   assert.equal(result.reason, "prototype_grant_expired");
   assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "rejected");
   assert.deepEqual(sourceContents(scenario.repository), originalContents);
+});
+
+test("Option B interrupted commit-decision record remains recoverable and cannot be replayed", async (t) => {
+  const scenario = createScenario(t, {}, {
+    beforeAtomicReplace({ status }) {
+      if (status === "committing") throw new Error("injected ticket transition interruption");
+    }
+  });
+  const originalContents = sourceContents(scenario.repository);
+  const result = await scenario.execute();
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "prototype_commit_decision_recovery_required");
+  assert.equal(result.recoveryRequired, true);
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "applying");
+  assert.deepEqual(sourceContents(scenario.repository), originalContents);
+  const recovered = await scenario.prototype.recover({ grantId: scenario.issued.grantId, callerHash, batchId: scenario.batchId });
+  assert.deepEqual(recovered, { ok: true, recovered: "not_committed", applied: false });
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "rejected");
+  assert.equal(fs.readdirSync(path.join(scenario.root, "tickets")).some((entry) => entry.endsWith(".tmp")), false);
+  assert.equal((await scenario.execute()).ok, false);
+  assert.deepEqual(sourceContents(scenario.repository), originalContents);
+});
+
+test("Option B committed ticket and promotion marker recover when ticket replacement or finalization fails", async (t) => {
+  let failCommitReceipt = true;
+  const ticketFailure = createScenario(t, {}, {
+    beforeAtomicReplace({ status }) {
+      if (status === "committed" && failCommitReceipt) {
+        failCommitReceipt = false;
+        throw new Error("injected committed receipt interruption");
+      }
+    }
+  });
+  const failedReceipt = await ticketFailure.execute();
+  assert.equal(failedReceipt.ok, false);
+  assert.equal(failedReceipt.recoveryRequired, true);
+  assert.equal(ticketFailure.ticketStore.read(ticketFailure.issued.grantId).status, "committing");
+  const ticketRecovery = await ticketFailure.prototype.recover({ grantId: ticketFailure.issued.grantId, callerHash, batchId: ticketFailure.batchId });
+  assert.deepEqual(ticketRecovery, { ok: true, recovered: "committed", applied: true });
+  assert.equal(ticketFailure.ticketStore.read(ticketFailure.issued.grantId).status, "applied");
+  assert.deepEqual(sourceContents(ticketFailure.repository), ["{\"value\":10}\n", "{\"value\":20}\n"]);
+
+  let failAppliedReceipt = true;
+  const finalizeFailure = createScenario(t, {}, {
+    beforeAtomicReplace({ status }) {
+      if (status === "applied" && failAppliedReceipt) {
+        failAppliedReceipt = false;
+        throw new Error("injected final receipt interruption");
+      }
+    }
+  });
+  const incomplete = await finalizeFailure.execute();
+  assert.equal(incomplete.ok, false);
+  assert.equal(incomplete.recoveryRequired, true);
+  assert.equal(finalizeFailure.ticketStore.read(finalizeFailure.issued.grantId).status, "committed");
+  const finalizeRecoveryManager = createGitWorktreeBatchManager({ sourceWorkspace: finalizeFailure.repository, worktreeRoot: finalizeFailure.worktreeRoot });
+  const finalizeRecovery = createPreauthorizedIntegrationPrototype({
+    manager: finalizeRecoveryManager,
+    workspaceCoordinator: finalizeFailure.coordinator,
+    ticketStore: finalizeFailure.ticketStore,
+    trustedWorkspace: finalizeFailure.repository,
+    workspaceHash: finalizeFailure.workspaceHash
+  });
+  const finalized = await finalizeRecovery.recover({ grantId: finalizeFailure.issued.grantId, callerHash, batchId: finalizeFailure.batchId });
+  assert.deepEqual(finalized, { ok: true, recovered: "committed", applied: true });
+  assert.equal(finalizeFailure.ticketStore.read(finalizeFailure.issued.grantId).status, "applied");
+  assert.deepEqual(sourceContents(finalizeFailure.repository), ["{\"value\":10}\n", "{\"value\":20}\n"]);
+});
+
+test("Option B rejected and cancelled receipt failures remain visible and recover to terminal states", async (t) => {
+  let failRejectedReceipt = true;
+  const rejectedScenario = createScenario(t, {}, {
+    beforeAtomicReplace({ status }) {
+      if (status === "rejected" && failRejectedReceipt) {
+        failRejectedReceipt = false;
+        throw new Error("injected rejected receipt interruption");
+      }
+    }
+  });
+  git(rejectedScenario.repository, ["update-ref", "refs/tags/unapproved-rejection", rejectedScenario.baseCommit]);
+  const rejected = await rejectedScenario.execute();
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.reason, "prototype_receipt_recovery_required");
+  assert.equal(rejected.recoveryRequired, true);
+  assert.equal(rejectedScenario.ticketStore.read(rejectedScenario.issued.grantId).status, "applying");
+  const recoveredRejection = await rejectedScenario.prototype.recover({ grantId: rejectedScenario.issued.grantId, callerHash, batchId: rejectedScenario.batchId });
+  assert.deepEqual(recoveredRejection, { ok: true, recovered: "not_committed", applied: false });
+  assert.equal(rejectedScenario.ticketStore.read(rejectedScenario.issued.grantId).status, "rejected");
+  assert.deepEqual(sourceContents(rejectedScenario.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+
+  let failCancelledReceipt = true;
+  const cancelledScenario = createScenario(t, {}, {
+    beforeAtomicReplace({ status }) {
+      if (status === "cancelled" && failCancelledReceipt) {
+        failCancelledReceipt = false;
+        throw new Error("injected cancelled receipt interruption");
+      }
+    }
+  });
+  const cancelled = await cancelledScenario.execute({}, {
+    afterRevalidation: () => cancelledScenario.ticketStore.requestCancel(cancelledScenario.issued.grantId)
+  });
+  assert.equal(cancelled.ok, false);
+  assert.equal(cancelled.reason, "prototype_receipt_recovery_required");
+  assert.equal(cancelled.recoveryRequired, true);
+  assert.equal(cancelledScenario.ticketStore.read(cancelledScenario.issued.grantId).status, "cancel_requested");
+  const recoveredCancellation = await cancelledScenario.prototype.recover({ grantId: cancelledScenario.issued.grantId, callerHash, batchId: cancelledScenario.batchId });
+  assert.deepEqual(recoveredCancellation, { ok: true, recovered: "not_committed", applied: false });
+  assert.equal(cancelledScenario.ticketStore.read(cancelledScenario.issued.grantId).status, "cancelled");
+  assert.deepEqual(sourceContents(cancelledScenario.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+});
+
+test("Option B finalization exceptions preserve committed recovery requirements", async (t) => {
+  const scenario = createScenario(t);
+  const originalFinalize = scenario.manager.finalizePromotion.bind(scenario.manager);
+  let failFinalize = true;
+  scenario.manager.finalizePromotion = (...args) => {
+    if (failFinalize) {
+      failFinalize = false;
+      throw new Error("injected promotion finalization exception");
+    }
+    return originalFinalize(...args);
+  };
+  const incomplete = await scenario.execute();
+  assert.equal(incomplete.ok, false);
+  assert.equal(incomplete.reason, "prototype_recovery_required");
+  assert.equal(incomplete.recoveryRequired, true);
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "committed");
+  const manager = createGitWorktreeBatchManager({ sourceWorkspace: scenario.repository, worktreeRoot: scenario.worktreeRoot });
+  const recovery = createPreauthorizedIntegrationPrototype({
+    manager,
+    workspaceCoordinator: scenario.coordinator,
+    ticketStore: scenario.ticketStore,
+    trustedWorkspace: scenario.repository,
+    workspaceHash: scenario.workspaceHash
+  });
+  assert.deepEqual(await recovery.recover({ grantId: scenario.issued.grantId, callerHash, batchId: scenario.batchId }), {
+    ok: true,
+    recovered: "committed",
+    applied: true
+  });
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "applied");
+  assert.equal((await recovery.execute({ grantId: scenario.issued.grantId, callerHash, request: { batchId: scenario.batchId, expectedDiffHash: scenario.preview.diffHash } })).ok, false);
+  assert.deepEqual(sourceContents(scenario.repository), ["{\"value\":10}\n", "{\"value\":20}\n"]);
+});
+
+test("Option B rollback recovery reports rejected receipt failures and retries without source mutation", async (t) => {
+  let failRejectedReceipt = true;
+  const scenario = createScenario(t, {}, {
+    beforeAtomicReplace({ status }) {
+      if (status === "rejected" && failRejectedReceipt) {
+        failRejectedReceipt = false;
+        throw new Error("injected rollback receipt interruption");
+      }
+    }
+  });
+  assert.equal(scenario.ticketStore.claim({
+    grantId: scenario.issued.grantId,
+    callerHash,
+    workspaceHash: scenario.workspaceHash,
+    batchId: scenario.batchId,
+    expectedDiffHash: scenario.preview.diffHash
+  }).ok, true);
+  assert.equal(scenario.ticketStore.beginCommit(scenario.issued.grantId).ok, true);
+  const firstRecovery = await scenario.prototype.recover({ grantId: scenario.issued.grantId, callerHash, batchId: scenario.batchId });
+  assert.deepEqual(firstRecovery, { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true });
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "committing");
+  assert.deepEqual(sourceContents(scenario.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+  const recovered = await scenario.prototype.recover({ grantId: scenario.issued.grantId, callerHash, batchId: scenario.batchId });
+  assert.deepEqual(recovered, { ok: true, recovered: "rolled_back", applied: false });
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "rejected");
+  assert.equal((await scenario.execute()).ok, false);
+  assert.deepEqual(sourceContents(scenario.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+});
+
+test("Option B recovery catches finalizer exceptions and retries committed work without replay", async (t) => {
+  const scenario = createScenario(t);
+  const interrupted = await scenario.execute({}, {
+    afterApplyBeforeReceipt() { throw new Error("interrupted before commit receipt"); }
+  });
+  assert.equal(interrupted.recoveryRequired, true);
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "committing");
+  const manager = createGitWorktreeBatchManager({ sourceWorkspace: scenario.repository, worktreeRoot: scenario.worktreeRoot });
+  const originalFinalize = manager.finalizePromotion.bind(manager);
+  let failFinalize = true;
+  manager.finalizePromotion = (...args) => {
+    if (failFinalize) {
+      failFinalize = false;
+      throw new Error("injected recovery finalizer exception");
+    }
+    return originalFinalize(...args);
+  };
+  const recovery = createPreauthorizedIntegrationPrototype({
+    manager,
+    workspaceCoordinator: scenario.coordinator,
+    ticketStore: scenario.ticketStore,
+    trustedWorkspace: scenario.repository,
+    workspaceHash: scenario.workspaceHash
+  });
+  assert.deepEqual(await recovery.recover({ grantId: scenario.issued.grantId, callerHash, batchId: scenario.batchId }), {
+    ok: false,
+    reason: "prototype_recovery_required",
+    recoveryRequired: true
+  });
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "committed");
+  const recovered = await recovery.recover({ grantId: scenario.issued.grantId, callerHash, batchId: scenario.batchId });
+  assert.deepEqual(recovered, { ok: true, recovered: "committed", applied: true });
+  assert.equal(scenario.ticketStore.read(scenario.issued.grantId).status, "applied");
+  assert.equal((await recovery.execute({ grantId: scenario.issued.grantId, callerHash, request: { batchId: scenario.batchId, expectedDiffHash: scenario.preview.diffHash } })).ok, false);
+  assert.deepEqual(sourceContents(scenario.repository), ["{\"value\":10}\n", "{\"value\":20}\n"]);
 });
 
 test("Option B isolated prototype gives cancel and commit decision a single atomic winner", async (t) => {
@@ -454,7 +759,27 @@ test("Option B isolated prototype recovery does not duplicate a committed apply"
   assert.deepEqual(sourceContents(scenario.repository), ["{\"value\":10}\n", "{\"value\":20}\n"]);
 });
 
-test("Option B isolated prototype recovers after actual process exit at partial and committed boundaries", async (t) => {
+test("Option B isolated prototype recovers after actual process exit before and after commit decision", async (t) => {
+  const beforeDecision = createScenario(t);
+  crashChildAfterPromotionBoundary(beforeDecision, "revalidation", 70);
+  assert.deepEqual(sourceContents(beforeDecision.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+  assert.equal(beforeDecision.ticketStore.read(beforeDecision.issued.grantId).status, "applying");
+  const beforeDecisionManager = createGitWorktreeBatchManager({ sourceWorkspace: beforeDecision.repository, worktreeRoot: beforeDecision.worktreeRoot });
+  const beforeDecisionStore = createPreauthorizedIntegrationTicketStore({ directory: path.join(beforeDecision.root, "tickets") });
+  const beforeDecisionRecovery = createPreauthorizedIntegrationPrototype({
+    manager: beforeDecisionManager,
+    workspaceCoordinator: createWorkspaceCoordinator({ lockDirectory: path.join(beforeDecision.root, "locks") }),
+    ticketStore: beforeDecisionStore,
+    trustedWorkspace: beforeDecision.repository,
+    workspaceHash: beforeDecision.workspaceHash
+  });
+  const rejectedBeforeDecision = await beforeDecisionRecovery.recover({ grantId: beforeDecision.issued.grantId, callerHash, batchId: beforeDecision.batchId });
+  assert.deepEqual(rejectedBeforeDecision, { ok: true, recovered: "not_committed", applied: false });
+  assert.equal(beforeDecisionStore.read(beforeDecision.issued.grantId).status, "rejected");
+  const beforeDecisionReplay = await beforeDecisionRecovery.execute({ grantId: beforeDecision.issued.grantId, callerHash, request: { batchId: beforeDecision.batchId, expectedDiffHash: beforeDecision.preview.diffHash } });
+  assert.equal(beforeDecisionReplay.ok, false);
+  assert.deepEqual(sourceContents(beforeDecision.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+
   const beforeApply = createScenario(t);
   crashChildAfterPromotionBoundary(beforeApply, "decision", 73);
   assert.deepEqual(sourceContents(beforeApply.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
@@ -513,7 +838,28 @@ test("Option B isolated prototype recovers after actual process exit at partial 
   assert.deepEqual(sourceContents(committed.repository), ["{\"value\":10}\n", "{\"value\":20}\n"]);
 });
 
-test("Option B isolated ticket store preserves another owner's lock after a busy contender", async (t) => {
+test("Option B ticket state remains live after an actual process exit on either side of atomic claim publication", async (t) => {
+  const beforePublish = createScenario(t);
+  crashChildAfterPromotionBoundary(beforePublish, "ticket_claim_before", 75);
+  assert.equal(beforePublish.ticketStore.read(beforePublish.issued.grantId).status, "issued");
+  assert.deepEqual(sourceContents(beforePublish.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+  const retriedBeforePublish = await beforePublish.execute();
+  assert.equal(retriedBeforePublish.ok, true, JSON.stringify(retriedBeforePublish));
+  assert.equal(beforePublish.ticketStore.read(beforePublish.issued.grantId).status, "applied");
+  assert.deepEqual(sourceContents(beforePublish.repository), ["{\"value\":10}\n", "{\"value\":20}\n"]);
+
+  const afterPublish = createScenario(t);
+  crashChildAfterPromotionBoundary(afterPublish, "ticket_claim_after", 76);
+  assert.equal(afterPublish.ticketStore.read(afterPublish.issued.grantId).status, "applying");
+  assert.deepEqual(sourceContents(afterPublish.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+  const recovered = await afterPublish.prototype.recover({ grantId: afterPublish.issued.grantId, callerHash, batchId: afterPublish.batchId });
+  assert.deepEqual(recovered, { ok: true, recovered: "not_committed", applied: false });
+  assert.equal(afterPublish.ticketStore.read(afterPublish.issued.grantId).status, "rejected");
+  assert.equal((await afterPublish.execute()).ok, false);
+  assert.deepEqual(sourceContents(afterPublish.repository), ["{\"value\":1}\n", "{\"value\":2}\n"]);
+});
+
+test("Option B isolated ticket store resolves cross-thread cancellation and commit by atomic compare-and-set", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "preauthorized-ticket-lock-"));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const refSnapshot = createGitRefSnapshot("");
@@ -547,11 +893,6 @@ test("Option B isolated ticket store preserves another owner's lock after a busy
     expiresAt: Date.now() + 60000
   });
   assert.equal(issued.ok, true);
-  const lockPath = path.join(directory, `${issued.grantId}.json.lock`);
-  fs.writeFileSync(lockPath, JSON.stringify({ ownerId: "live-owner", pid: process.pid }), "utf8");
-  assert.deepEqual(store.requestCancel(issued.grantId), { ok: false, reason: "prototype_ticket_busy" });
-  assert.equal(fs.readFileSync(lockPath, "utf8"), JSON.stringify({ ownerId: "live-owner", pid: process.pid }));
-  fs.rmSync(lockPath);
   assert.equal(store.claim({ grantId: issued.grantId, callerHash, workspaceHash: "4".repeat(64), batchId: "5".repeat(32), expectedDiffHash: preview.diffHash }).ok, true);
   const sharedGate = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
   const workerScript = [

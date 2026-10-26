@@ -826,7 +826,7 @@ test("V2-INTEGRATION: task worktree refs are isolated from source refs", async (
   assert.equal(prepared.ok, true, JSON.stringify(prepared));
   const started = await runtime.startParallelBatch({ planId: prepared.planId, planHash: prepared.planHash }, workspace);
   const ready = await waitForBatch(runtime, workspace, started.batchId, ["ready_for_approval", "blocked", "failed"]);
-  assert.equal(ready.status, "ready_for_approval");
+  assert.equal(ready.status, "ready_for_approval", JSON.stringify({ summary: ready }));
   assert.equal(ready.tasks[0].status, "completed");
   assert.equal(workerRefCreated, true);
   assert.equal(workerRemotes, "");

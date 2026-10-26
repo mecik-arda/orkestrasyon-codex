@@ -422,6 +422,71 @@ test("OPT-01g2: geçersiz pozitif olmayan PID lease kayıtları bayatlık eşiğ
   assert.equal(invalidLeasePaths.every((leasePath) => !fs.existsSync(leasePath)), true);
 });
 
+test("OPT-01g3: yeniden kullanılan writer intent stale cleanup öncesinde tazelenir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-stale-writer-intent-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const executionId = "stale-writer-intent";
+  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
+  const writerIntentPath = path.join(lockDirectory, workspaceHash, `writer-${executionHash}.intent`);
+  fs.mkdirSync(path.dirname(writerIntentPath), { recursive: true });
+  fs.writeFileSync(writerIntentPath, JSON.stringify({ priority: 0, enqueuedAt: Date.now() - 2000 }), "utf8");
+  const staleAt = new Date(Date.now() - 120000);
+  fs.utimesSync(writerIntentPath, staleAt, staleAt);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 60000, maxWaitAttempts: 0 });
+  t.after(() => coordinator.release(executionId));
+
+  assert.ok(await coordinator.acquire(root, "edit", executionId));
+  assert.equal(fs.existsSync(writerIntentPath), false);
+  assert.equal(coordinator.assertOwner(root, executionId), true);
+});
+
+test("OPT-01g4: writer intent tazeleme hatası yapılandırılmış bekleme sınırında kapanır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-writer-intent-refresh-error-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const executionId = "writer-intent-refresh-error";
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
+  const writerIntentPath = path.join(lockDirectory, workspaceHash, `writer-${executionHash}.intent`);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
+  const originalUtimesSync = fs.utimesSync;
+  let injectedFailure = false;
+  fs.utimesSync = function (filePath, ...args) {
+    if (String(filePath) === writerIntentPath) {
+      injectedFailure = true;
+      const error = new Error("simulated writer intent refresh failure");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalUtimesSync.call(this, filePath, ...args);
+  };
+  t.after(() => {
+    fs.utimesSync = originalUtimesSync;
+    coordinator.cancel(executionId);
+    coordinator.release(executionId);
+  });
+
+  const acquisitionPromise = coordinator.acquire(root, "edit", executionId);
+  let timedOut = false;
+  const acquisition = await Promise.race([
+    acquisitionPromise,
+    new Promise((resolve) => setTimeout(() => {
+      timedOut = true;
+      resolve(null);
+    }, 500))
+  ]);
+  if (timedOut) {
+    coordinator.cancel(executionId);
+    await acquisitionPromise;
+  }
+
+  assert.equal(injectedFailure, true);
+  assert.equal(timedOut, false);
+  assert.equal(acquisition, null);
+});
+
 test("OPT-01h: farklı workspace'ler aynı kilit dizininde birbirini engellemez", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-isolation-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

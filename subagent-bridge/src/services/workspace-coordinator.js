@@ -138,6 +138,13 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
           fs.writeFileSync(writerIntentPath(workspace, executionId), JSON.stringify({ priority, enqueuedAt }), { flag: "wx" });
         } catch (error) {
           if (error.code !== "EEXIST") return false;
+          const intentPath = writerIntentPath(workspace, executionId);
+          const refreshedAt = new Date();
+          try {
+            fs.utimesSync(intentPath, refreshedAt, refreshedAt);
+          } catch {
+            return false;
+          }
         }
         return true;
       }) === true;
@@ -223,6 +230,13 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
         continue;
       }
       if (next.mode === "edit" && !registerWriterIntent(workspace, next.executionId, next.priority, next.enqueuedAt)) {
+        next.waitAttempts = (next.waitAttempts || 0) + 1;
+        if (next.waitAttempts > maxWaitAttempts) {
+          queue.splice(queue.indexOf(next), 1);
+          clearWriterIntent(workspace, next.executionId);
+          next.resolve(null);
+          continue;
+        }
         scheduleDrain(workspace, queue);
         break;
       }

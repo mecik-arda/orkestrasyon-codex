@@ -21,37 +21,106 @@ function ticketPath(directory, grantId) {
   return path.join(directory, `${grantId}.json`);
 }
 
-export function createPreauthorizedIntegrationTicketStore({ directory, clock = () => Date.now() } = {}) {
+export function createPreauthorizedIntegrationTicketStore({ directory, clock = () => Date.now(), beforeAtomicReplace = () => {}, afterAtomicPublish = () => {} } = {}) {
   if (!directory) throw new Error("prototype ticket directory is required");
   fs.mkdirSync(directory, { recursive: true });
 
-  function update(grantId, mutator) {
-    const storedPath = ticketPath(directory, grantId);
-    const lockPath = `${storedPath}.lock`;
+  const statuses = new Set(["issued", "applying", "cancel_requested", "committing", "committed", "applied", "rejected", "cancelled"]);
+  const ticketKeys = ["acceptedTasks", "baseCommit", "batchId", "callerHash", "changePayloadHash", "changes", "diff", "diffHash", "diffPreviewHash", "expiresAt", "filesChanged", "grantId", "permittedRefTransitions", "sourceFileStates", "sourceRefHash", "sourceRefSnapshot", "status", "version", "workspaceHash"];
+  const stateKeys = new Set(["cancelRequestedAt", "cancelledAt", "claimedAt", "commitStartedAt", "committedAt", "finishedAt", "result", "status"]);
+
+  function statePath(grantId, sequence) {
+    return path.join(directory, `${path.basename(ticketPath(directory, grantId), ".json")}.state.${String(sequence).padStart(14, "0")}.json`);
+  }
+
+  function validTicket(ticket, grantId) {
+    return Boolean(ticket && ticket.version === 1 && ticket.grantId === grantId && ticket.status === "issued"
+      && Object.keys(ticket).sort().join("|") === ticketKeys.join("|")
+      && /^[a-f0-9]{64}$/.test(ticket.callerHash || "") && /^[a-f0-9]{64}$/.test(ticket.workspaceHash || "")
+      && /^[a-f0-9]{32,64}$/.test(ticket.batchId || "") && /^[a-f0-9]{40,64}$/.test(ticket.baseCommit || "")
+      && /^[a-f0-9]{64}$/.test(ticket.diffHash || "") && /^[a-f0-9]{64}$/.test(ticket.diffPreviewHash || "")
+      && /^[a-f0-9]{64}$/.test(ticket.changePayloadHash || "") && integrationPayloadHash(ticket.changes) === ticket.changePayloadHash
+      && typeof ticket.diff === "string" && Array.isArray(ticket.filesChanged) && Array.isArray(ticket.changes)
+      && Array.isArray(ticket.sourceFileStates) && Array.isArray(ticket.acceptedTasks)
+      && /^[a-f0-9]{64}$/.test(ticket.sourceRefHash || "") && validateGitRefSnapshot(ticket.sourceRefSnapshot)
+      && ticket.sourceRefSnapshot.refsHash === ticket.sourceRefHash && Array.isArray(ticket.permittedRefTransitions)
+      && Number.isFinite(ticket.expiresAt));
+  }
+
+  function validStateRecord(record, sequence) {
+    return Boolean(record && record.version === 1 && record.sequence === sequence && statuses.has(record.status)
+      && record.dynamic && typeof record.dynamic === "object" && !Array.isArray(record.dynamic)
+      && Object.keys(record).sort().join("|") === "dynamic|sequence|status|version"
+      && Object.keys(record.dynamic).every((key) => stateKeys.has(key)) && record.dynamic.status === record.status);
+  }
+
+  function writeNewFile(filePath, value, metadata) {
+    const temporaryPath = `${filePath}.${crypto.randomBytes(8).toString("hex")}.tmp`;
     let descriptor;
-    const ownerId = crypto.randomBytes(16).toString("hex");
     try {
-      descriptor = fs.openSync(lockPath, "wx");
-      fs.writeFileSync(descriptor, JSON.stringify({ ownerId, pid: process.pid }), "utf8");
-      const ticket = JSON.parse(fs.readFileSync(storedPath, "utf8"));
-      const next = mutator(ticket);
-      if (!next) return { ok: false, reason: "prototype_ticket_state_changed" };
-      const temporaryPath = `${storedPath}.${crypto.randomBytes(8).toString("hex")}.tmp`;
-      fs.writeFileSync(temporaryPath, `${JSON.stringify(next)}\n`, { encoding: "utf8", flag: "wx" });
-      fs.renameSync(temporaryPath, storedPath);
-      return { ok: true, ticket: next };
+      descriptor = fs.openSync(temporaryPath, "wx", 0o600);
+      fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`, "utf8");
+      fs.fsyncSync(descriptor);
+      fs.closeSync(descriptor);
+      descriptor = undefined;
+      beforeAtomicReplace(metadata);
+      fs.linkSync(temporaryPath, filePath);
+      afterAtomicPublish(metadata);
+      return { ok: true };
     } catch (error) {
-      return { ok: false, reason: error.code === "EEXIST" ? "prototype_ticket_busy" : "prototype_ticket_unavailable" };
+      return { ok: false, reason: error.code === "EEXIST" ? "prototype_ticket_state_changed" : "prototype_ticket_unavailable" };
     } finally {
-      if (descriptor !== undefined) {
-        fs.closeSync(descriptor);
-        try {
-          const lockOwner = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-          if (lockOwner.ownerId === ownerId && lockOwner.pid === process.pid) fs.rmSync(lockPath, { force: true });
-        } catch {
-        }
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+      try {
+        fs.rmSync(temporaryPath, { force: true });
+      } catch {
       }
     }
+  }
+
+  function read(grantId) {
+    try {
+      const ticket = JSON.parse(fs.readFileSync(ticketPath(directory, grantId), "utf8"));
+      if (!validTicket(ticket, grantId)) return null;
+      const stateNames = fs.readdirSync(directory).filter((name) => name.startsWith(`${grantId}.state.`) && name.endsWith(".json"));
+      const states = stateNames.map((name) => {
+        const match = new RegExp(`^${grantId}\\.state\\.(\\d{14})\\.json$`).exec(name);
+        if (!match) return null;
+        const sequence = Number(match[1]);
+        const record = JSON.parse(fs.readFileSync(path.join(directory, name), "utf8"));
+        return validStateRecord(record, sequence) ? record : null;
+      });
+      if (states.length === 0 || states.some((state) => state === null)) return null;
+      states.sort((left, right) => left.sequence - right.sequence);
+      if (states.some((state, index) => state.sequence !== index)) return null;
+      const allowedTransitions = {
+        issued: new Set(["applying", "cancelled"]),
+        applying: new Set(["cancel_requested", "committing", "rejected"]),
+        cancel_requested: new Set(["cancelled", "rejected"]),
+        committing: new Set(["committed", "rejected"]),
+        committed: new Set(["applied"]),
+        applied: new Set(),
+        rejected: new Set(),
+        cancelled: new Set()
+      };
+      if (states[0].status !== "issued" || states.some((state, index) => index > 0 && !allowedTransitions[states[index - 1].status].has(state.status))) return null;
+      return { ...ticket, ...states.at(-1).dynamic, status: states.at(-1).status, operationSequence: states.at(-1).sequence };
+    } catch {
+      return null;
+    }
+  }
+
+  function update(grantId, mutator) {
+    const ticket = read(grantId);
+    if (!ticket) return { ok: false, reason: "prototype_ticket_invalid" };
+    const next = mutator(ticket);
+    if (!next) return { ok: false, reason: "prototype_ticket_state_changed" };
+    const dynamic = Object.fromEntries(Object.entries(next).filter(([key]) => !ticketKeys.includes(key) && key !== "operationSequence"));
+    dynamic.status = next.status;
+    const sequence = ticket.operationSequence + 1;
+    const metadata = { operation: "update", status: next.status, grantId, sequence };
+    const published = writeNewFile(statePath(grantId, sequence), { version: 1, sequence, status: next.status, dynamic }, metadata);
+    return published.ok ? { ok: true, ticket: next } : published;
   }
 
   function issue({ callerHash, workspaceHash, batchId, preview, acceptedTasks, sourceRefHash, sourceRefSnapshot, permittedRefTransitions = [], baseCommit, expiresAt } = {}) {
@@ -102,31 +171,32 @@ export function createPreauthorizedIntegrationTicketStore({ directory, clock = (
       permittedRefTransitions: JSON.parse(JSON.stringify(permittedRefTransitions)),
       expiresAt
     };
+    if (!validTicket(ticket, grantId)) return { ok: false, reason: "prototype_authorization_invalid" };
     const storedPath = ticketPath(directory, grantId);
-    try {
-      const temporaryPath = `${storedPath}.${crypto.randomBytes(8).toString("hex")}.tmp`;
-      fs.writeFileSync(temporaryPath, `${JSON.stringify(ticket)}\n`, { encoding: "utf8", flag: "wx" });
-      fs.renameSync(temporaryPath, storedPath);
-      return { ok: true, grantId };
-    } catch {
-      return { ok: false, reason: "prototype_ticket_unavailable" };
+    const savedTicket = writeNewFile(storedPath, ticket, { operation: "issue", status: ticket.status, grantId });
+    if (!savedTicket.ok) return savedTicket;
+    const savedState = writeNewFile(statePath(grantId, 0), { version: 1, sequence: 0, status: "issued", dynamic: { status: "issued" } }, { operation: "issue_state", status: "issued", grantId });
+    if (!savedState.ok) {
+      try {
+        fs.rmSync(storedPath, { force: true });
+      } catch {
+      }
+      return savedState;
     }
+    return { ok: true, grantId };
   }
 
   function claim({ grantId, callerHash, workspaceHash, batchId, expectedDiffHash }) {
-    return update(grantId, (ticket) => {
-      if (ticket.status !== "issued" || ticket.callerHash !== callerHash || ticket.workspaceHash !== workspaceHash
-        || ticket.batchId !== batchId || ticket.diffHash !== expectedDiffHash || ticket.expiresAt <= clock()) return null;
-      return { ...ticket, status: "applying", claimedAt: clock() };
-    });
+    return update(grantId, (ticket) => ticket.status === "issued" && ticket.callerHash === callerHash && ticket.workspaceHash === workspaceHash
+      && ticket.batchId === batchId && ticket.diffHash === expectedDiffHash && ticket.expiresAt > clock()
+      ? { ...ticket, status: "applying", claimedAt: clock() }
+      : null);
   }
 
   function requestCancel(grantId) {
-    return update(grantId, (ticket) => {
-      if (ticket.status === "issued") return { ...ticket, status: "cancelled", cancelledAt: clock() };
-      if (ticket.status === "applying") return { ...ticket, status: "cancel_requested", cancelRequestedAt: clock() };
-      return null;
-    });
+    return update(grantId, (ticket) => ticket.status === "issued"
+      ? { ...ticket, status: "cancelled", cancelledAt: clock() }
+      : ticket.status === "applying" ? { ...ticket, status: "cancel_requested", cancelRequestedAt: clock() } : null);
   }
 
   function beginCommit(grantId) {
@@ -136,20 +206,23 @@ export function createPreauthorizedIntegrationTicketStore({ directory, clock = (
   }
 
   function finish(grantId, status, result = null) {
-    return update(grantId, (ticket) => new Set(["applying", "committing", "cancel_requested"]).has(ticket.status)
-      ? { ...ticket, status, result, finishedAt: clock() }
+    if (!new Set(["applied", "rejected", "cancelled"]).has(status)) return { ok: false, reason: "prototype_ticket_state_changed" };
+    return update(grantId, (ticket) => {
+      const allowed = status === "applied"
+        ? ticket.status === "committed"
+        : status === "cancelled" ? ticket.status === "cancel_requested" || ticket.status === "issued"
+          : new Set(["applying", "committing", "cancel_requested"]).has(ticket.status);
+      return allowed ? { ...ticket, status, result, finishedAt: clock() } : null;
+    });
+  }
+
+  function recordCommit(grantId, result = null) {
+    return update(grantId, (ticket) => ticket.status === "committing"
+      ? { ...ticket, status: "committed", result, committedAt: clock() }
       : null);
   }
 
-  function read(grantId) {
-    try {
-      return JSON.parse(fs.readFileSync(ticketPath(directory, grantId), "utf8"));
-    } catch {
-      return null;
-    }
-  }
-
-  return { issue, claim, requestCancel, beginCommit, finish, read };
+  return { issue, claim, requestCancel, beginCommit, recordCommit, finish, read };
 }
 
 export function createPreauthorizedIntegrationPrototype({
@@ -162,7 +235,7 @@ export function createPreauthorizedIntegrationPrototype({
 } = {}) {
   if (!manager || typeof manager.revalidateIntegration !== "function" || typeof manager.applyIntegration !== "function") throw new Error("production Git integration functions are required");
   if (!workspaceCoordinator || typeof workspaceCoordinator.acquire !== "function" || typeof workspaceCoordinator.release !== "function" || typeof workspaceCoordinator.assertOwner !== "function") throw new Error("workspace coordinator is required");
-  if (!ticketStore || typeof ticketStore.claim !== "function" || typeof ticketStore.finish !== "function") throw new Error("prototype ticket store is required");
+  if (!ticketStore || typeof ticketStore.claim !== "function" || typeof ticketStore.finish !== "function" || typeof ticketStore.recordCommit !== "function") throw new Error("prototype ticket store is required");
   if (!trustedWorkspace || !workspaceHash) throw new Error("prototype workspace binding is required");
 
   async function execute({ grantId, callerHash, request, hooks = {} } = {}) {
@@ -178,8 +251,8 @@ export function createPreauthorizedIntegrationPrototype({
     const lockId = crypto.randomUUID();
     const acquired = await workspaceCoordinator.acquire(trustedWorkspace, "edit", lockId);
     if (!acquired) {
-      ticketStore.finish(grantId, "rejected", "workspace_lock_unavailable");
-      return { ok: false, reason: "workspace_lock_unavailable" };
+      const finished = ticketStore.finish(grantId, "rejected", "workspace_lock_unavailable");
+      return { ok: false, reason: "workspace_lock_unavailable", recoveryRequired: !finished.ok };
     }
     const assertOwner = () => workspaceCoordinator.assertOwner(trustedWorkspace, lockId) === true;
     try {
@@ -217,14 +290,21 @@ export function createPreauthorizedIntegrationPrototype({
       if (!cleanBeforeApply.ok || cleanBeforeApply.head !== ticket.baseCommit) return reject(cleanBeforeApply.reason || "source_head_changed");
       if (beforeApply.head !== ticket.baseCommit || beforeApply.refsHash !== refState.refsHash) return reject("source_ref_changed");
       if (canonicalJson(identitiesBeforeApply) !== canonicalJson(preparation.sourceFileIdentities)) return reject("source_file_identity_changed");
-      if (!ticketStore.beginCommit(grantId).ok) {
+      const commitDecision = ticketStore.beginCommit(grantId);
+      if (!commitDecision.ok) {
         const current = ticketStore.read(grantId);
-        if (current?.status === "cancel_requested") ticketStore.finish(grantId, "cancelled", "cancel_requested");
-        else if (current?.status === "applying" && current.expiresAt <= clock()) ticketStore.finish(grantId, "rejected", "prototype_grant_expired");
+        if (current?.status === "cancel_requested") {
+          const cancelled = ticketStore.finish(grantId, "cancelled", "cancel_requested");
+          return { ok: false, reason: cancelled.ok ? "cancelled" : "prototype_receipt_recovery_required", recoveryRequired: !cancelled.ok };
+        }
+        if (current?.status === "applying" && current.expiresAt <= clock()) {
+          const rejected = ticketStore.finish(grantId, "rejected", "prototype_grant_expired");
+          return { ok: false, reason: rejected.ok ? "prototype_grant_expired" : "prototype_receipt_recovery_required", recoveryRequired: !rejected.ok };
+        }
         return {
           ok: false,
-          reason: current?.status === "cancel_requested" ? "cancelled"
-            : current?.expiresAt <= clock() ? "prototype_grant_expired" : "prototype_ticket_state_changed"
+          reason: new Set(["applying", "committing"]).has(current?.status) ? "prototype_commit_decision_recovery_required" : "prototype_ticket_state_changed",
+          recoveryRequired: new Set(["applying", "committing"]).has(current?.status)
         };
       }
       if (typeof hooks.afterCommitDecision === "function") await hooks.afterCommitDecision({ grantId, lockId, assertOwner });
@@ -247,26 +327,41 @@ export function createPreauthorizedIntegrationPrototype({
       });
       if (!applied.ok) {
         const recoveryRequired = ["workspace_lock_lost", "promotion_rollback_failed", "promotion_recovery_required"].includes(applied.reason);
-        if (!recoveryRequired) ticketStore.finish(grantId, "rejected", applied.reason);
-        return { ok: false, reason: applied.reason, recoveryRequired };
+        if (recoveryRequired) return { ok: false, reason: applied.reason, recoveryRequired: true };
+        const rejected = ticketStore.finish(grantId, "rejected", applied.reason);
+        return {
+          ok: false,
+          reason: rejected.ok ? applied.reason : "prototype_receipt_recovery_required",
+          recoveryRequired: !rejected.ok
+        };
       }
       if (typeof hooks.afterApplyBeforeReceipt === "function") await hooks.afterApplyBeforeReceipt({ grantId, applied });
-      const receipt = ticketStore.finish(grantId, "applied", { diffHash: applied.integration.diffHash, baseCommit: applied.integration.baseCommit });
-      if (!receipt.ok) return { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true };
+      const committed = ticketStore.recordCommit(grantId, { diffHash: applied.integration.diffHash, baseCommit: applied.integration.baseCommit });
+      if (!committed.ok) return { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true };
       const finalized = manager.finalizePromotion?.(ticket.batchId, { workspaceHash, diffHash: ticket.diffHash, assertLockOwner: assertOwner });
       if (finalized?.ok === false) return { ok: false, reason: finalized.reason, recoveryRequired: true };
+      const receipt = ticketStore.finish(grantId, "applied", { diffHash: applied.integration.diffHash, baseCommit: applied.integration.baseCommit });
+      if (!receipt.ok) return { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true };
       return { ok: true, result: { diffHash: applied.integration.diffHash, filesChanged: applied.integration.filesChanged } };
     } catch {
       const current = ticketStore.read(grantId);
-      if (current?.status === "applying") ticketStore.finish(grantId, "rejected", "prototype_execution_failed");
-      return { ok: false, reason: current?.status === "committing" ? "prototype_recovery_required" : "prototype_execution_failed", recoveryRequired: current?.status === "committing" };
+      if (current?.status === "applying") {
+        const rejected = ticketStore.finish(grantId, "rejected", "prototype_execution_failed");
+        return { ok: false, reason: rejected.ok ? "prototype_execution_failed" : "prototype_receipt_recovery_required", recoveryRequired: !rejected.ok };
+      }
+      const recoveryRequired = new Set(["committing", "committed", "cancel_requested"]).has(current?.status);
+      if (current?.status === "cancel_requested") {
+        const cancelled = ticketStore.finish(grantId, "cancelled", "cancel_requested");
+        return { ok: false, reason: cancelled.ok ? "cancelled" : "prototype_receipt_recovery_required", recoveryRequired: !cancelled.ok };
+      }
+      return { ok: false, reason: recoveryRequired ? "prototype_recovery_required" : "prototype_execution_failed", recoveryRequired };
     } finally {
       workspaceCoordinator.release(lockId);
     }
 
     function reject(reason) {
-      ticketStore.finish(grantId, "rejected", reason);
-      return { ok: false, reason };
+      const finished = ticketStore.finish(grantId, "rejected", reason);
+      return { ok: false, reason: finished.ok ? reason : "prototype_receipt_recovery_required", recoveryRequired: !finished.ok };
     }
   }
 
@@ -295,7 +390,8 @@ export function createPreauthorizedIntegrationPrototype({
 
   async function recover({ grantId, callerHash, batchId } = {}) {
     const ticket = ticketStore.read(grantId);
-    if (!ticket || ticket.status !== "committing" || ticket.callerHash !== callerHash || ticket.workspaceHash !== workspaceHash || ticket.batchId !== batchId) {
+    if (!ticket || !new Set(["applying", "committing", "committed", "cancel_requested"]).has(ticket.status)
+      || ticket.callerHash !== callerHash || ticket.workspaceHash !== workspaceHash || ticket.batchId !== batchId) {
       return { ok: false, reason: "prototype_recovery_not_required" };
     }
     const lockId = crypto.randomUUID();
@@ -306,16 +402,30 @@ export function createPreauthorizedIntegrationPrototype({
       if (!assertOwner()) return { ok: false, reason: "workspace_lock_lost", recoveryRequired: true };
       const recovered = manager.recoverPendingPromotions({ assertLockOwner: assertOwner });
       if (!recovered.ok) return { ok: false, reason: recovered.reason, recoveryRequired: true };
-      const committed = manager.recoveredCommittedPromotions().some((promotion) => promotion.batchId === ticket.batchId && promotion.diffHash === ticket.diffHash);
-      if (committed) {
-        const receipt = ticketStore.finish(grantId, "applied", { diffHash: ticket.diffHash, baseCommit: ticket.baseCommit });
-        if (!receipt.ok) return { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true };
+      const committedMarker = manager.recoveredCommittedPromotions().some((promotion) => promotion.batchId === ticket.batchId && promotion.diffHash === ticket.diffHash);
+      if (ticket.status === "applying" && committedMarker) return { ok: false, reason: "prototype_operation_state_mismatch", recoveryRequired: true };
+      if (ticket.status === "applying" || ticket.status === "cancel_requested") {
+        const terminal = ticket.status === "cancel_requested" ? "cancelled" : "rejected";
+        const receipt = ticketStore.finish(grantId, terminal, "recovered_before_commit_decision");
+        return receipt.ok ? { ok: true, recovered: "not_committed", applied: false } : { ...receipt, recoveryRequired: true };
+      }
+      if (committedMarker || ticket.status === "committed") {
+        const commitReceipt = ticket.status === "committing"
+          ? ticketStore.recordCommit(grantId, { diffHash: ticket.diffHash, baseCommit: ticket.baseCommit })
+          : { ok: true };
+        if (!commitReceipt.ok) return { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true };
         const finalized = manager.finalizePromotion?.(ticket.batchId, { workspaceHash, diffHash: ticket.diffHash, assertLockOwner: assertOwner });
         if (finalized?.ok === false) return { ok: false, reason: finalized.reason, recoveryRequired: true };
+        const receipt = ticketStore.finish(grantId, "applied", { diffHash: ticket.diffHash, baseCommit: ticket.baseCommit });
+        if (!receipt.ok) return { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true };
         return { ok: true, recovered: "committed", applied: true };
       }
       const rejected = ticketStore.finish(grantId, "rejected", "recovered_without_commit_marker");
-      return rejected.ok ? { ok: true, recovered: "rolled_back", applied: false } : rejected;
+      return rejected.ok
+        ? { ok: true, recovered: "rolled_back", applied: false }
+        : { ok: false, reason: "prototype_receipt_recovery_required", recoveryRequired: true };
+    } catch {
+      return { ok: false, reason: "prototype_recovery_required", recoveryRequired: true };
     } finally {
       workspaceCoordinator.release(lockId);
     }

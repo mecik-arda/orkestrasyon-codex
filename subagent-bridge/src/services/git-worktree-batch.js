@@ -1346,7 +1346,7 @@ export function createGitWorktreeBatchManager({
       const current = currentStates.find((state) => state.relativePath === relativePath);
       if (!originalGit.ok || !currentGit.ok) return { ok: false, reason: "source_snapshot_invalid" };
       if (original.state !== originalGit.state || original.state !== currentGit.state
-        || (original.state === "present" && (original.sha256 !== originalGit.sha256 || original.fileMode !== originalGit.fileMode
+        || (original.state === "present" && (original.fileMode !== originalGit.fileMode
           || originalGit.objectId !== currentGit.objectId || originalGit.fileMode !== currentGit.fileMode
           || current.sha256 !== original.sha256 || current.fileMode !== original.fileMode))
         || (original.state === "absent" && current.state !== "absent")) {

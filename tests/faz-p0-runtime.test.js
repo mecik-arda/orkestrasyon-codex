@@ -10,8 +10,11 @@ import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runti
 import { resolveRuntimeRoute } from "../subagent-bridge/src/runtime/router.js";
 import { antigravityProbeSchema, publicToolSchemas, createMcpToolHandlers } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { resolveTrustedWorkspace } from "../subagent-bridge/src/frontends/mcp/workspace-context.js";
+import { createWorkspaceCoordinator } from "../subagent-bridge/src/services/workspace-coordinator.js";
+import { getCostBudgetSnapshot, withMetricLock } from "../subagent-bridge/src/metrics.js";
 import { releaseAllLocks } from "./support/workspace-lock.js";
 import { ensureRuntimeDirectories } from "../subagent-bridge/src/config.js";
+import { validateSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 
 function successResult(backend, model, result = "ok") {
   return {
@@ -446,6 +449,8 @@ test("P0-UNKNOWN-COST: bilinmeyen maliyet sınırlı retry rezervini kullanır",
 test("P0-CANCEL-BACKOFF: cancellation prevents a post-backoff execution", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-backoff-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.reliability = { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 1, maxAttempts: 2, maxUnknownAttemptCostUsd: 0.1 };
   let attempts = 0;
   let releaseBackoff;
   const backoffStarted = new Promise((resolve) => {
@@ -457,11 +462,11 @@ test("P0-CANCEL-BACKOFF: cancellation prevents a post-backoff execution", async 
   });
   const codex = createFakeAdapter("codex", async (request) => {
     attempts += 1;
-    if (attempts === 1) return failureResult("codex", request.model, "network error", "network");
+    if (attempts === 1) return { ...failureResult("codex", request.model, "network error", "network"), metrics: { retries: 0, totalCostUsd: 0.25 } };
     return successResult("codex", request.model);
   });
   const runtime = createBridgeRuntime({
-    configuration: createConfiguration(root, root),
+    configuration,
     adapters: { codex },
     sleep: async () => {
       releaseBackoff();
@@ -476,24 +481,198 @@ test("P0-CANCEL-BACKOFF: cancellation prevents a post-backoff execution", async 
   const result = await running;
   assert.equal(result.reason, "cancelled");
   assert.equal(attempts, 1);
+  assert.equal(result.metrics.attempts.length, 1);
+  assert.equal(result.metrics.attempts[0].totalCostUsd, 0.25);
+  assert.equal(result.metrics.totalCostUsd, 0.25);
+  assert.equal(validateSubagentResult(result).success, true);
+  const budget = await getCostBudgetSnapshot(configuration);
+  assert.equal(budget.dailySpentUsd, 0.25);
+});
+
+test("P0-CANCEL-COST-RESERVATION: cancellation while cost lock is pending does not queue a workspace writer", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-cost-lock-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.reliability = { dailyCostLimitUsd: 10, monthlyCostLimitUsd: 10 };
+  const workspaceCoordinator = createWorkspaceCoordinator({ lockDirectory: path.join(configuration.statePaths.cache, "locks") });
+  const workspaceBlocker = await workspaceCoordinator.acquire(root, "read_only", "cost-lock-reader");
+  assert.ok(workspaceBlocker);
+  const metricLockPath = path.join(configuration.statePaths.logs, "metrics", "cost-budget.lock");
+  fs.mkdirSync(path.dirname(metricLockPath), { recursive: true });
+  let releaseMetricLock;
+  let notifyMetricLockAcquired;
+  const metricLockAcquired = new Promise((resolve) => { notifyMetricLockAcquired = resolve; });
+  const metricLockGate = new Promise((resolve) => { releaseMetricLock = resolve; });
+  const heldMetricLock = withMetricLock(metricLockPath, async () => {
+    notifyMetricLockAcquired();
+    await metricLockGate;
+  });
+  await metricLockAcquired;
+  let notifyReservationAttempt;
+  const reservationAttempt = new Promise((resolve) => { notifyReservationAttempt = resolve; });
+  const originalOpenSync = fs.openSync;
+  fs.openSync = function (filePath, ...args) {
+    if (path.resolve(String(filePath)) === path.resolve(metricLockPath)) notifyReservationAttempt();
+    return originalOpenSync.call(this, filePath, ...args);
+  };
+  let running;
+  let completed = false;
+  try {
+    const adapter = createAdapter("codex", {
+      canRead: true,
+      canWrite: true,
+      supportsSandbox: true,
+      supportsModelSelection: true
+    });
+    adapter.execute = async () => successResult("codex", "gpt-6.1-sol");
+    const runtime = createBridgeRuntime({ configuration, adapters: { codex: adapter }, sleep: async () => {} });
+    const controller = new AbortController();
+    running = runtime.run({ target: "codex", prompt: "inspect", mode: "edit", trustedWorkspace: root, caller: "codex_edit", delegationDepth: 0, executionId: "cancel-during-cost-reservation", abortSignal: controller.signal })
+      .then((result) => { completed = true; return result; });
+    await reservationAttempt;
+    fs.openSync = originalOpenSync;
+    controller.abort();
+  } finally {
+    fs.openSync = originalOpenSync;
+    releaseMetricLock();
+    await heldMetricLock;
+  }
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const workspaceLockDirectory = path.join(configuration.statePaths.cache, "locks", "coordinator-v2", workspaceHash);
+  const deadline = Date.now() + 3000;
+  while (!completed && Date.now() < deadline) {
+    const hasWriterIntent = fs.existsSync(workspaceLockDirectory)
+      && fs.readdirSync(workspaceLockDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent"));
+    if (hasWriterIntent) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const intentAppeared = fs.existsSync(workspaceLockDirectory)
+    && fs.readdirSync(workspaceLockDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent"));
+  workspaceCoordinator.release("cost-lock-reader");
+  const result = await running;
+  assert.equal(intentAppeared, false);
+  assert.equal(result.reason, "cancelled");
+});
+
+test("P0-CANCEL-ADMISSION: cancellation after slot grant prevents provider execution", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-admission-race-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.reliability = { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 1, maxAttempts: 1, maxUnknownAttemptCostUsd: 0.1 };
+  configuration.orchestration = { providerAdmission: { defaultConcurrency: 1 }, readOnlyCache: { enabled: false } };
+  let calls = 0;
+  let releaseFirstExecution;
+  let notifyFirstExecution;
+  const firstExecutionStarted = new Promise((resolve) => { notifyFirstExecution = resolve; });
+  const firstExecutionGate = new Promise((resolve) => { releaseFirstExecution = resolve; });
+  const adapter = createAdapter("codex", {
+    canRead: true,
+    canWrite: true,
+    supportsSandbox: true,
+    supportsModelSelection: true
+  });
+  adapter.execute = async (request) => {
+    calls += 1;
+    if (request.prompt === "first") {
+      notifyFirstExecution();
+      await firstExecutionGate;
+    }
+    return successResult("codex", "gpt-6.1-sol");
+  };
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex: adapter }, sleep: async () => {} });
+  const first = runtime.run({ target: "codex", prompt: "first", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0, executionId: "admission-slot-owner" });
+  await firstExecutionStarted;
+  const controller = new AbortController();
+  let signalListeners = 0;
+  let notifyAdmissionQueued;
+  const admissionQueued = new Promise((resolve) => { notifyAdmissionQueued = resolve; });
+  const originalAdd = controller.signal.addEventListener.bind(controller.signal);
+  const originalRemove = controller.signal.removeEventListener.bind(controller.signal);
+  controller.signal.addEventListener = (...args) => {
+    signalListeners += 1;
+    const result = originalAdd(...args);
+    if (signalListeners === 2) notifyAdmissionQueued();
+    return result;
+  };
+  let abortAtAdmissionGrant = true;
+  controller.signal.removeEventListener = (type, ...args) => {
+    if (abortAtAdmissionGrant && type === "abort") {
+      abortAtAdmissionGrant = false;
+      controller.abort();
+    }
+    return originalRemove(type, ...args);
+  };
+  const second = runtime.run({ target: "codex", prompt: "second", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0, executionId: "admission-slot-waiter", abortSignal: controller.signal });
+  await admissionQueued;
+  releaseFirstExecution();
+  const firstResult = await first;
+  const secondResult = await second;
+  assert.equal(firstResult.ok, true);
+  assert.equal(secondResult.reason, "cancelled");
+  assert.equal(secondResult.metrics.adapterAttempts, 0);
+  assert.equal(validateSubagentResult(secondResult).success, true);
+  assert.equal(calls, 1);
+  const budget = await getCostBudgetSnapshot(configuration);
+  assert.equal(budget.dailySpentUsd, 0);
+});
+
+test("P0-CANCEL-COST: post-provider cancellation preserves actual attempt cost", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-provider-cost-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.reliability = { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 1, maxAttempts: 1, maxUnknownAttemptCostUsd: 0.1 };
+  let resolveExecution;
+  let notifyExecutionStarted;
+  const executionStarted = new Promise((resolve) => { notifyExecutionStarted = resolve; });
+  const adapter = createAdapter("codex", {
+    canRead: true,
+    canWrite: true,
+    supportsSandbox: true,
+    supportsModelSelection: true
+  });
+  adapter.execute = async () => {
+    notifyExecutionStarted();
+    return new Promise((resolve) => { resolveExecution = resolve; });
+  };
+  adapter.cancel = async () => {
+    resolveExecution({ ...successResult("codex", "gpt-6.1-sol"), metrics: { retries: 0, totalCostUsd: 0.42 } });
+  };
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex: adapter }, sleep: async () => {} });
+  const executionId = "cancel-after-provider-cost";
+  const running = runtime.run({ target: "codex", prompt: "inspect", mode: "read_only", trustedWorkspace: root, caller: "test", delegationDepth: 0, executionId });
+  await executionStarted;
+  assert.equal(await runtime.cancel(executionId), true);
+  const result = await running;
+  assert.equal(result.reason, "cancelled");
+  assert.equal(result.metrics.attempts.length, 1);
+  assert.equal(result.metrics.attempts[0].totalCostUsd, 0.42);
+  assert.equal(result.metrics.totalCostUsd, 0.42);
+  assert.equal(validateSubagentResult(result).success, true);
+  const budget = await getCostBudgetSnapshot(configuration);
+  assert.equal(budget.dailySpentUsd, 0.42);
 });
 
 test("P0-CANCEL-ABORT: abort listener adapter iptal reddini yakalar", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-cancel-abort-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root, root);
+  configuration.reliability = { dailyCostLimitUsd: 1, monthlyCostLimitUsd: 1, maxAttempts: 2, maxUnknownAttemptCostUsd: 0.1 };
   let startExecution;
   let finishExecution;
   const executionStarted = new Promise((resolve) => { startExecution = resolve; });
   const executionFinished = new Promise((resolve) => { finishExecution = resolve; });
+  let attempts = 0;
   const codex = createFakeAdapter("codex", async (request) => {
+    attempts += 1;
+    if (attempts === 1) return { ...failureResult("codex", request.model, "network error", "network"), metrics: { retries: 0, totalCostUsd: 0.25 } };
     startExecution();
     await executionFinished;
-    return successResult("codex", request.model);
+    throw new DOMException("The operation was aborted", "AbortError");
   });
   codex.cancel = async () => {
     throw new Error("adapter cancel failed");
   };
-  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { codex }, sleep: async () => {} });
+  const runtime = createBridgeRuntime({ configuration, adapters: { codex }, sleep: async () => {} });
   const controller = new AbortController();
   let unhandledReason = null;
   const onUnhandledRejection = (reason) => { unhandledReason = reason; };
@@ -507,6 +686,13 @@ test("P0-CANCEL-ABORT: abort listener adapter iptal reddini yakalar", async (t) 
   finishExecution();
   const result = await running;
   assert.equal(result.reason, "cancelled");
+  assert.equal(result.metrics.adapterAttempts, 2);
+  assert.equal(result.metrics.attempts.length, 2);
+  assert.equal(result.metrics.attempts[0].totalCostUsd, 0.25);
+  assert.equal(result.metrics.attempts[1].totalCostUsd, null);
+  assert.equal(result.metrics.totalCostUsd, null);
+  const resultValidation = validateSubagentResult(result);
+  assert.equal(resultValidation.success, true, JSON.stringify(resultValidation.error?.issues));
 });
 
 test("P0-TIMEOUT: returned read-only timeout retains classification and retries", async (t) => {

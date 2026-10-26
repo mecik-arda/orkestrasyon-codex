@@ -112,11 +112,8 @@ export function runProcess(executable, args, options = {}) {
       shell: false,
       windowsHide: true,
       detached: process.platform !== "win32",
-      signal: abortController.signal,
       stdio: ["pipe", "pipe", "pipe"]
     });
-    options.onSpawn?.(child);
-
     const stdoutChunks = [];
     const stderrChunks = [];
     const stdinBytes = options.stdin === undefined ? 0 : Buffer.byteLength(options.stdin, "utf8");
@@ -129,18 +126,19 @@ export function runProcess(executable, args, options = {}) {
     let settled = false;
     let timedOut = false;
     let forceTerminationTimer = null;
+    let abortExecution;
 
     const attachStreamingDiagnostics = (error) => {
       if (!streamingOutput) return;
-      if (!error.streamResult) {
-        try {
+      try {
+        if (!error.streamResult) {
           error.streamResult = streamingOutputConsumer.snapshot();
-        } catch {
         }
+        error.acceptedStdoutBytes = acceptedStdoutBytes;
+        error.acceptedStderrBytes = acceptedStderrBytes;
+        error.rejectedChunkBytes = rejectedChunkBytes;
+      } catch {
       }
-      error.acceptedStdoutBytes = acceptedStdoutBytes;
-      error.acceptedStderrBytes = acceptedStderrBytes;
-      error.rejectedChunkBytes = rejectedChunkBytes;
     };
 
     const clearTimers = () => {
@@ -148,16 +146,33 @@ export function runProcess(executable, args, options = {}) {
       if (forceTerminationTimer) clearTimeout(forceTerminationTimer);
     };
 
+    const removeAbortListener = () => {
+      if (abortExecution) abortController.signal.removeEventListener("abort", abortExecution);
+    };
+
     const rejectAfterTermination = (error) => {
       if (settled) return;
       settled = true;
       clearTimers();
+      removeAbortListener();
       attachStreamingDiagnostics(error);
-      Object.defineProperties(error, {
-        stdout: { value: Buffer.concat(stdoutChunks).toString("utf8"), enumerable: false },
-        stderr: { value: Buffer.concat(stderrChunks).toString("utf8"), enumerable: false }
-      });
-      killProcessTree(child.pid);
+      try {
+        Object.defineProperties(error, {
+          stdout: { value: Buffer.concat(stdoutChunks).toString("utf8"), enumerable: false },
+          stderr: { value: Buffer.concat(stderrChunks).toString("utf8"), enumerable: false }
+        });
+      } catch {
+      }
+      try {
+        killProcessTree(child.pid);
+      } catch {
+      }
+      if (process.platform === "win32" && child.exitCode === null && !child.killed) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+        }
+      }
       reject(error);
     };
 
@@ -166,7 +181,7 @@ export function runProcess(executable, args, options = {}) {
         timedOut = true;
         const timeoutError = new Error(`Process timed out after ${timeoutMs}ms`);
         const gracefulShutdownMs = options.gracefulShutdownMs ?? 0;
-        if (gracefulShutdownMs > 0 && child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
+        if (process.platform !== "win32" && gracefulShutdownMs > 0 && child.stdin && !child.stdin.destroyed && !child.stdin.writableEnded) {
           child.stdin.end();
           forceTerminationTimer = setTimeout(() => rejectAfterTermination(timeoutError), gracefulShutdownMs);
           forceTerminationTimer.unref?.();
@@ -176,11 +191,14 @@ export function runProcess(executable, args, options = {}) {
       }
     }, timeoutMs);
 
-    abortController.signal.addEventListener("abort", () => {
-      if (!settled) {
-        clearTimers();
-      }
-    }, { once: true });
+    abortExecution = () => {
+      if (settled) return;
+      const abortError = new Error("The operation was aborted");
+      abortError.name = "AbortError";
+      abortError.code = "ABORT_ERR";
+      rejectAfterTermination(abortError);
+    };
+    abortController.signal.addEventListener("abort", abortExecution, { once: true });
 
     const collect = (chunks, chunk, stream) => {
       if (settled) return;
@@ -203,20 +221,29 @@ export function runProcess(executable, args, options = {}) {
         if (stream === "stdout") streamingOutputConsumer?.onStdout(chunk);
         else streamingOutputConsumer?.onStderr(chunk);
       } catch (error) {
-        error.acceptedStdoutBytes = acceptedStdoutBytes;
-        error.acceptedStderrBytes = acceptedStderrBytes;
-        error.rejectedChunkBytes = rejectedChunkBytes;
         rejectAfterTermination(error);
       }
     };
 
     child.stdout.on("data", (chunk) => {
       collect(stdoutChunks, chunk, "stdout");
-      if (!settled) options.onStdout?.(chunk);
+      if (!settled) {
+        try {
+          options.onStdout?.(chunk);
+        } catch (error) {
+          rejectAfterTermination(error);
+        }
+      }
     });
     child.stderr.on("data", (chunk) => {
       collect(stderrChunks, chunk, "stderr");
-      if (!settled) options.onStderr?.(chunk);
+      if (!settled) {
+        try {
+          options.onStderr?.(chunk);
+        } catch (error) {
+          rejectAfterTermination(error);
+        }
+      }
     });
     child.stdin.on("finish", () => {
       if (!stdinWriteError) stdinWriteStatus = "complete";
@@ -234,6 +261,7 @@ export function runProcess(executable, args, options = {}) {
       if (!settled) {
         settled = true;
         clearTimers();
+        removeAbortListener();
         const processError = timedOut ? new Error(`Process timed out after ${timeoutMs}ms`) : error;
         attachStreamingDiagnostics(processError);
         reject(processError);
@@ -241,8 +269,10 @@ export function runProcess(executable, args, options = {}) {
     });
     child.on("close", (code, signal) => {
       if (!settled) {
+        if (timedOut) killProcessTree(child.pid);
         settled = true;
         clearTimers();
+        removeAbortListener();
         if (timedOut) {
           const timeoutError = new Error(`Process timed out after ${timeoutMs}ms`);
           attachStreamingDiagnostics(timeoutError);
@@ -272,11 +302,27 @@ export function runProcess(executable, args, options = {}) {
       }
     });
 
-    if (options.stdin !== undefined) {
-      child.stdin.end(options.stdin);
-    } else if (options.keepStdinOpen !== true) {
-      child.stdin.end();
-    }
+    child.on("spawn", () => {
+      setImmediate(() => {
+        if (settled) {
+          killProcessTree(child.pid);
+          return;
+        }
+        try {
+          options.onSpawn?.(child);
+        } catch (error) {
+          rejectAfterTermination(error);
+          return;
+        }
+        if (abortController.signal.aborted) abortExecution();
+        if (settled) return;
+        if (options.stdin !== undefined) {
+          child.stdin.end(options.stdin);
+        } else if (options.keepStdinOpen !== true) {
+          child.stdin.end();
+        }
+      });
+    });
   });
 }
 

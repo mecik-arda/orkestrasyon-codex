@@ -751,7 +751,8 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
       try {
         const attempts = Array.isArray(result.metrics?.attempts) ? result.metrics.attempts : [];
         const knownAttemptCosts = attempts.length > 0 && attempts.every((attempt) => Number.isFinite(attempt.totalCostUsd));
-        const actualCostUsd = result.metrics?.cacheHit || (attempts.length === 0 && ["queue_unavailable", "provider_admission_unavailable", "cancelled"].includes(result.reason))
+        const cancelledBeforeProvider = result.reason === "cancelled" && result.metrics?.adapterAttempts === 0;
+        const actualCostUsd = result.metrics?.cacheHit || (attempts.length === 0 && ["queue_unavailable", "provider_admission_unavailable"].includes(result.reason)) || cancelledBeforeProvider
           ? 0
           : knownAttemptCosts ? attempts.reduce((total, attempt) => total + attempt.totalCostUsd, 0) : null;
         await settleCostBudget(runtimeConfiguration, executionId, actualCostUsd);
@@ -940,14 +941,25 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     }
     const activeExecution = { adapter, cancelled: false };
     activeExecutions.set(executionId, activeExecution);
+    const abortListener = () => {
+      void cancel(executionId).catch(() => {});
+    };
+    input.abortSignal?.addEventListener?.("abort", abortListener, { once: true });
     let costBudget;
     try {
       costBudget = await reserveCostBudget(runtimeConfiguration, executionId, (budget.maxUnknownAttemptCostUsd || 0) * budget.maxAttempts);
     } catch (error) {
+      input.abortSignal?.removeEventListener?.("abort", abortListener);
       activeExecutions.delete(executionId);
       throw error;
     }
+    if (activeExecution.cancelled || input.abortSignal?.aborted) {
+      input.abortSignal?.removeEventListener?.("abort", abortListener);
+      activeExecutions.delete(executionId);
+      return createRuntimeFailure(route.backend, route.model, "execution cancelled", { reason: "cancelled", reviewContract: reviewContractForFailure() });
+    }
     if (!costBudget.allowed) {
+      input.abortSignal?.removeEventListener?.("abort", abortListener);
       activeExecutions.delete(executionId);
       return createRuntimeFailure(route.backend, route.model, "execution cost budget exhausted", {
         reason: costBudget.reason,
@@ -967,11 +979,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     let observedWebReadStatus = null;
     const attemptRecords = [];
     let cacheKey = null;
-    const abortListener = () => {
-      void cancel(executionId).catch(() => {});
-    };
-    input.abortSignal?.addEventListener?.("abort", abortListener, { once: true });
-    const grant = await coordinator.acquire(trustedWorkspace, input.mode, executionId, profile?.priority || 0);
+    const grant = await coordinator.acquire(trustedWorkspace, input.mode, executionId, profile?.priority || 0, { signal: input.abortSignal });
     if (!grant) {
       activeExecutions.delete(executionId);
       input.abortSignal?.removeEventListener?.("abort", abortListener);
@@ -998,11 +1006,17 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
       }
       while (attemptNumber < budget.maxAttempts) {
         if (activeExecution.cancelled || input.abortSignal?.aborted) {
+          const knownAttemptCosts = attemptRecords.length > 0 && attemptRecords.every((attempt) => Number.isFinite(attempt.totalCostUsd));
           return createRuntimeFailure(route.backend, route.model, "execution cancelled", {
             durationMs: Date.now() - startedAt,
             retries: Math.max(0, attemptNumber - 1),
             adapterAttempts: attemptNumber,
             reason: "cancelled",
+            metrics: {
+              queueWaitMs: totalQueueWaitMs,
+              totalCostUsd: knownAttemptCosts ? totalCostUsd : null,
+              attempts: attemptRecords
+            },
             reviewContract: reviewContractForFailure(attemptNumber > 0 ? "failed" : "not_attempted")
           });
         }
@@ -1044,6 +1058,22 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
               queueWaitMs: totalQueueWaitMs,
               attempts: attemptRecords,
               diagnostics: { failureStage: "provider_admission", providerCode: null }
+            },
+            reviewContract: reviewContractForFailure(attemptNumber > 0 ? "failed" : "not_attempted")
+          });
+        }
+        if (activeExecution.cancelled || input.abortSignal?.aborted) {
+          admission.release();
+          const knownAttemptCosts = attemptRecords.length > 0 && attemptRecords.every((attempt) => Number.isFinite(attempt.totalCostUsd));
+          return createRuntimeFailure(route.backend, route.model, "execution cancelled", {
+            durationMs: Date.now() - startedAt,
+            retries: Math.max(0, attemptNumber - 1),
+            adapterAttempts: attemptNumber,
+            reason: "cancelled",
+            metrics: {
+              queueWaitMs: totalQueueWaitMs,
+              totalCostUsd: knownAttemptCosts ? totalCostUsd : null,
+              attempts: attemptRecords
             },
             reviewContract: reviewContractForFailure(attemptNumber > 0 ? "failed" : "not_attempted")
           });
@@ -1192,19 +1222,6 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
               reviewResultValidated = true;
             }
           }
-          if (activeExecution.cancelled || input.abortSignal?.aborted) {
-            return createRuntimeFailure(route.backend, route.model, "execution cancelled", {
-              durationMs: Date.now() - startedAt,
-              retries: attemptNumber - 1,
-              adapterAttempts: attemptNumber,
-              reason: "cancelled",
-              metrics: {
-                queueWaitMs: totalQueueWaitMs,
-                diagnostics: createProcessFailureDiagnostics(null, { failureStage: "cancelled", providerAdmissionLeaseMs })
-              },
-              reviewContract: reviewContractForFailure("failed")
-            });
-          }
           const costKnown = Number.isFinite(result.metrics?.totalCostUsd);
           const attemptCostUsd = costKnown ? result.metrics.totalCostUsd : 0;
           totalCostUsd += attemptCostUsd;
@@ -1250,6 +1267,21 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
               sourceDeliveryStatus,
               taskFailed: result.ok !== true,
               reviewResultValidated
+            });
+          }
+          if (activeExecution.cancelled || input.abortSignal?.aborted) {
+            return createRuntimeFailure(route.backend, route.model, "execution cancelled", {
+              durationMs: Date.now() - startedAt,
+              retries: attemptNumber - 1,
+              adapterAttempts: attemptNumber,
+              reason: "cancelled",
+              metrics: {
+                queueWaitMs: totalQueueWaitMs,
+                totalCostUsd: knownAttemptCosts ? totalCostUsd : null,
+                attempts: attemptRecords,
+                diagnostics: createProcessFailureDiagnostics(null, { failureStage: "cancelled", providerAdmissionLeaseMs })
+              },
+              reviewContract: reviewContractForFailure("failed")
             });
           }
           if (result.ok) {
@@ -1317,6 +1349,25 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
           await wait(retryDecision.delayMs || 0);
         } catch (error) {
           if (error.name === "AbortError" || activeExecution.cancelled || input.abortSignal?.aborted || /abort/i.test(String(error.message))) {
+            const diagnostics = createProcessFailureDiagnostics(error, { failureStage: "cancelled", providerAdmissionLeaseMs });
+            attemptRecords.push({
+              number: attemptNumber,
+              failureClass: "cancelled",
+              failureStage: "cancelled",
+              providerCode: null,
+              webEvidenceFailureCode: null,
+              exitCode: null,
+              signal: null,
+              retryDecision: "stop",
+              retryStopReason: null,
+              settingsLockWaitMs: null,
+              providerExecutionMs: null,
+              providerAdmissionLeaseMs: Number.isInteger(providerAdmissionLeaseMs) ? providerAdmissionLeaseMs : null,
+              stdoutBucket: null,
+              stderrBucket: null,
+              durationMs: Date.now() - startedAt,
+              totalCostUsd: null
+            });
             return createRuntimeFailure(route.backend, route.model, "execution cancelled", {
               durationMs: Date.now() - startedAt,
               retries: attemptNumber - 1,
@@ -1324,7 +1375,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
               reason: "cancelled",
               metrics: {
                 queueWaitMs: totalQueueWaitMs,
-                diagnostics: createProcessFailureDiagnostics(error, { failureStage: "cancelled", providerAdmissionLeaseMs })
+                totalCostUsd: null,
+                attempts: attemptRecords,
+                diagnostics
               }
             });
           }
@@ -1774,7 +1827,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     const executionId = createExecutionId();
     const executionIdHash = crypto.createHash("sha256").update(executionId).digest("hex");
     const sourceLockId = promote ? executionId : null;
-    if (sourceLockId && !await coordinator.acquire(sourceWorkspace, "edit", sourceLockId)) return { status: "failed", backend: "bridge", model: attempts[0].model, requestedModel: input.model, resolvedModel: attempts[0].model, accessMode: "edit", summary: `${providerLabel} edit source workspace lock unavailable`, failureClass: "workspace_lock_unavailable", filesChanged: [], diff: "", applied: false, fallbacks: 0, cleanupCompleted: true };
+    if (sourceLockId && !await coordinator.acquire(sourceWorkspace, "edit", sourceLockId, 0, { signal: abortSignal })) return { status: "failed", backend: "bridge", model: attempts[0].model, requestedModel: input.model, resolvedModel: attempts[0].model, accessMode: "edit", summary: `${providerLabel} edit source workspace lock unavailable`, failureClass: abortSignal?.aborted ? "cancelled" : "workspace_lock_unavailable", filesChanged: [], diff: "", applied: false, fallbacks: 0, cleanupCompleted: true };
     let finalPayload;
     let allCleanupCompleted = true;
     let fallbackCount = 0;

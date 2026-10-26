@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { lockOpenFileDescriptor, openKernelFileLock } from "./kernel-file-lock.js";
+import { closeKernelFileDescriptor, kernelLockAcquisitionAvailable, lockOpenFileDescriptor, openKernelFileLock } from "./kernel-file-lock.js";
 
 function workspaceKey(workspace) {
   return crypto.createHash("sha256").update(workspace).digest("hex");
@@ -19,11 +19,18 @@ export function withGuard(directory, staleLockMs, callback) {
   const guardPath = path.join(directory, "guard.lock");
   const guardLock = openKernelFileLock(guardPath);
   if (!guardLock) return null;
+  let result;
   try {
-    return callback();
-  } finally {
+    result = callback();
+  } catch (error) {
     guardLock.release();
+    throw error;
   }
+  if (!guardLock.release()) {
+    if (typeof result?.release === "function") result.release();
+    return null;
+  }
+  return result;
 }
 
 export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 1500000, maxQueuedPerWorkspace = 100, maxWaitAttempts = 12000 } = {}) {
@@ -32,6 +39,8 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
   const active = new Map();
   const pending = new Map();
   const writerIntentLocks = new Map();
+  const pendingIntentCleanups = new Map();
+  const intentCleanupAttempts = new Map();
 
   function lockDirectoryFor(workspace) {
     const target = path.join(directory, "coordinator-v2", workspaceKey(workspace));
@@ -62,18 +71,18 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
           fs.fsyncSync(descriptor);
           const intentLock = lockOpenFileDescriptor(descriptor, { shared: true });
           if (!intentLock) {
-            fs.closeSync(descriptor);
+            closeKernelFileDescriptor(descriptor);
+            descriptor = undefined;
             fs.rmSync(intentPath, { force: true });
             return null;
           }
           writerIntentLocks.set(intentOwnerId, intentLock);
+          descriptor = undefined;
           return intentLock;
         } catch {
           if (descriptor !== undefined) {
-            try {
-              fs.closeSync(descriptor);
-            } catch {
-            }
+            closeKernelFileDescriptor(descriptor);
+            descriptor = undefined;
           }
           try {
             fs.rmSync(intentPath, { force: true });
@@ -85,6 +94,26 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
     } catch {
       return null;
     }
+  }
+
+  function finishWriterIntentCleanup(intentOwnerId) {
+    const pendingCleanup = pendingIntentCleanups.get(intentOwnerId);
+    if (pendingCleanup) clearTimeout(pendingCleanup.timer);
+    pendingIntentCleanups.delete(intentOwnerId);
+    intentCleanupAttempts.delete(intentOwnerId);
+  }
+
+  function scheduleWriterIntentCleanup(workspace, executionId, intentOwnerId) {
+    if (pendingIntentCleanups.has(intentOwnerId) || !kernelLockAcquisitionAvailable()) return;
+    const attempts = (intentCleanupAttempts.get(intentOwnerId) || 0) + 1;
+    intentCleanupAttempts.set(intentOwnerId, attempts);
+    const delayMs = Math.min(1000, 25 * 2 ** Math.min(attempts - 1, 5));
+    const timer = setTimeout(() => {
+      pendingIntentCleanups.delete(intentOwnerId);
+      clearWriterIntent(workspace, executionId, intentOwnerId);
+    }, delayMs);
+    timer.unref?.();
+    pendingIntentCleanups.set(intentOwnerId, { timer, workspace, executionId });
   }
 
   function clearWriterIntent(workspace, executionId, intentOwnerId) {
@@ -104,13 +133,14 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
         fs.rmSync(intentPath, { force: true });
         return true;
       });
-      if (result === null && currentLock) {
-        const released = currentLock.release();
-        if (released) writerIntentLocks.delete(intentOwnerId);
-        return released;
+      if (result === true) {
+        finishWriterIntentCleanup(intentOwnerId);
+        return true;
       }
-      return result === true;
+      scheduleWriterIntentCleanup(workspace, executionId, intentOwnerId);
+      return false;
     } catch {
+      scheduleWriterIntentCleanup(workspace, executionId, intentOwnerId);
       return false;
     }
   }
@@ -230,27 +260,57 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
     }
   }
 
-  function acquire(workspace, mode, executionId, priority = 0) {
+  function queuedExecution(executionId) {
+    return [...queues.values()].flat().find((entry) => entry.executionId === executionId) || null;
+  }
+
+  function cancelQueuedEntry(entry) {
+    if (entry.settled) return false;
+    entry.cancelled = true;
+    if (entry.retryTimer) clearTimeout(entry.retryTimer);
+    const isPendingEntry = pending.get(entry.executionId) === entry;
+    if (isPendingEntry) pending.delete(entry.executionId);
+    const queue = queues.get(workspaceKey(entry.workspace));
+    const queueIndex = queue?.indexOf(entry) ?? -1;
+    if (queueIndex >= 0) queue.splice(queueIndex, 1);
+    if (entry.mode === "edit") clearWriterIntent(entry.workspace, entry.executionId, entry.intentOwnerId);
+    entry.resolve(null);
+    if (queueIndex >= 0) drain(entry.workspace);
+    return isPendingEntry || queueIndex >= 0;
+  }
+
+  function acquire(workspace, mode, executionId, priority = 0, { signal } = {}) {
+    if (signal?.aborted) return Promise.resolve(null);
+    if (active.has(executionId) || pending.has(executionId) || queuedExecution(executionId)) return Promise.resolve(null);
     const queue = queueFor(workspace);
     const pendingForWorkspace = [...pending.values()].filter((entry) => workspaceKey(entry.workspace) === workspaceKey(workspace)).length;
     if (queue.length + pendingForWorkspace >= maxQueuedPerWorkspace) return Promise.resolve(null);
     return new Promise((resolve) => {
       const enqueuedAt = Date.now();
-      const entry = { workspace, mode, executionId, priority, enqueuedAt, intentOwnerId: mode === "edit" ? crypto.randomUUID() : null, cancelled: false, resolve, retryTimer: null };
+      const entry = { workspace, mode, executionId, priority, enqueuedAt, intentOwnerId: mode === "edit" ? crypto.randomUUID() : null, cancelled: false, retryTimer: null };
+      entry.resolve = (value) => {
+        if (entry.settled) return;
+        entry.settled = true;
+        signal?.removeEventListener?.("abort", entry.abortListener);
+        resolve(value);
+      };
+      entry.abortListener = () => {
+        cancelQueuedEntry(entry);
+      };
       const enqueue = () => {
         if (entry.cancelled) {
-          pending.delete(executionId);
+          if (pending.get(executionId) === entry) pending.delete(executionId);
           if (mode === "edit") clearWriterIntent(workspace, executionId, entry.intentOwnerId);
-          resolve(null);
+          entry.resolve(null);
           return;
         }
         if (mode === "edit" && !registerWriterIntent(workspace, executionId, priority, enqueuedAt, entry.intentOwnerId)) {
           clearWriterIntent(workspace, executionId, entry.intentOwnerId);
           entry.waitAttempts = (entry.waitAttempts || 0) + 1;
           if (entry.waitAttempts > maxWaitAttempts) {
-            pending.delete(executionId);
+            if (pending.get(executionId) === entry) pending.delete(executionId);
             clearWriterIntent(workspace, executionId, entry.intentOwnerId);
-            resolve(null);
+            entry.resolve(null);
             return;
           }
           pending.set(executionId, entry);
@@ -261,12 +321,18 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
         queueFor(workspace).push(entry);
         drain(workspace);
       };
+      signal?.addEventListener?.("abort", entry.abortListener, { once: true });
+      if (signal?.aborted) {
+        entry.abortListener();
+        if (!entry.settled) entry.resolve(null);
+        return;
+      }
       enqueue();
     });
   }
 
   function tryAcquire(workspace, executionId, priority = 0) {
-    if (active.has(executionId) || pending.has(executionId)) return null;
+    if (active.has(executionId) || pending.has(executionId) || queuedExecution(executionId)) return null;
     const enqueuedAt = Date.now();
     const intentOwnerId = crypto.randomUUID();
     if (!registerWriterIntent(workspace, executionId, priority, enqueuedAt, intentOwnerId)) {
@@ -297,26 +363,8 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
 
   function cancel(executionId) {
     const pendingEntry = pending.get(executionId);
-    if (pendingEntry) {
-      pendingEntry.cancelled = true;
-      if (pendingEntry.retryTimer) clearTimeout(pendingEntry.retryTimer);
-      pending.delete(executionId);
-      if (pendingEntry.mode === "edit") clearWriterIntent(pendingEntry.workspace, pendingEntry.executionId, pendingEntry.intentOwnerId);
-      pendingEntry.resolve(null);
-      return true;
-    }
-    for (const queue of queues.values()) {
-      const entry = queue.find((candidate) => candidate.executionId === executionId);
-      if (entry) {
-        entry.cancelled = true;
-        queue.splice(queue.indexOf(entry), 1);
-        if (entry.mode === "edit") clearWriterIntent(entry.workspace, entry.executionId, entry.intentOwnerId);
-        entry.resolve(null);
-        drain(entry.workspace);
-        return true;
-      }
-    }
-    return false;
+    const queuedEntry = queuedExecution(executionId);
+    return pendingEntry ? cancelQueuedEntry(pendingEntry) : Boolean(queuedEntry && cancelQueuedEntry(queuedEntry));
   }
 
   function snapshot(now = Date.now()) {

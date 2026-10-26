@@ -19,35 +19,37 @@ function spawnWorker(mode, root, markers, identity) {
   return child;
 }
 
-test("kilit bırakımı ilk close hatasından sonra descriptor'ı kapatıp sahipliği sonlandırır", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-close-retry-"));
-  const lockPath = path.join(root, "guard.lock");
+test("uncertain lock close is never retried and future acquisitions fail closed", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-close-failure-"));
+  const markers = path.join(root, "markers");
+  fs.mkdirSync(markers);
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const owner = openKernelFileLock(lockPath);
-  assert.ok(owner);
-  const originalCloseSync = fs.closeSync;
-  let closeFailuresRemaining = 2;
-  fs.closeSync = function (descriptor) {
-    if (closeFailuresRemaining > 0) {
-      closeFailuresRemaining -= 1;
-      const error = new Error("simulated descriptor close failure");
-      error.code = "EIO";
-      throw error;
-    }
-    return originalCloseSync.call(this, descriptor);
-  };
-  t.after(() => { fs.closeSync = originalCloseSync; });
-
-  assert.equal(owner.release(), false);
-  assert.equal(owner.isOwner(), false);
-  assert.equal(closeFailuresRemaining, 0);
-  fs.closeSync = originalCloseSync;
-  const successor = openKernelFileLock(lockPath);
-  assert.ok(successor);
-  assert.equal(successor.release(), true);
-  assert.equal(owner.release(), true);
+  const worker = spawnWorker("guard-close-failure", root, markers, "close-failure");
+  assert.equal(await waitForExit(worker), 0, worker.output());
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(markers, "close-failure-result"), "utf8")), { value: null, closeAttempts: 1, successor: false });
 });
 
+test("intent descriptor close uncertainty is tracked without closing the descriptor twice", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-intent-close-failure-"));
+  const markers = path.join(root, "markers");
+  fs.mkdirSync(markers);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const worker = spawnWorker("coordinator-intent-close-failure", root, markers, "intent-close-failure");
+  assert.equal(await waitForExit(worker), 0, worker.output());
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(markers, "intent-close-failure-result"), "utf8")), { result: false, closeAttempts: 1, successor: false });
+});
+
+test("uncertain intent cleanup guard close does not report try or async acquisition as granted", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-cleanup-guard-failure-"));
+  const markers = path.join(root, "markers");
+  fs.mkdirSync(markers);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const identity of ["try", "async"]) {
+    const worker = spawnWorker("coordinator-guard-close-failure", path.join(root, identity), markers, identity);
+    assert.equal(await waitForExit(worker), 0, worker.output());
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(markers, `${identity}-result`), "utf8")), { granted: false, owner: false, closeAttempts: 1 });
+  }
+});
 async function waitForMarker(markers, name, children = []) {
   const markerPath = path.join(markers, name);
   const deadline = Date.now() + 10000;
@@ -117,6 +119,111 @@ test("stale guard gözlemi yeni sahibin kilidini sildiremez", async (t) => {
   assert.equal(await waitForExit(owner), 0, owner.output());
   assert.equal(fs.existsSync(guardPath), true);
   assert.equal(fs.statSync(guardPath).ino, ownerFileIdentity);
+});
+
+test("AbortSignal kuyruktaki writer intenti temizler ve bekleyen çağrıyı çözer", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-abort-queued-intent-"));
+  const lockDirectory = path.join(root, "locks");
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const blocker = await coordinator.acquire(workspace, "read_only", "abort-reader-blocker");
+  assert.ok(blocker);
+  const controller = new AbortController();
+  const pending = coordinator.acquire(workspace, "edit", "abort-queued-writer", 0, { signal: controller.signal });
+  const workspaceHash = crypto.createHash("sha256").update(workspace).digest("hex");
+  const workspaceLockDirectory = path.join(lockDirectory, "coordinator-v2", workspaceHash);
+  const deadline = Date.now() + 5000;
+  while (!fs.existsSync(workspaceLockDirectory) || !fs.readdirSync(workspaceLockDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent"))) {
+    if (Date.now() >= deadline) throw new Error("writer intent was not registered");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  controller.abort();
+  assert.equal(await pending, null);
+  assert.equal(fs.readdirSync(workspaceLockDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent")), false);
+  coordinator.release("abort-reader-blocker");
+});
+
+test("guard çekişmesi iptal cleanup'ını kaybetmez ve intent sonradan silinir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-abort-cleanup-retry-"));
+  const lockDirectory = path.join(root, "locks");
+  const workspace = path.join(root, "workspace");
+  const markers = path.join(root, "markers");
+  fs.mkdirSync(workspace);
+  fs.mkdirSync(markers);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const blocker = await coordinator.acquire(workspace, "read_only", "abort-cleanup-reader");
+  assert.ok(blocker);
+  const controller = new AbortController();
+  const pending = coordinator.acquire(workspace, "edit", "abort-cleanup-writer", 0, { signal: controller.signal });
+  const workspaceHash = crypto.createHash("sha256").update(workspace).digest("hex");
+  const workspaceLockDirectory = path.join(lockDirectory, "coordinator-v2", workspaceHash);
+  const intentDeadline = Date.now() + 5000;
+  while (!fs.existsSync(workspaceLockDirectory) || !fs.readdirSync(workspaceLockDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent"))) {
+    if (Date.now() >= intentDeadline) throw new Error("writer intent was not registered");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  const guardOwner = spawnWorker("guard-hold", workspaceLockDirectory, markers, "cleanup-guard");
+  t.after(async () => { if (guardOwner.exitCode === null) { guardOwner.kill(); await waitForExit(guardOwner); } });
+  await waitForMarker(markers, "cleanup-guard-entered", [guardOwner]);
+  controller.abort();
+  assert.equal(await pending, null);
+  assert.equal(fs.readdirSync(workspaceLockDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent")), true);
+  fs.writeFileSync(path.join(markers, "cleanup-guard-release"), "1");
+  assert.equal(await waitForExit(guardOwner), 0, guardOwner.output());
+  const cleanupDeadline = Date.now() + 5000;
+  while (fs.readdirSync(workspaceLockDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent"))) {
+    if (Date.now() >= cleanupDeadline) throw new Error("cancelled writer intent cleanup did not retry");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  coordinator.release("abort-cleanup-reader");
+});
+
+test("async edinim aynı execution kimliğiyle açık kilit kaydını ezemez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-async-replay-"));
+  const lockDirectory = path.join(root, "locks");
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const blocker = await coordinator.acquire(workspace, "read_only", "async-replay-blocker");
+  assert.ok(blocker);
+  const first = coordinator.acquire(workspace, "read_only", "async-replay-execution");
+  assert.equal(await coordinator.acquire(workspace, "read_only", "async-replay-execution"), null);
+  coordinator.release("async-replay-blocker");
+  assert.ok(await first);
+  assert.equal(coordinator.assertOwner(workspace, "async-replay-execution"), true);
+  coordinator.release("async-replay-execution");
+  assert.equal(coordinator.tryAcquire(workspace, "async-replay-successor") !== null, true);
+  coordinator.release("async-replay-successor");
+});
+
+test("başarısız acquire AbortSignal dinleyicisini kaldırır ve eski iptal yeni execution'ı etkileyemez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-abort-cleanup-"));
+  const lockDirectory = path.join(root, "locks");
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
+  const blocker = await coordinator.acquire(workspace, "read_only", "abort-cleanup-blocker");
+  assert.ok(blocker);
+  const controller = new AbortController();
+  let additions = 0;
+  let removals = 0;
+  const originalAdd = controller.signal.addEventListener.bind(controller.signal);
+  const originalRemove = controller.signal.removeEventListener.bind(controller.signal);
+  controller.signal.addEventListener = (...args) => { additions += 1; return originalAdd(...args); };
+  controller.signal.removeEventListener = (...args) => { removals += 1; return originalRemove(...args); };
+  assert.equal(await coordinator.acquire(workspace, "edit", "abort-cleanup-execution", 0, { signal: controller.signal }), null);
+  assert.equal(additions, 1);
+  assert.equal(removals, 1);
+  coordinator.release("abort-cleanup-blocker");
+  assert.ok(await coordinator.acquire(workspace, "read_only", "abort-cleanup-execution"));
+  controller.abort();
+  assert.equal(coordinator.assertOwner(workspace, "abort-cleanup-execution"), true);
+  coordinator.release("abort-cleanup-execution");
 });
 
 test("zorla kapatılan guard sahibi sonrası kernel kilidi yeni sürece güvenle geçer", async (t) => {

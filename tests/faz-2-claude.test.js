@@ -512,7 +512,7 @@ test("CC-VERIFY-13: auth durum probu ayni anahtar icin onbelleklenir", async (t)
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-auth-cache-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const counterPath = path.join(root, "counter.txt");
-  const script = path.join(root, "auth-count.js");
+  const script = path.join(root, "auth-count.cjs");
   fs.writeFileSync(script, `const fs = require("node:fs"); const p = ${JSON.stringify(counterPath)}; const current = fs.existsSync(p) ? Number(fs.readFileSync(p, "utf8")) : 0; fs.writeFileSync(p, String(current + 1)); process.stdout.write(JSON.stringify({ loggedIn: false }));\n`, "utf8");
   assert.equal(await readClaudeAuthStatus(process.execPath, [script]), false);
   assert.equal(await readClaudeAuthStatus(process.execPath, [script]), false);

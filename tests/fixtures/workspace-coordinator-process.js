@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
+import { openKernelFileLock } from "../../subagent-bridge/src/services/kernel-file-lock.js";
 import { createWorkspaceCoordinator, withGuard } from "../../subagent-bridge/src/services/workspace-coordinator.js";
 
 const [mode, root, markers, identity] = process.argv.slice(2);
@@ -35,6 +36,96 @@ if (mode === "guard-hold") {
     return true;
   });
   mark(`${identity}-result`, JSON.stringify(result));
+} else if (mode === "guard-close-failure") {
+  const originalCloseSync = fs.closeSync;
+  let closeAttempts = 0;
+  fs.closeSync = function (descriptor) {
+    closeAttempts += 1;
+    const result = originalCloseSync.call(this, descriptor);
+    if (closeAttempts === 1) {
+      const error = new Error("simulated uncertain descriptor close result");
+      error.code = "EIO";
+      throw error;
+    }
+    return result;
+  };
+  const value = withGuard(root, 0, () => "completed");
+  fs.closeSync = originalCloseSync;
+  const successor = openKernelFileLock(path.join(root, "guard.lock"));
+  mark(`${identity}-result`, JSON.stringify({ value, closeAttempts, successor: Boolean(successor) }));
+  successor?.release();
+} else if (mode === "coordinator-intent-close-failure") {
+  const originalOpenSync = fs.openSync;
+  const originalFsyncSync = fs.fsyncSync;
+  const originalCloseSync = fs.closeSync;
+  let intentDescriptor = null;
+  let closeAttempts = 0;
+  fs.openSync = function (filePath, ...args) {
+    const descriptor = originalOpenSync.call(this, filePath, ...args);
+    if (String(filePath).endsWith(".intent")) intentDescriptor = descriptor;
+    return descriptor;
+  };
+  fs.fsyncSync = function (descriptor) {
+    if (descriptor === intentDescriptor) {
+      const error = new Error("simulated intent fsync failure");
+      error.code = "EIO";
+      throw error;
+    }
+    return originalFsyncSync.call(this, descriptor);
+  };
+  fs.closeSync = function (descriptor) {
+    if (descriptor === intentDescriptor) {
+      closeAttempts += 1;
+      const result = originalCloseSync.call(this, descriptor);
+      const error = new Error("simulated uncertain intent descriptor close result");
+      error.code = "EIO";
+      throw error;
+    }
+    return originalCloseSync.call(this, descriptor);
+  };
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: root, maxWaitAttempts: 0 });
+  const result = coordinator.tryAcquire(workspace, "intent-close-failure");
+  fs.openSync = originalOpenSync;
+  fs.fsyncSync = originalFsyncSync;
+  fs.closeSync = originalCloseSync;
+  const successor = coordinator.tryAcquire(workspace, "intent-close-successor");
+  mark(`${identity}-result`, JSON.stringify({ result: Boolean(result), closeAttempts, successor: Boolean(successor) }));
+  if (result) coordinator.release("intent-close-failure");
+  if (successor) coordinator.release("intent-close-successor");
+} else if (mode === "coordinator-guard-close-failure") {
+  const originalOpenSync = fs.openSync;
+  const originalCloseSync = fs.closeSync;
+  const guardDescriptors = [];
+  let closeAttempts = 0;
+  fs.openSync = function (filePath, ...args) {
+    const descriptor = originalOpenSync.call(this, filePath, ...args);
+    if (path.basename(String(filePath)) === "guard.lock") guardDescriptors.push(descriptor);
+    return descriptor;
+  };
+  fs.closeSync = function (descriptor) {
+    const result = originalCloseSync.call(this, descriptor);
+    if (descriptor === guardDescriptors[2]) {
+      closeAttempts += 1;
+      const error = new Error("simulated uncertain cleanup guard close result");
+      error.code = "EIO";
+      throw error;
+    }
+    return result;
+  };
+  const workspace = path.join(root, "workspace");
+  fs.mkdirSync(workspace, { recursive: true });
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: root, maxWaitAttempts: 0 });
+  const executionId = `guard-close-${identity}`;
+  const grant = identity === "async"
+    ? await coordinator.acquire(workspace, "edit", executionId)
+    : coordinator.tryAcquire(workspace, executionId);
+  const owner = coordinator.assertOwner(workspace, executionId);
+  fs.openSync = originalOpenSync;
+  fs.closeSync = originalCloseSync;
+  mark(`${identity}-result`, JSON.stringify({ granted: Boolean(grant), owner, closeAttempts }));
+  if (grant) coordinator.release(executionId);
 } else if (mode === "guard-try") {
   const result = withGuard(root, 5, () => {
     mark(`${identity}-entered`);

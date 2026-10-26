@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+Son coordinator doğrulaması — 2026-10-26 Türkiye: Kernel lock, cancellation ve process cleanup değişiklikleri görev gruplarına ayrılmış gerçek `gpt-6.1-sol` incelemesinden geçti; `npm test` 997 toplam/993 geçti/4 Windows skip/0 fail, verify, stdio smoke ve verify:ci geçti. Exact-diff boyut limiti, `known_signature` preflight ve auto-review güvenlik reddi ayrı kaldı; reddedilen dosyalar daha küçük promptlara taşınmadı. POSIX doğrulaması açık. Ayrıntı [son doğrulama raporunda](../reports/COORDINATOR_KERNEL_LOCK_FINAL_DOGRULAMA_2026-10-26.md) ve [handoff'ta](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md).
+
 Coordinator kernel-lock güncellemesi — 2026-10-26 Türkiye: Eski guard reclaim yarışı iki Windows sürecinde deterministik üretildi ve kalıcı dosya tabanlı kernel kilitleriyle düzeltildi. Hedefli suite 75/75, son `npm.cmd test` 982 toplam/978 geçti/4 Windows skip/0 fail; verify, yerel stdio smoke, verify:ci ve diff-check geçti. Gerçek `gpt-6.1-sol` incelemesi transient intent cleanup retry kusurunu buldu; düzeltme ve regresyon sonrası follow-up bulgu kapalı dedi. POSIX doğrulaması WSL `E_ACCESSDENIED` nedeniyle yapılamadı. Bu yerel çalışma P1b/P2/P3/P6 canlı kapılarını kapatmaz. [Güncel uygulama ve sınırlar](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md).
 Patch düzeyinde final Sol diff çağrısı MCP prompt limitini ve ardından `known_signature` preflight engelini aşamadı; bu source-level follow-up'tan ayrı, açık kalan inceleme sınırıdır.
 

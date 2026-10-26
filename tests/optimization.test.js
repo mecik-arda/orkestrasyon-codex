@@ -320,8 +320,10 @@ test("OPT-01e: kuyruk yazarının iptali intent dosyasını temizler ve bekleyen
   assert.ok(await coordinator.acquire(root, "read_only", "cancel-active-reader"));
   const cancelledWriter = coordinator.acquire(root, "edit", "cancel-writer");
   await new Promise((resolve) => setTimeout(resolve, 20));
-  const intentPath = path.join(root, "locks", crypto.createHash("sha256").update(root).digest("hex"), `writer-${crypto.createHash("sha256").update("cancel-writer").digest("hex")}.intent`);
-  assert.equal(fs.existsSync(intentPath), true);
+  const intentDirectory = path.join(root, "locks", crypto.createHash("sha256").update(root).digest("hex"));
+  const intentPrefix = `writer-${crypto.createHash("sha256").update("cancel-writer").digest("hex")}-`;
+  const intentPaths = () => fs.readdirSync(intentDirectory).filter((name) => name.startsWith(intentPrefix) && name.endsWith(".intent"));
+  assert.equal(intentPaths().length, 1);
   let blockedReaderResolved = false;
   const blockedReader = coordinator.acquire(root, "read_only", "cancel-blocked-reader").then((grant) => {
     blockedReaderResolved = Boolean(grant);
@@ -330,7 +332,7 @@ test("OPT-01e: kuyruk yazarının iptali intent dosyasını temizler ve bekleyen
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(blockedReaderResolved, false);
   assert.equal(coordinator.cancel("cancel-writer"), true);
-  assert.equal(fs.existsSync(intentPath), false);
+  assert.equal(intentPaths().length, 0);
   assert.equal(await cancelledWriter, null);
   assert.ok(await blockedReader);
   coordinator.release("cancel-blocked-reader");
@@ -429,16 +431,16 @@ test("OPT-01g3: yeniden kullanılan writer intent stale cleanup öncesinde tazel
   const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
   const executionId = "stale-writer-intent";
   const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
-  const writerIntentPath = path.join(lockDirectory, workspaceHash, `writer-${executionHash}.intent`);
-  fs.mkdirSync(path.dirname(writerIntentPath), { recursive: true });
-  fs.writeFileSync(writerIntentPath, JSON.stringify({ priority: 0, enqueuedAt: Date.now() - 2000 }), "utf8");
+  const legacyWriterIntentPath = path.join(lockDirectory, workspaceHash, `writer-${executionHash}.intent`);
+  fs.mkdirSync(path.dirname(legacyWriterIntentPath), { recursive: true });
+  fs.writeFileSync(legacyWriterIntentPath, JSON.stringify({ priority: 0, enqueuedAt: Date.now() - 2000 }), "utf8");
   const staleAt = new Date(Date.now() - 120000);
-  fs.utimesSync(writerIntentPath, staleAt, staleAt);
+  fs.utimesSync(legacyWriterIntentPath, staleAt, staleAt);
   const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 60000, maxWaitAttempts: 0 });
   t.after(() => coordinator.release(executionId));
 
   assert.ok(await coordinator.acquire(root, "edit", executionId));
-  assert.equal(fs.existsSync(writerIntentPath), false);
+  assert.equal(fs.existsSync(legacyWriterIntentPath), false);
   assert.equal(coordinator.assertOwner(root, executionId), true);
 });
 
@@ -449,12 +451,12 @@ test("OPT-01g4: writer intent tazeleme hatası yapılandırılmış bekleme sın
   const executionId = "writer-intent-refresh-error";
   const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
   const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
-  const writerIntentPath = path.join(lockDirectory, workspaceHash, `writer-${executionHash}.intent`);
+  const writerIntentPrefix = `writer-${executionHash}-`;
   const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
   const originalUtimesSync = fs.utimesSync;
   let injectedFailure = false;
   fs.utimesSync = function (filePath, ...args) {
-    if (String(filePath) === writerIntentPath) {
+    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
       injectedFailure = true;
       const error = new Error("simulated writer intent refresh failure");
       error.code = "EACCES";
@@ -485,6 +487,350 @@ test("OPT-01g4: writer intent tazeleme hatası yapılandırılmış bekleme sın
   assert.equal(injectedFailure, true);
   assert.equal(timedOut, false);
   assert.equal(acquisition, null);
+});
+
+test("OPT-01g5: ilk writer intent tazeleme hatası sınırda başarısız intent'i temizler", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-writer-intent-enqueue-error-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const executionId = "writer-intent-enqueue-error";
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
+  const intentDirectory = path.join(lockDirectory, workspaceHash);
+  const writerIntentPrefix = `writer-${executionHash}-`;
+  fs.mkdirSync(intentDirectory, { recursive: true });
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
+  const originalUtimesSync = fs.utimesSync;
+  const originalWriteFileSync = fs.writeFileSync;
+  let injectedFailure = false;
+  fs.writeFileSync = function (filePath, ...args) {
+    if (!injectedFailure && path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
+      originalWriteFileSync.call(this, filePath, ...args);
+      injectedFailure = true;
+      const error = new Error("simulated concurrent writer intent publication");
+      error.code = "EEXIST";
+      throw error;
+    }
+    return originalWriteFileSync.call(this, filePath, ...args);
+  };
+  fs.utimesSync = function (filePath, ...args) {
+    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
+      const error = new Error("simulated initial writer intent refresh failure");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalUtimesSync.call(this, filePath, ...args);
+  };
+  t.after(() => {
+    fs.utimesSync = originalUtimesSync;
+    fs.writeFileSync = originalWriteFileSync;
+    coordinator.cancel(executionId);
+    coordinator.release(executionId);
+  });
+
+  const acquisition = await coordinator.acquire(root, "edit", executionId);
+
+  assert.equal(injectedFailure, true);
+  assert.equal(acquisition, null);
+  assert.equal(fs.readdirSync(intentDirectory).some((name) => name.startsWith(writerIntentPrefix) && name.endsWith(".intent")), false);
+});
+
+test("OPT-01g6: aynı execution ID altındaki coordinator iptali diğer intent sahibini korur", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-shared-execution-intent-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const first = createWorkspaceCoordinator({ lockDirectory });
+  const second = createWorkspaceCoordinator({ lockDirectory });
+  const executionId = "shared-execution-id";
+  const intentDirectory = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"));
+  const intentPrefix = `writer-${crypto.createHash("sha256").update(executionId).digest("hex")}-`;
+  const intentPaths = () => fs.readdirSync(intentDirectory).filter((name) => name.startsWith(intentPrefix) && name.endsWith(".intent"));
+  t.after(() => {
+    first.cancel(executionId);
+    second.cancel(executionId);
+    first.release(executionId);
+    second.release(executionId);
+  });
+
+  assert.ok(await first.acquire(root, "read_only", "shared-execution-blocker"));
+  const firstWriter = first.acquire(root, "edit", executionId);
+  const secondWriter = second.acquire(root, "edit", executionId);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(intentPaths().length, 2);
+  const guardPath = path.join(intentDirectory, "guard.lock");
+  fs.writeFileSync(guardPath, "external-guard-owner", "utf8");
+  assert.equal(second.cancel(executionId), true);
+  assert.equal(intentPaths().length, 1);
+  fs.rmSync(guardPath, { force: true });
+  first.release("shared-execution-blocker");
+  assert.ok(await firstWriter);
+  assert.equal(await secondWriter, null);
+  first.release(executionId);
+});
+
+test("OPT-01g7: tryAcquire tazeleme hatasında yalnız kendi intent kaydını temizler", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-try-acquire-intent-error-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const executionId = "try-acquire-intent-error";
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
+  const intentDirectory = path.join(lockDirectory, workspaceHash);
+  const writerIntentPrefix = `writer-${executionHash}-`;
+  fs.mkdirSync(intentDirectory, { recursive: true });
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const originalUtimesSync = fs.utimesSync;
+  const originalWriteFileSync = fs.writeFileSync;
+  let injectedFailure = false;
+  fs.writeFileSync = function (filePath, ...args) {
+    if (!injectedFailure && path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
+      originalWriteFileSync.call(this, filePath, ...args);
+      injectedFailure = true;
+      const error = new Error("simulated concurrent writer intent publication");
+      error.code = "EEXIST";
+      throw error;
+    }
+    return originalWriteFileSync.call(this, filePath, ...args);
+  };
+  fs.utimesSync = function (filePath, ...args) {
+    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
+      const error = new Error("simulated tryAcquire writer intent refresh failure");
+      error.code = "EACCES";
+      throw error;
+    }
+    return originalUtimesSync.call(this, filePath, ...args);
+  };
+  t.after(() => {
+    fs.utimesSync = originalUtimesSync;
+    fs.writeFileSync = originalWriteFileSync;
+    coordinator.release(executionId);
+  });
+
+  assert.equal(coordinator.tryAcquire(root, executionId), null);
+  assert.equal(injectedFailure, true);
+  assert.equal(fs.readdirSync(intentDirectory).some((name) => name.startsWith(writerIntentPrefix) && name.endsWith(".intent")), false);
+});
+
+test("OPT-01g9: kısmi writer intent yazımı hata sonrası kaldırılır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-partial-writer-intent-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const executionId = "partial-writer-intent";
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
+  const intentDirectory = path.join(lockDirectory, workspaceHash);
+  const writerIntentPrefix = `writer-${executionHash}-`;
+  fs.mkdirSync(intentDirectory, { recursive: true });
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
+  const originalOpenSync = fs.openSync;
+  const originalWriteFileSync = fs.writeFileSync;
+  const descriptorPaths = new Map();
+  let injectedFailure = false;
+  fs.openSync = function (filePath, ...args) {
+    const descriptor = originalOpenSync.call(this, filePath, ...args);
+    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) descriptorPaths.set(descriptor, filePath);
+    return descriptor;
+  };
+  fs.writeFileSync = function (target, ...args) {
+    if (typeof target === "number" && path.basename(String(descriptorPaths.get(target))).startsWith(writerIntentPrefix)) {
+      originalWriteFileSync.call(this, target, "{", "utf8");
+      injectedFailure = true;
+      const error = new Error("simulated partial writer intent write");
+      error.code = "ENOSPC";
+      throw error;
+    }
+    return originalWriteFileSync.call(this, target, ...args);
+  };
+  t.after(() => {
+    fs.openSync = originalOpenSync;
+    fs.writeFileSync = originalWriteFileSync;
+    coordinator.cancel(executionId);
+    coordinator.release(executionId);
+  });
+
+  assert.equal(await coordinator.acquire(root, "edit", executionId), null);
+  assert.equal(injectedFailure, true);
+  assert.equal(fs.readdirSync(intentDirectory).some((name) => name.startsWith(writerIntentPrefix) && name.endsWith(".intent")), false);
+});
+
+test("OPT-01g8: release guard arızası sırasında pending acquisition kuyruğunu kaybetmez", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-pending-after-release-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const workspaceLockDirectory = path.join(lockDirectory, workspaceHash);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  t.after(() => {
+    coordinator.cancel("pending-during-guard");
+    coordinator.release("pending-release-blocker");
+    coordinator.release("pending-during-guard");
+  });
+
+  assert.ok(await coordinator.acquire(root, "read_only", "pending-release-blocker"));
+  const guardPath = path.join(workspaceLockDirectory, "guard.lock");
+  fs.writeFileSync(guardPath, "external-guard-owner", "utf8");
+  const pendingAcquisition = coordinator.acquire(root, "edit", "pending-during-guard");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  coordinator.release("pending-release-blocker");
+  assert.equal(coordinator.snapshot().localQueued, 1);
+  fs.rmSync(guardPath, { force: true });
+
+  let timedOut = false;
+  const grant = await Promise.race([
+    pendingAcquisition,
+    new Promise((resolve) => setTimeout(() => {
+      timedOut = true;
+      resolve(null);
+    }, 500))
+  ]);
+
+  assert.equal(timedOut, false);
+  assert.ok(grant);
+  assert.equal(coordinator.assertOwner(root, "pending-during-guard"), true);
+});
+
+test("OPT-01g10: öncelikli yazar başta beklerken düşük öncelikli iptal tamamlanır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-cancel-behind-writer-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
+  t.after(() => {
+    coordinator.cancel("priority-cancel-blocker");
+    coordinator.cancel("priority-cancel-high");
+    coordinator.cancel("priority-cancel-low");
+    coordinator.release("priority-cancel-blocker");
+    coordinator.release("priority-cancel-high");
+  });
+
+  assert.ok(await coordinator.acquire(root, "read_only", "priority-cancel-blocker"));
+  const highWriter = coordinator.acquire(root, "edit", "priority-cancel-high", 10);
+  const lowWriter = coordinator.acquire(root, "edit", "priority-cancel-low", 0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(coordinator.cancel("priority-cancel-low"), true);
+  assert.equal(await lowWriter, null);
+  coordinator.release("priority-cancel-blocker");
+  assert.ok(await highWriter);
+});
+
+test("OPT-01g11: eşit öncelik ve zaman damgasında disk ve yerel yazar sırası eşleşir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-tied-writer-order-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const workspaceLockDirectory = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"));
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 5 });
+  const originalDateNow = Date.now;
+  const originalReadDirSync = fs.readdirSync;
+  const fixedNow = originalDateNow() + 1000;
+  t.after(() => {
+    Date.now = originalDateNow;
+    fs.readdirSync = originalReadDirSync;
+    coordinator.cancel("tied-writer-a");
+    coordinator.cancel("tied-writer-b");
+    coordinator.release("tied-writer-blocker");
+    coordinator.release("tied-writer-a");
+    coordinator.release("tied-writer-b");
+  });
+
+  assert.ok(await coordinator.acquire(root, "read_only", "tied-writer-blocker"));
+  fs.readdirSync = function (directory, ...args) {
+    const entries = originalReadDirSync.call(this, directory, ...args);
+    if (path.resolve(String(directory)) !== path.resolve(workspaceLockDirectory) || !Array.isArray(entries)) return entries;
+    const writerEntries = entries.filter((entry) => String(entry).startsWith("writer-"));
+    const otherEntries = entries.filter((entry) => !String(entry).startsWith("writer-"));
+    return [...otherEntries, ...writerEntries.reverse()];
+  };
+  Date.now = () => fixedNow;
+  const writerA = coordinator.acquire(root, "edit", "tied-writer-a", 0);
+  const writerB = coordinator.acquire(root, "edit", "tied-writer-b", 0);
+  coordinator.release("tied-writer-blocker");
+
+  const first = await Promise.race([
+    writerA.then((grant) => ({ executionId: "tied-writer-a", grant })),
+    writerB.then((grant) => ({ executionId: "tied-writer-b", grant }))
+  ]);
+  assert.ok(first.grant);
+  coordinator.release(first.executionId);
+  const second = await (first.executionId === "tied-writer-a" ? writerB : writerA);
+  const secondExecutionId = first.executionId === "tied-writer-a" ? "tied-writer-b" : "tied-writer-a";
+  assert.ok(second);
+  coordinator.release(secondExecutionId);
+});
+
+test("OPT-01g12: guard başlangıç yazımı kısmi kalırsa tanıtıcı ve geçici kayıt temizlenir", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-guard-initialization-error-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const originalOpenSync = fs.openSync;
+  const originalWriteFileSync = fs.writeFileSync;
+  const descriptorPaths = new Map();
+  let injectedFailure = false;
+  fs.openSync = function (filePath, ...args) {
+    const descriptor = originalOpenSync.call(this, filePath, ...args);
+    if (path.basename(String(filePath)).startsWith("guard.lock.")) descriptorPaths.set(descriptor, filePath);
+    return descriptor;
+  };
+  fs.writeFileSync = function (target, ...args) {
+    if (typeof target === "number" && descriptorPaths.has(target)) {
+      originalWriteFileSync.call(this, target, "partial", "utf8");
+      injectedFailure = true;
+      const error = new Error("simulated guard initialization failure");
+      error.code = "ENOSPC";
+      throw error;
+    }
+    return originalWriteFileSync.call(this, target, ...args);
+  };
+  t.after(() => {
+    fs.openSync = originalOpenSync;
+    fs.writeFileSync = originalWriteFileSync;
+  });
+
+  assert.equal(withGuard(root, 100, () => true), null);
+  assert.equal(injectedFailure, true);
+  assert.equal(fs.existsSync(path.join(root, "guard.lock")), false);
+  assert.equal(fs.readdirSync(root).some((name) => name.startsWith("guard.lock.") && name.endsWith(".tmp")), false);
+  fs.writeFileSync = originalWriteFileSync;
+  fs.openSync = originalOpenSync;
+  assert.equal(withGuard(root, 100, () => true), true);
+});
+
+test("OPT-01g13: lease başlangıç yazımı kısmi kalırsa lock yayınlanmaz ve yeniden denenebilir", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-lease-initialization-error-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const lockDirectory = path.join(root, "locks");
+  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
+  const leaseDirectory = path.join(lockDirectory, workspaceHash);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const originalOpenSync = fs.openSync;
+  const originalWriteFileSync = fs.writeFileSync;
+  const descriptorPaths = new Map();
+  let injectedFailure = false;
+  fs.openSync = function (filePath, ...args) {
+    const descriptor = originalOpenSync.call(this, filePath, ...args);
+    if (path.basename(String(filePath)).startsWith("write.lock.")) descriptorPaths.set(descriptor, filePath);
+    return descriptor;
+  };
+  fs.writeFileSync = function (target, ...args) {
+    if (typeof target === "number" && path.basename(String(descriptorPaths.get(target))).startsWith("write.lock.")) {
+      originalWriteFileSync.call(this, target, "partial", "utf8");
+      injectedFailure = true;
+      const error = new Error("simulated partial lease initialization");
+      error.code = "ENOSPC";
+      throw error;
+    }
+    return originalWriteFileSync.call(this, target, ...args);
+  };
+  t.after(() => {
+    fs.openSync = originalOpenSync;
+    fs.writeFileSync = originalWriteFileSync;
+    coordinator.release("lease-initialization-error");
+  });
+
+  assert.equal(coordinator.tryAcquire(root, "lease-initialization-error"), null);
+  assert.equal(injectedFailure, true);
+  assert.equal(fs.readdirSync(leaseDirectory).some((name) => name === "write.lock" || name.startsWith("write.lock.")), false);
+  fs.openSync = originalOpenSync;
+  fs.writeFileSync = originalWriteFileSync;
+  assert.ok(coordinator.tryAcquire(root, "lease-initialization-error"));
+  assert.equal(coordinator.assertOwner(root, "lease-initialization-error"), true);
+  coordinator.release("lease-initialization-error");
 });
 
 test("OPT-01h: farklı workspace'ler aynı kilit dizininde birbirini engellemez", async (t) => {

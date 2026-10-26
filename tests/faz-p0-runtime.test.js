@@ -812,13 +812,13 @@ test("P0-HEALTH: runtime returns canonical adapter health", async (t) => {
   assert.equal(fs.readFileSync(healthMetricsPath, "utf8").trim().split("\n").length, 1);
 });
 
-test("P0-LOCK-SNAPSHOT: leaseHeartbeatMs runtime configuration'dan koordinatöre aktarılır", async (t) => {
+test("P0-LOCK-SNAPSHOT: coordinator sahipliği native handle üzerinden kurulur", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-lease-wiring-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const configuration = createConfiguration(root, root);
   configuration.orchestration = { scheduler: { leaseHeartbeatMs: 45000, staleLockMs: 120000 } };
   const runtime = createBridgeRuntime({ configuration, adapters: {} });
-  assert.equal(runtime.workspaceLockSnapshot().leaseHeartbeatMs, 45000);
+  assert.equal(runtime.workspaceLockSnapshot().kernelLocks, true);
 });
 
 test("P0-COST-VISIBILITY: bütçe görünümü açık veya kapalı devreyi raporlar", async (t) => {

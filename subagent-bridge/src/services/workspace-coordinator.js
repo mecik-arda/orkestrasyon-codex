@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { lockOpenFileDescriptor, openKernelFileLock } from "./kernel-file-lock.js";
 
 function workspaceKey(workspace) {
   return crypto.createHash("sha256").update(workspace).digest("hex");
@@ -10,167 +11,30 @@ function executionKey(executionId) {
   return crypto.createHash("sha256").update(executionId).digest("hex");
 }
 
-function stale(filePath, staleLockMs) {
-  try {
-    return Date.now() - fs.statSync(filePath).mtimeMs > staleLockMs;
-  } catch {
-    return false;
-  }
-}
-
-function staleWorkspaceLease(filePath, staleLockMs) {
-  let value;
-  try {
-    value = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  } catch {
-    return stale(filePath, staleLockMs);
-  }
-  if (!value || !Number.isInteger(value.pid) || value.pid <= 0) return stale(filePath, staleLockMs);
-  try {
-    process.kill(value.pid, 0);
-    return false;
-  } catch (error) {
-    if (error.code === "ESRCH") return true;
-    return false;
-  }
-}
-
 function compareWriterIntentOrder(left, right) {
   return right.priority - left.priority || left.enqueuedAt - right.enqueuedAt || left.entry.localeCompare(right.entry, "en");
 }
 
-function cleanStaleLocks(directory, staleLockMs) {
-  try {
-    const entries = fs.readdirSync(directory);
-    const remainingEntries = [];
-    for (const entry of entries) {
-      const filePath = path.join(directory, entry);
-      if (staleWorkspaceLease(filePath, staleLockMs)) {
-        fs.rmSync(filePath, { force: true });
-      } else {
-        remainingEntries.push(entry);
-      }
-    }
-    return remainingEntries;
-  } catch {
-    return null;
-  }
-}
-
-function createLease(lockPath, ownerId, leaseHeartbeatMs) {
-  const temporaryPath = `${lockPath}.${ownerId}.tmp`;
-  let descriptor;
-  try {
-    descriptor = fs.openSync(temporaryPath, "wx");
-    fs.writeFileSync(descriptor, JSON.stringify({ ownerId, pid: process.pid, createdAt: new Date().toISOString() }), "utf8");
-    fs.fsyncSync(descriptor);
-    fs.linkSync(temporaryPath, lockPath);
-  } catch (error) {
-    if (descriptor !== undefined) {
-      try {
-        fs.closeSync(descriptor);
-      } catch {
-      }
-    }
-    try {
-      fs.rmSync(temporaryPath, { force: true });
-    } catch {
-    }
-    throw error;
-  }
-  try {
-    fs.rmSync(temporaryPath, { force: true });
-  } catch {
-  }
-  const heartbeat = setInterval(() => {
-    try {
-      fs.futimesSync(descriptor, new Date(), new Date());
-    } catch {
-      clearInterval(heartbeat);
-    }
-  }, leaseHeartbeatMs);
-  heartbeat.unref?.();
-  const release = () => {
-    clearInterval(heartbeat);
-    try {
-      fs.closeSync(descriptor);
-    } catch {
-    }
-    try {
-      const current = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-      if (current.ownerId === ownerId && current.pid === process.pid) fs.rmSync(lockPath, { force: true });
-    } catch {
-    }
-    try {
-      fs.rmSync(temporaryPath, { force: true });
-    } catch {
-    }
-  };
-  release.isOwner = () => {
-    try {
-      const current = JSON.parse(fs.readFileSync(lockPath, "utf8"));
-      return current.ownerId === ownerId && current.pid === process.pid;
-    } catch {
-      return false;
-    }
-  };
-  return release;
-}
-
 export function withGuard(directory, staleLockMs, callback) {
   const guardPath = path.join(directory, "guard.lock");
-  const ownerId = crypto.randomUUID();
-  const temporaryPath = `${guardPath}.${ownerId}.tmp`;
-  let descriptor;
-  try {
-    descriptor = fs.openSync(temporaryPath, "wx");
-    fs.writeFileSync(descriptor, ownerId, "utf8");
-    fs.fsyncSync(descriptor);
-    fs.closeSync(descriptor);
-    descriptor = undefined;
-    try {
-      fs.linkSync(temporaryPath, guardPath);
-    } catch (error) {
-      if (error.code !== "EEXIST" || !stale(guardPath, staleLockMs)) return null;
-      try {
-        fs.rmSync(guardPath, { force: true });
-        fs.linkSync(temporaryPath, guardPath);
-      } catch {
-        return null;
-      }
-    }
-  } catch {
-    if (descriptor !== undefined) {
-      try {
-        fs.closeSync(descriptor);
-      } catch {
-      }
-    }
-    return null;
-  } finally {
-    try {
-      fs.rmSync(temporaryPath, { force: true });
-    } catch {
-    }
-  }
+  const guardLock = openKernelFileLock(guardPath);
+  if (!guardLock) return null;
   try {
     return callback();
   } finally {
-    try {
-      if (fs.readFileSync(guardPath, "utf8") === ownerId) fs.rmSync(guardPath, { force: true });
-    } catch {
-    }
+    guardLock.release();
   }
 }
 
-export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 1500000, leaseHeartbeatMs = Math.max(1000, Math.floor(staleLockMs / 3)), maxQueuedPerWorkspace = 100, maxWaitAttempts = 12000 } = {}) {
+export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 1500000, maxQueuedPerWorkspace = 100, maxWaitAttempts = 12000 } = {}) {
   const directory = lockDirectory || path.join(process.cwd(), ".subagent-bridge-locks");
   const queues = new Map();
   const active = new Map();
   const pending = new Map();
+  const writerIntentLocks = new Map();
 
   function lockDirectoryFor(workspace) {
-    const target = path.join(directory, workspaceKey(workspace));
+    const target = path.join(directory, "coordinator-v2", workspaceKey(workspace));
     fs.mkdirSync(target, { recursive: true });
     return target;
   }
@@ -180,42 +44,87 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
   }
 
   function registerWriterIntent(workspace, executionId, priority, enqueuedAt, intentOwnerId) {
+    const currentLock = writerIntentLocks.get(intentOwnerId);
+    if (currentLock?.isOwner()) return currentLock;
+    if (currentLock) {
+      if (!currentLock.release()) return null;
+      writerIntentLocks.delete(intentOwnerId);
+    }
     try {
       const target = lockDirectoryFor(workspace);
       return withGuard(target, staleLockMs, () => {
+        removeAbandonedWriterIntents(target);
         const intentPath = writerIntentPath(workspace, executionId, intentOwnerId);
+        let descriptor;
         try {
-          fs.writeFileSync(intentPath, JSON.stringify({ priority, enqueuedAt, intentOwnerId }), { flag: "wx" });
-        } catch (error) {
-          if (error.code !== "EEXIST") return false;
-          let currentIntent;
-          try {
-            currentIntent = JSON.parse(fs.readFileSync(intentPath, "utf8"));
-          } catch {
-            return false;
+          descriptor = fs.openSync(intentPath, "wx+");
+          fs.writeFileSync(descriptor, JSON.stringify({ priority, enqueuedAt, intentOwnerId }), "utf8");
+          fs.fsyncSync(descriptor);
+          const intentLock = lockOpenFileDescriptor(descriptor, { shared: true });
+          if (!intentLock) {
+            fs.closeSync(descriptor);
+            fs.rmSync(intentPath, { force: true });
+            return null;
           }
-          if (currentIntent?.intentOwnerId !== intentOwnerId) return false;
-          const refreshedAt = new Date();
-          try {
-            fs.utimesSync(intentPath, refreshedAt, refreshedAt);
-          } catch {
-            return false;
+          writerIntentLocks.set(intentOwnerId, intentLock);
+          return intentLock;
+        } catch {
+          if (descriptor !== undefined) {
+            try {
+              fs.closeSync(descriptor);
+            } catch {
+            }
           }
+          try {
+            fs.rmSync(intentPath, { force: true });
+          } catch {
+          }
+          return null;
         }
-        return true;
-      }) === true;
+      }) || null;
     } catch {
-      return false;
+      return null;
     }
   }
 
   function clearWriterIntent(workspace, executionId, intentOwnerId) {
     try {
+      const target = lockDirectoryFor(workspace);
       const intentPath = writerIntentPath(workspace, executionId, intentOwnerId);
-      fs.rmSync(intentPath, { force: true });
-      return true;
+      const currentLock = writerIntentLocks.get(intentOwnerId);
+      const result = withGuard(target, staleLockMs, () => {
+        if (currentLock) {
+          if (!currentLock.release()) return false;
+          writerIntentLocks.delete(intentOwnerId);
+        } else {
+          const staleLock = openKernelFileLock(intentPath);
+          if (!staleLock) return !fs.existsSync(intentPath);
+          if (!staleLock.release()) return false;
+        }
+        fs.rmSync(intentPath, { force: true });
+        return true;
+      });
+      if (result === null && currentLock) {
+        const released = currentLock.release();
+        if (released) writerIntentLocks.delete(intentOwnerId);
+        return released;
+      }
+      return result === true;
     } catch {
       return false;
+    }
+  }
+
+  function removeAbandonedWriterIntents(target) {
+    for (const entry of fs.readdirSync(target).filter((name) => name.startsWith("writer-") && name.endsWith(".intent"))) {
+      const intentPath = path.join(target, entry);
+      const staleLock = openKernelFileLock(intentPath);
+      if (!staleLock) continue;
+      if (!staleLock.release()) continue;
+      try {
+        fs.rmSync(intentPath, { force: true });
+      } catch {
+      }
     }
   }
 
@@ -237,26 +146,14 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
     try {
       const target = lockDirectoryFor(workspace);
       return withGuard(target, staleLockMs, () => {
-        const entries = cleanStaleLocks(target, staleLockMs) || fs.readdirSync(target);
-        const writeExists = entries.includes("write.lock");
-        const readExists = entries.some((entry) => entry.startsWith("read-"));
+        removeAbandonedWriterIntents(target);
         const selectedWriterIntent = earliestWriterIntent(target);
         const writerIntentExists = selectedWriterIntent !== null;
-        if ((mode === "read_only" && (writeExists || writerIntentExists)) || (mode === "edit" && (writeExists || readExists))) {
-          return null;
-        }
+        if (mode === "read_only" && writerIntentExists) return null;
         if (mode === "edit" && selectedWriterIntent?.entry !== path.basename(writerIntentPath(workspace, executionId, intentOwnerId))) {
           return null;
         }
-        const lockPath = mode === "edit"
-          ? path.join(target, "write.lock")
-          : path.join(target, `read-${executionKey(executionId)}.lock`);
-        const ownerId = crypto.randomUUID();
-        try {
-          return createLease(lockPath, ownerId, leaseHeartbeatMs);
-        } catch {
-          return null;
-        }
+        return openKernelFileLock(path.join(target, "execution.lock"), { shared: mode === "read_only" });
       });
     } catch {
       return null;
@@ -290,7 +187,6 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
         continue;
       }
       if (next.mode === "edit" && !registerWriterIntent(workspace, next.executionId, next.priority, next.enqueuedAt, next.intentOwnerId)) {
-        clearWriterIntent(workspace, next.executionId, next.intentOwnerId);
         next.waitAttempts = (next.waitAttempts || 0) + 1;
         if (next.waitAttempts > maxWaitAttempts) {
           queue.splice(queue.indexOf(next), 1);
@@ -313,9 +209,19 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
         scheduleDrain(workspace, queue);
         break;
       }
+      if (next.mode === "edit" && !clearWriterIntent(workspace, next.executionId, next.intentOwnerId)) {
+        release.release();
+        next.waitAttempts = (next.waitAttempts || 0) + 1;
+        if (next.waitAttempts > maxWaitAttempts) {
+          queue.splice(queue.indexOf(next), 1);
+          next.resolve(null);
+          continue;
+        }
+        scheduleDrain(workspace, queue);
+        break;
+      }
       queue.splice(queue.indexOf(next), 1);
-      if (next.mode === "edit") clearWriterIntent(workspace, next.executionId, next.intentOwnerId);
-      active.set(next.executionId, { workspace, release, isOwner: release.isOwner });
+      active.set(next.executionId, { workspace, release: () => release.release(), isOwner: release.isOwner });
       next.resolve({ queueWaitMs: Date.now() - next.enqueuedAt });
     }
     if (queue.length === 0) {
@@ -364,21 +270,23 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
     const enqueuedAt = Date.now();
     const intentOwnerId = crypto.randomUUID();
     if (!registerWriterIntent(workspace, executionId, priority, enqueuedAt, intentOwnerId)) {
-      clearWriterIntent(workspace, executionId, intentOwnerId);
       return null;
     }
     const release = acquireExternal(workspace, "edit", executionId, priority, enqueuedAt, intentOwnerId);
-    clearWriterIntent(workspace, executionId, intentOwnerId);
-    if (!release) return null;
-    active.set(executionId, { workspace, release, isOwner: release.isOwner });
+    if (!release || !clearWriterIntent(workspace, executionId, intentOwnerId)) {
+      release?.release();
+      clearWriterIntent(workspace, executionId, intentOwnerId);
+      return null;
+    }
+    active.set(executionId, { workspace, release: () => release.release(), isOwner: release.isOwner });
     return { queueWaitMs: 0 };
   }
 
   function release(executionId) {
     const entry = active.get(executionId);
     if (!entry) return;
+    if (!entry.release()) return;
     active.delete(executionId);
-    entry.release();
     drain(entry.workspace);
   }
 
@@ -417,10 +325,11 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
     const waitingEntries = [...queuedEntries, ...pendingEntries];
     const externalFiles = [];
     try {
-      const workspaceDirectories = fs.existsSync(directory) ? fs.readdirSync(directory, { withFileTypes: true }) : [];
+      const coordinatorDirectory = path.join(directory, "coordinator-v2");
+      const workspaceDirectories = fs.existsSync(coordinatorDirectory) ? fs.readdirSync(coordinatorDirectory, { withFileTypes: true }) : [];
       for (const workspaceDirectory of workspaceDirectories) {
         if (!workspaceDirectory.isDirectory()) continue;
-        const workspaceLockDirectory = path.join(directory, workspaceDirectory.name);
+        const workspaceLockDirectory = path.join(coordinatorDirectory, workspaceDirectory.name);
         for (const entry of fs.readdirSync(workspaceLockDirectory, { withFileTypes: true })) {
           if (entry.isFile() && entry.name !== "guard.lock") externalFiles.push(path.join(workspaceDirectory.name, entry.name));
         }
@@ -434,7 +343,7 @@ export function createWorkspaceCoordinator({ lockDirectory, staleLockMs = 150000
       oldestQueueEntryMs: waitingEntries.length > 0 ? Math.max(0, now - Math.min(...waitingEntries.map((entry) => entry.enqueuedAt))) : null,
       externalDiskLocks: externalFiles.map((_, index) => `lock-${index + 1}`),
       lockCount: externalFiles.length,
-      leaseHeartbeatMs
+      kernelLocks: true
     };
   }
 

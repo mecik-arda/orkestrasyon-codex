@@ -10,10 +10,15 @@ import { createReadOnlyResultCache } from "../subagent-bridge/src/services/read-
 import { createProviderCircuitBreaker } from "../subagent-bridge/src/services/provider-circuit-breaker.js";
 import { resolveReliabilityBudget } from "../subagent-bridge/src/services/reliability-budget.js";
 import { createWorkspaceCoordinator, withGuard } from "../subagent-bridge/src/services/workspace-coordinator.js";
+import { openKernelFileLock } from "../subagent-bridge/src/services/kernel-file-lock.js";
 import { resolveRuntimeRoute } from "../subagent-bridge/src/runtime/router.js";
 import { createMcpToolHandlers } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { readMetricsDirectory, summarizeMetrics } from "../scripts/report-metrics.js";
 import { appendRedactedRunMetric, getCostBudgetSnapshot, listPendingDirectEditFeedback, listPendingRoutingFeedback, listRoutingCandidates, pruneMetricFiles, recordDirectEditFeedback, recordRoutingDisposition, recordRoutingFeedback, reserveCostBudget, settleCostBudget, withMetricLock } from "../subagent-bridge/src/metrics.js";
+
+function coordinatorLockDirectory(lockDirectory, workspace) {
+  return path.join(lockDirectory, "coordinator-v2", crypto.createHash("sha256").update(workspace).digest("hex"));
+}
 
 test("OPT-01: processler arası coordinator paralel okumayı korur ve yazmayı sıraya alır", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-"));
@@ -65,8 +70,7 @@ test("OPT-01: processler arası coordinator paralel okumayı korur ve yazmayı s
   second.release("waiting-writer");
   assert.ok(await laterReader);
   second.release("later-reader");
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const guardPath = path.join(root, "locks", workspaceHash, "guard.lock");
+  const guardPath = path.join(coordinatorLockDirectory(path.join(root, "locks"), root), "guard.lock");
   fs.writeFileSync(guardPath, "stale", "utf8");
   const staleAt = new Date(Date.now() - 1000);
   fs.utimesSync(guardPath, staleAt, staleAt);
@@ -75,15 +79,16 @@ test("OPT-01: processler arası coordinator paralel okumayı korur ve yazmayı s
   staleCoordinator.release("stale-guard-reader");
 });
 
-test("OPT-01a: eski guard sahibi yeni guard dosyasını silemez", (t) => {
+test("OPT-01a: stale guard metaverisi kernel sahipliğini devralmaya izin vermez", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-guard-owner-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const guardPath = path.join(root, "guard.lock");
   assert.equal(withGuard(root, 1000, () => {
-    fs.writeFileSync(guardPath, "replacement", "utf8");
+    assert.equal(openKernelFileLock(guardPath), null);
     return true;
   }), true);
-  assert.equal(fs.readFileSync(guardPath, "utf8"), "replacement");
+  assert.equal(fs.existsSync(guardPath), true);
+  assert.equal(withGuard(root, 1000, () => true), true);
 });
 
 test("OPT-PROVIDER-TRY-01: non-blocking lease aynı host süreçleri arasında slot sınırını uygular", (t) => {
@@ -130,12 +135,11 @@ test("OPT-01aa: etkin lease staleLockMs aşılırken silinmez", async (t) => {
   const first = createWorkspaceCoordinator(options);
   const second = createWorkspaceCoordinator(options);
   assert.ok(await first.acquire(root, "edit", "lease-holder"));
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const writeLockPath = path.join(root, "locks", workspaceHash, "write.lock");
+  const writeLockPath = path.join(coordinatorLockDirectory(options.lockDirectory, root), "execution.lock");
   const staleAt = new Date(Date.now() - 2000);
   fs.utimesSync(writeLockPath, staleAt, staleAt);
   await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.ok(Date.now() - fs.statSync(writeLockPath).mtimeMs < options.staleLockMs);
+  assert.equal(fs.statSync(writeLockPath).mtimeMs, staleAt.getTime());
   let secondAcquired = false;
   const waiting = second.acquire(root, "edit", "lease-waiter").then((grant) => {
     secondAcquired = Boolean(grant);
@@ -155,8 +159,7 @@ test("OPT-01aa1: stale mtime cannot steal a lock from a live process", async (t)
   const first = createWorkspaceCoordinator(options);
   const second = createWorkspaceCoordinator(options);
   assert.ok(await first.acquire(root, "edit", "live-owner"));
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const writeLockPath = path.join(root, "locks", workspaceHash, "write.lock");
+  const writeLockPath = path.join(coordinatorLockDirectory(options.lockDirectory, root), "execution.lock");
   const staleAt = new Date(Date.now() - 2000);
   fs.utimesSync(writeLockPath, staleAt, staleAt);
   assert.equal(await second.acquire(root, "edit", "live-waiter"), null);
@@ -164,18 +167,18 @@ test("OPT-01aa1: stale mtime cannot steal a lock from a live process", async (t)
   first.release("live-owner");
 });
 
-test("OPT-01aa2: lock ownership assertion fences a replaced lease", async (t) => {
+test("OPT-01aa2: lock ownership assertion reflects the held kernel handle", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-lock-fencing-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(root, "locks") });
   assert.ok(await coordinator.acquire(root, "edit", "owner-one"));
   assert.equal(coordinator.assertOwner(root, "owner-one"), true);
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const writeLockPath = path.join(root, "locks", workspaceHash, "write.lock");
-  fs.writeFileSync(writeLockPath, JSON.stringify({ ownerId: "owner-two", pid: process.pid, createdAt: new Date().toISOString() }), "utf8");
-  assert.equal(coordinator.assertOwner(root, "owner-one"), false);
+  const writeLockPath = path.join(coordinatorLockDirectory(path.join(root, "locks"), root), "execution.lock");
+  assert.equal(openKernelFileLock(writeLockPath), null);
+  assert.equal(coordinator.assertOwner(root, "owner-one"), true);
   coordinator.release("owner-one");
   assert.equal(fs.existsSync(writeLockPath), true);
+  assert.equal(coordinator.assertOwner(root, "owner-one"), false);
 });
 
 test("OPT-01aaa: coordinator sınırlı bekleme sonrası isteği fail-closed reddeder", async (t) => {
@@ -320,7 +323,7 @@ test("OPT-01e: kuyruk yazarının iptali intent dosyasını temizler ve bekleyen
   assert.ok(await coordinator.acquire(root, "read_only", "cancel-active-reader"));
   const cancelledWriter = coordinator.acquire(root, "edit", "cancel-writer");
   await new Promise((resolve) => setTimeout(resolve, 20));
-  const intentDirectory = path.join(root, "locks", crypto.createHash("sha256").update(root).digest("hex"));
+  const intentDirectory = coordinatorLockDirectory(path.join(root, "locks"), root);
   const intentPrefix = `writer-${crypto.createHash("sha256").update("cancel-writer").digest("hex")}-`;
   const intentPaths = () => fs.readdirSync(intentDirectory).filter((name) => name.startsWith(intentPrefix) && name.endsWith(".intent"));
   assert.equal(intentPaths().length, 1);
@@ -366,163 +369,79 @@ test("OPT-01f: workspace kuyruk kapasitesi aşımında istek hemen reddedilir", 
   coordinator.release("capacity-holder");
 });
 
-test("OPT-01g: ölü okuyucunun bayat kilidi yazma edinimi sırasında temizlenir", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-stale-read-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const lockDirectory = path.join(root, "locks");
-  const staleReadPath = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"), `read-${crypto.createHash("sha256").update("dead-reader").digest("hex")}.lock`);
-  fs.mkdirSync(path.dirname(staleReadPath), { recursive: true });
-  fs.writeFileSync(staleReadPath, "dead-owner", "utf8");
-  const staleAt = new Date(Date.now() - 2000);
-  fs.utimesSync(staleReadPath, staleAt, staleAt);
-  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 100 });
-  t.after(() => {
-    coordinator.cancel("stale-read-writer");
-    coordinator.release("stale-read-writer");
-  });
-  assert.ok(await coordinator.acquire(root, "edit", "stale-read-writer"));
-  assert.equal(fs.existsSync(staleReadPath), false);
-  coordinator.release("stale-read-writer");
-});
-
-test("OPT-01g1: null lease kaydı bayatlık eşiği geçince temizlenir", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-null-lease-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const lockDirectory = path.join(root, "locks");
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const executionHash = crypto.createHash("sha256").update("null-lease-reader").digest("hex");
-  const nullLeasePath = path.join(lockDirectory, workspaceHash, `read-${executionHash}.lock`);
-  fs.mkdirSync(path.dirname(nullLeasePath), { recursive: true });
-  fs.writeFileSync(nullLeasePath, "null", "utf8");
-  const staleAt = new Date(Date.now() - 2000);
-  fs.utimesSync(nullLeasePath, staleAt, staleAt);
-  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 100, maxWaitAttempts: 0 });
-  t.after(() => coordinator.release("null-lease-writer"));
-
-  assert.ok(await coordinator.acquire(root, "edit", "null-lease-writer"));
-  assert.equal(fs.existsSync(nullLeasePath), false);
-});
-
-test("OPT-01g2: geçersiz pozitif olmayan PID lease kayıtları bayatlık eşiği geçince temizlenir", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-invalid-pid-lease-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-  const lockDirectory = path.join(root, "locks");
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const invalidLeasePaths = [0, -1].map((pid) => {
-    const executionHash = crypto.createHash("sha256").update(`invalid-pid-${pid}`).digest("hex");
-    const leasePath = path.join(lockDirectory, workspaceHash, `read-${executionHash}.lock`);
-    fs.mkdirSync(path.dirname(leasePath), { recursive: true });
-    fs.writeFileSync(leasePath, JSON.stringify({ ownerId: "stale-owner", pid }), "utf8");
-    return leasePath;
-  });
-  const staleAt = new Date(Date.now() - 2000);
-  for (const leasePath of invalidLeasePaths) fs.utimesSync(leasePath, staleAt, staleAt);
-  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 100, maxWaitAttempts: 0 });
-  t.after(() => coordinator.release("invalid-pid-lease-writer"));
-
-  assert.ok(await coordinator.acquire(root, "edit", "invalid-pid-lease-writer"));
-  assert.equal(invalidLeasePaths.every((leasePath) => !fs.existsSync(leasePath)), true);
-});
-
-test("OPT-01g3: yeniden kullanılan writer intent stale cleanup öncesinde tazelenir", async (t) => {
+test("OPT-01g: legacy PID ve mtime kayıtları kernel sahipliği sayılmaz", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-stale-writer-intent-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const executionId = "stale-writer-intent";
-  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
-  const legacyWriterIntentPath = path.join(lockDirectory, workspaceHash, `writer-${executionHash}.intent`);
-  fs.mkdirSync(path.dirname(legacyWriterIntentPath), { recursive: true });
-  fs.writeFileSync(legacyWriterIntentPath, JSON.stringify({ priority: 0, enqueuedAt: Date.now() - 2000 }), "utf8");
+  const legacyDirectory = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"));
+  const legacyPaths = ["write.lock", "read-dead-reader.lock", "writer-old-writer.intent"].map((name) => path.join(legacyDirectory, name));
+  fs.mkdirSync(legacyDirectory, { recursive: true });
+  for (const [index, legacyPath] of legacyPaths.entries()) fs.writeFileSync(legacyPath, index === 1 ? "null" : JSON.stringify({ pid: 0 }), "utf8");
   const staleAt = new Date(Date.now() - 120000);
-  fs.utimesSync(legacyWriterIntentPath, staleAt, staleAt);
-  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 60000, maxWaitAttempts: 0 });
-  t.after(() => coordinator.release(executionId));
+  for (const legacyPath of legacyPaths) fs.utimesSync(legacyPath, staleAt, staleAt);
+  const coordinator = createWorkspaceCoordinator({ lockDirectory, staleLockMs: 1, maxWaitAttempts: 0 });
+  t.after(() => coordinator.release("legacy-metadata-writer"));
 
-  assert.ok(await coordinator.acquire(root, "edit", executionId));
-  assert.equal(fs.existsSync(legacyWriterIntentPath), false);
-  assert.equal(coordinator.assertOwner(root, executionId), true);
+  assert.ok(await coordinator.acquire(root, "edit", "legacy-metadata-writer"));
+  assert.equal(legacyPaths.every((legacyPath) => fs.existsSync(legacyPath)), true);
+  assert.equal(coordinator.assertOwner(root, "legacy-metadata-writer"), true);
+  coordinator.release("legacy-metadata-writer");
 });
 
-test("OPT-01g4: writer intent tazeleme hatası yapılandırılmış bekleme sınırında kapanır", async (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-writer-intent-refresh-error-"));
+test("OPT-01g1: execution lock açma hatası fail-closed kalır ve düzelince yeniden denenebilir", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-execution-lock-error-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const executionId = "writer-intent-refresh-error";
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
-  const writerIntentPrefix = `writer-${executionHash}-`;
-  const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
-  const originalUtimesSync = fs.utimesSync;
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const originalOpenSync = fs.openSync;
   let injectedFailure = false;
-  fs.utimesSync = function (filePath, ...args) {
-    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
+  fs.openSync = function (filePath, ...args) {
+    if (!injectedFailure && path.basename(String(filePath)) === "execution.lock") {
       injectedFailure = true;
-      const error = new Error("simulated writer intent refresh failure");
+      const error = new Error("simulated execution lock open failure");
       error.code = "EACCES";
       throw error;
     }
-    return originalUtimesSync.call(this, filePath, ...args);
+    return originalOpenSync.call(this, filePath, ...args);
   };
-  t.after(() => {
-    fs.utimesSync = originalUtimesSync;
-    coordinator.cancel(executionId);
-    coordinator.release(executionId);
-  });
-
-  const acquisitionPromise = coordinator.acquire(root, "edit", executionId);
-  let timedOut = false;
-  const acquisition = await Promise.race([
-    acquisitionPromise,
-    new Promise((resolve) => setTimeout(() => {
-      timedOut = true;
-      resolve(null);
-    }, 500))
-  ]);
-  if (timedOut) {
-    coordinator.cancel(executionId);
-    await acquisitionPromise;
-  }
-
+  t.after(() => { fs.openSync = originalOpenSync; coordinator.release("lock-open-failure"); });
+  assert.equal(coordinator.tryAcquire(root, "lock-open-failure"), null);
   assert.equal(injectedFailure, true);
-  assert.equal(timedOut, false);
-  assert.equal(acquisition, null);
+  fs.openSync = originalOpenSync;
+  assert.ok(coordinator.tryAcquire(root, "lock-open-failure"));
+  assert.equal(coordinator.assertOwner(root, "lock-open-failure"), true);
+  coordinator.release("lock-open-failure");
 });
 
-test("OPT-01g5: ilk writer intent tazeleme hatası sınırda başarısız intent'i temizler", async (t) => {
+test("OPT-01g5: kısmi intent yazımı kilidi bırakır ve sonraki edinimi engellemez", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-writer-intent-enqueue-error-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const executionId = "writer-intent-enqueue-error";
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
-  const intentDirectory = path.join(lockDirectory, workspaceHash);
-  const writerIntentPrefix = `writer-${executionHash}-`;
-  fs.mkdirSync(intentDirectory, { recursive: true });
+  const executionId = "partial-intent-enqueue-error";
+  const intentDirectory = coordinatorLockDirectory(lockDirectory, root);
+  const writerIntentPrefix = `writer-${crypto.createHash("sha256").update(executionId).digest("hex")}-`;
   const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
-  const originalUtimesSync = fs.utimesSync;
+  const originalOpenSync = fs.openSync;
   const originalWriteFileSync = fs.writeFileSync;
+  const descriptorPaths = new Map();
   let injectedFailure = false;
-  fs.writeFileSync = function (filePath, ...args) {
-    if (!injectedFailure && path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
-      originalWriteFileSync.call(this, filePath, ...args);
-      injectedFailure = true;
-      const error = new Error("simulated concurrent writer intent publication");
-      error.code = "EEXIST";
-      throw error;
-    }
-    return originalWriteFileSync.call(this, filePath, ...args);
+  fs.openSync = function (filePath, ...args) {
+    const descriptor = originalOpenSync.call(this, filePath, ...args);
+    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) descriptorPaths.set(descriptor, filePath);
+    return descriptor;
   };
-  fs.utimesSync = function (filePath, ...args) {
-    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
-      const error = new Error("simulated initial writer intent refresh failure");
-      error.code = "EACCES";
+  fs.writeFileSync = function (target, ...args) {
+    if (!injectedFailure && typeof target === "number" && path.basename(String(descriptorPaths.get(target))).startsWith(writerIntentPrefix)) {
+      originalWriteFileSync.call(this, target, "{", "utf8");
+      injectedFailure = true;
+      const error = new Error("simulated partial writer intent write");
+      error.code = "ENOSPC";
       throw error;
     }
-    return originalUtimesSync.call(this, filePath, ...args);
+    return originalWriteFileSync.call(this, target, ...args);
   };
   t.after(() => {
-    fs.utimesSync = originalUtimesSync;
+    fs.openSync = originalOpenSync;
     fs.writeFileSync = originalWriteFileSync;
     coordinator.cancel(executionId);
     coordinator.release(executionId);
@@ -533,6 +452,10 @@ test("OPT-01g5: ilk writer intent tazeleme hatası sınırda başarısız intent
   assert.equal(injectedFailure, true);
   assert.equal(acquisition, null);
   assert.equal(fs.readdirSync(intentDirectory).some((name) => name.startsWith(writerIntentPrefix) && name.endsWith(".intent")), false);
+  fs.openSync = originalOpenSync;
+  fs.writeFileSync = originalWriteFileSync;
+  assert.ok(coordinator.tryAcquire(root, executionId));
+  coordinator.release(executionId);
 });
 
 test("OPT-01g6: aynı execution ID altındaki coordinator iptali diğer intent sahibini korur", async (t) => {
@@ -542,7 +465,7 @@ test("OPT-01g6: aynı execution ID altındaki coordinator iptali diğer intent s
   const first = createWorkspaceCoordinator({ lockDirectory });
   const second = createWorkspaceCoordinator({ lockDirectory });
   const executionId = "shared-execution-id";
-  const intentDirectory = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"));
+  const intentDirectory = coordinatorLockDirectory(lockDirectory, root);
   const intentPrefix = `writer-${crypto.createHash("sha256").update(executionId).digest("hex")}-`;
   const intentPaths = () => fs.readdirSync(intentDirectory).filter((name) => name.startsWith(intentPrefix) && name.endsWith(".intent"));
   t.after(() => {
@@ -557,58 +480,42 @@ test("OPT-01g6: aynı execution ID altındaki coordinator iptali diğer intent s
   const secondWriter = second.acquire(root, "edit", executionId);
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(intentPaths().length, 2);
-  const guardPath = path.join(intentDirectory, "guard.lock");
-  fs.writeFileSync(guardPath, "external-guard-owner", "utf8");
   assert.equal(second.cancel(executionId), true);
   assert.equal(intentPaths().length, 1);
-  fs.rmSync(guardPath, { force: true });
   first.release("shared-execution-blocker");
   assert.ok(await firstWriter);
   assert.equal(await secondWriter, null);
   first.release(executionId);
 });
 
-test("OPT-01g7: tryAcquire tazeleme hatasında yalnız kendi intent kaydını temizler", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-try-acquire-intent-error-"));
+test("OPT-01g7: metadata guard açılamazsa intent yayımlanmadan fail-closed kalır", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-guard-open-error-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const executionId = "try-acquire-intent-error";
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
-  const intentDirectory = path.join(lockDirectory, workspaceHash);
-  const writerIntentPrefix = `writer-${executionHash}-`;
-  fs.mkdirSync(intentDirectory, { recursive: true });
+  const intentDirectory = coordinatorLockDirectory(lockDirectory, root);
   const coordinator = createWorkspaceCoordinator({ lockDirectory });
-  const originalUtimesSync = fs.utimesSync;
-  const originalWriteFileSync = fs.writeFileSync;
+  const originalOpenSync = fs.openSync;
   let injectedFailure = false;
-  fs.writeFileSync = function (filePath, ...args) {
-    if (!injectedFailure && path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
-      originalWriteFileSync.call(this, filePath, ...args);
+  fs.openSync = function (filePath, ...args) {
+    if (!injectedFailure && path.basename(String(filePath)) === "guard.lock") {
       injectedFailure = true;
-      const error = new Error("simulated concurrent writer intent publication");
-      error.code = "EEXIST";
-      throw error;
-    }
-    return originalWriteFileSync.call(this, filePath, ...args);
-  };
-  fs.utimesSync = function (filePath, ...args) {
-    if (path.basename(String(filePath)).startsWith(writerIntentPrefix)) {
-      const error = new Error("simulated tryAcquire writer intent refresh failure");
+      const error = new Error("simulated metadata guard open failure");
       error.code = "EACCES";
       throw error;
     }
-    return originalUtimesSync.call(this, filePath, ...args);
+    return originalOpenSync.call(this, filePath, ...args);
   };
   t.after(() => {
-    fs.utimesSync = originalUtimesSync;
-    fs.writeFileSync = originalWriteFileSync;
-    coordinator.release(executionId);
+    fs.openSync = originalOpenSync;
+    coordinator.release("guard-open-failure");
   });
 
-  assert.equal(coordinator.tryAcquire(root, executionId), null);
+  assert.equal(coordinator.tryAcquire(root, "guard-open-failure"), null);
   assert.equal(injectedFailure, true);
-  assert.equal(fs.readdirSync(intentDirectory).some((name) => name.startsWith(writerIntentPrefix) && name.endsWith(".intent")), false);
+  assert.equal(fs.readdirSync(intentDirectory).some((name) => name.startsWith("writer-") && name.endsWith(".intent")), false);
+  fs.openSync = originalOpenSync;
+  assert.ok(coordinator.tryAcquire(root, "guard-open-failure"));
+  coordinator.release("guard-open-failure");
 });
 
 test("OPT-01g9: kısmi writer intent yazımı hata sonrası kaldırılır", async (t) => {
@@ -618,7 +525,7 @@ test("OPT-01g9: kısmi writer intent yazımı hata sonrası kaldırılır", asyn
   const executionId = "partial-writer-intent";
   const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
   const executionHash = crypto.createHash("sha256").update(executionId).digest("hex");
-  const intentDirectory = path.join(lockDirectory, workspaceHash);
+  const intentDirectory = coordinatorLockDirectory(lockDirectory, root);
   const writerIntentPrefix = `writer-${executionHash}-`;
   fs.mkdirSync(intentDirectory, { recursive: true });
   const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 0 });
@@ -657,8 +564,7 @@ test("OPT-01g8: release guard arızası sırasında pending acquisition kuyruğu
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-pending-after-release-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const workspaceLockDirectory = path.join(lockDirectory, workspaceHash);
+  const workspaceLockDirectory = coordinatorLockDirectory(lockDirectory, root);
   const coordinator = createWorkspaceCoordinator({ lockDirectory });
   t.after(() => {
     coordinator.cancel("pending-during-guard");
@@ -668,12 +574,13 @@ test("OPT-01g8: release guard arızası sırasında pending acquisition kuyruğu
 
   assert.ok(await coordinator.acquire(root, "read_only", "pending-release-blocker"));
   const guardPath = path.join(workspaceLockDirectory, "guard.lock");
-  fs.writeFileSync(guardPath, "external-guard-owner", "utf8");
+  const externalGuardOwner = openKernelFileLock(guardPath);
+  assert.ok(externalGuardOwner);
   const pendingAcquisition = coordinator.acquire(root, "edit", "pending-during-guard");
   await new Promise((resolve) => setTimeout(resolve, 10));
   coordinator.release("pending-release-blocker");
   assert.equal(coordinator.snapshot().localQueued, 1);
-  fs.rmSync(guardPath, { force: true });
+  externalGuardOwner.release();
 
   let timedOut = false;
   const grant = await Promise.race([
@@ -715,7 +622,7 @@ test("OPT-01g11: eşit öncelik ve zaman damgasında disk ve yerel yazar sıras�
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-tied-writer-order-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const workspaceLockDirectory = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"));
+  const workspaceLockDirectory = coordinatorLockDirectory(lockDirectory, root);
   const coordinator = createWorkspaceCoordinator({ lockDirectory, maxWaitAttempts: 5 });
   const originalDateNow = Date.now;
   const originalReadDirSync = fs.readdirSync;
@@ -755,82 +662,48 @@ test("OPT-01g11: eşit öncelik ve zaman damgasında disk ve yerel yazar sıras�
   coordinator.release(secondExecutionId);
 });
 
-test("OPT-01g12: guard başlangıç yazımı kısmi kalırsa tanıtıcı ve geçici kayıt temizlenir", (t) => {
+test("OPT-01g12: metadata guard açılamazsa kritik bölüm çalışmaz ve sonraki çağrı güvenlidir", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-guard-initialization-error-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const guardPath = path.join(root, "guard.lock");
   const originalOpenSync = fs.openSync;
-  const originalWriteFileSync = fs.writeFileSync;
-  const descriptorPaths = new Map();
   let injectedFailure = false;
   fs.openSync = function (filePath, ...args) {
-    const descriptor = originalOpenSync.call(this, filePath, ...args);
-    if (path.basename(String(filePath)).startsWith("guard.lock.")) descriptorPaths.set(descriptor, filePath);
-    return descriptor;
-  };
-  fs.writeFileSync = function (target, ...args) {
-    if (typeof target === "number" && descriptorPaths.has(target)) {
-      originalWriteFileSync.call(this, target, "partial", "utf8");
+    if (path.resolve(String(filePath)) === path.resolve(guardPath)) {
       injectedFailure = true;
-      const error = new Error("simulated guard initialization failure");
-      error.code = "ENOSPC";
+      const error = new Error("simulated metadata guard open failure");
+      error.code = "EACCES";
       throw error;
     }
-    return originalWriteFileSync.call(this, target, ...args);
+    return originalOpenSync.call(this, filePath, ...args);
   };
   t.after(() => {
     fs.openSync = originalOpenSync;
-    fs.writeFileSync = originalWriteFileSync;
   });
 
-  assert.equal(withGuard(root, 100, () => true), null);
+  let callbackRan = false;
+  assert.equal(withGuard(root, 100, () => { callbackRan = true; return true; }), null);
   assert.equal(injectedFailure, true);
-  assert.equal(fs.existsSync(path.join(root, "guard.lock")), false);
-  assert.equal(fs.readdirSync(root).some((name) => name.startsWith("guard.lock.") && name.endsWith(".tmp")), false);
-  fs.writeFileSync = originalWriteFileSync;
+  assert.equal(callbackRan, false);
   fs.openSync = originalOpenSync;
   assert.equal(withGuard(root, 100, () => true), true);
+  assert.equal(fs.existsSync(guardPath), true);
 });
 
-test("OPT-01g13: lease başlangıç yazımı kısmi kalırsa lock yayınlanmaz ve yeniden denenebilir", (t) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-lease-initialization-error-"));
+test("OPT-01g13: kalıcı execution lock normal release sonrasında yeniden kullanılabilir", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-execution-lock-reuse-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const workspaceHash = crypto.createHash("sha256").update(root).digest("hex");
-  const leaseDirectory = path.join(lockDirectory, workspaceHash);
+  const executionLockPath = path.join(coordinatorLockDirectory(lockDirectory, root), "execution.lock");
   const coordinator = createWorkspaceCoordinator({ lockDirectory });
-  const originalOpenSync = fs.openSync;
-  const originalWriteFileSync = fs.writeFileSync;
-  const descriptorPaths = new Map();
-  let injectedFailure = false;
-  fs.openSync = function (filePath, ...args) {
-    const descriptor = originalOpenSync.call(this, filePath, ...args);
-    if (path.basename(String(filePath)).startsWith("write.lock.")) descriptorPaths.set(descriptor, filePath);
-    return descriptor;
-  };
-  fs.writeFileSync = function (target, ...args) {
-    if (typeof target === "number" && path.basename(String(descriptorPaths.get(target))).startsWith("write.lock.")) {
-      originalWriteFileSync.call(this, target, "partial", "utf8");
-      injectedFailure = true;
-      const error = new Error("simulated partial lease initialization");
-      error.code = "ENOSPC";
-      throw error;
-    }
-    return originalWriteFileSync.call(this, target, ...args);
-  };
-  t.after(() => {
-    fs.openSync = originalOpenSync;
-    fs.writeFileSync = originalWriteFileSync;
-    coordinator.release("lease-initialization-error");
-  });
 
-  assert.equal(coordinator.tryAcquire(root, "lease-initialization-error"), null);
-  assert.equal(injectedFailure, true);
-  assert.equal(fs.readdirSync(leaseDirectory).some((name) => name === "write.lock" || name.startsWith("write.lock.")), false);
-  fs.openSync = originalOpenSync;
-  fs.writeFileSync = originalWriteFileSync;
-  assert.ok(coordinator.tryAcquire(root, "lease-initialization-error"));
-  assert.equal(coordinator.assertOwner(root, "lease-initialization-error"), true);
-  coordinator.release("lease-initialization-error");
+  assert.ok(await coordinator.acquire(root, "edit", "execution-lock-first"));
+  assert.equal(fs.statSync(executionLockPath).size, 0);
+  coordinator.release("execution-lock-first");
+  assert.equal(fs.existsSync(executionLockPath), true);
+  assert.ok(await coordinator.acquire(root, "edit", "execution-lock-second"));
+  assert.equal(coordinator.assertOwner(root, "execution-lock-second"), true);
+  coordinator.release("execution-lock-second");
 });
 
 test("OPT-01h: farklı workspace'ler aynı kilit dizininde birbirini engellemez", async (t) => {
@@ -852,7 +725,7 @@ test("OPT-01h: farklı workspace'ler aynı kilit dizininde birbirini engellemez"
   assert.equal(coordinator.snapshot().localActive, 2);
   coordinator.release("isolation-a");
   assert.equal(coordinator.snapshot().localActive, 1);
-  const workspaceBLockPath = path.join(root, "locks", crypto.createHash("sha256").update(workspaceB).digest("hex"), "write.lock");
+  const workspaceBLockPath = path.join(coordinatorLockDirectory(path.join(root, "locks"), workspaceB), "execution.lock");
   assert.equal(fs.existsSync(workspaceBLockPath), true);
   coordinator.release("isolation-b");
 });
@@ -918,9 +791,10 @@ test("OPT-01f1: writer intent bekleyen istek kuyruk kapasitesine dahildir", asyn
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-pending-capacity-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const lockDirectory = path.join(root, "locks");
-  const workspaceDirectory = path.join(lockDirectory, crypto.createHash("sha256").update(root).digest("hex"));
+  const workspaceDirectory = coordinatorLockDirectory(lockDirectory, root);
   fs.mkdirSync(workspaceDirectory, { recursive: true });
-  fs.writeFileSync(path.join(workspaceDirectory, "guard.lock"), "held", "utf8");
+  const guardLock = openKernelFileLock(path.join(workspaceDirectory, "guard.lock"));
+  assert.ok(guardLock);
   const coordinator = createWorkspaceCoordinator({ lockDirectory, maxQueuedPerWorkspace: 1 });
   const pendingWriter = coordinator.acquire(root, "edit", "pending-writer");
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -928,6 +802,7 @@ test("OPT-01f1: writer intent bekleyen istek kuyruk kapasitesine dahildir", asyn
   assert.equal(await coordinator.acquire(root, "edit", "overflow-writer"), null);
   assert.equal(coordinator.cancel("pending-writer"), true);
   assert.equal(await pendingWriter, null);
+  guardLock.release();
 });
 
 test("OPT-02a: read-only cache en eski girişi LRU sınırında çıkarır", () => {

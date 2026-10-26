@@ -631,13 +631,11 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
   const coordinator = createWorkspaceCoordinator({
     lockDirectory: path.join(runtimeConfiguration.statePaths.cache, "locks"),
     staleLockMs: scheduler.staleLockMs,
-    leaseHeartbeatMs: scheduler.leaseHeartbeatMs,
     maxQueuedPerWorkspace: scheduler.maxQueuedPerWorkspace
   });
   const providerCoordinator = createWorkspaceCoordinator({
     lockDirectory: path.join(runtimeConfiguration.statePaths.cache, "provider-admission-locks"),
     staleLockMs: scheduler.staleLockMs,
-    leaseHeartbeatMs: scheduler.leaseHeartbeatMs,
     maxQueuedPerWorkspace: scheduler.maxQueuedPerWorkspace
   });
   const providerAdmissionConfiguration = runtimeConfiguration.orchestration?.providerAdmission || {};

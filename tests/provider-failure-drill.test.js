@@ -353,7 +353,7 @@ test("DRILL-05: timeout read-only'de retry edilir, edit'te mutation_state_unknow
   assertRedactedMetric(editMetric, editRoot);
 });
 
-test("DRILL-06: bayat workspace kilidi temizlenir ve çalışma kesintisiz tamamlanır", async (t) => {
+test("DRILL-06: eski lease dosyası yeni kernel lock alanını etkilemeden korunur", async (t) => {
   const root = fixtureDirectory(t, "stale-lock");
   const configuration = createConfiguration(root, {
     orchestration: {
@@ -382,7 +382,8 @@ test("DRILL-06: bayat workspace kilidi temizlenir ve çalışma kesintisiz tamam
   assert.equal(result.ok, true);
   assert.equal(result.result, "stale lock cleared");
   assert.equal(calls, 1);
-  assert.equal(fs.existsSync(staleLockPath), false);
+  assert.equal(fs.existsSync(staleLockPath), true);
+  assert.equal(fs.readFileSync(staleLockPath, "utf8"), "stale-owner");
 
   const [metric] = runRecords(configuration);
   assert.equal(metric.outcomeStatus, "completed");

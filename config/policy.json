@@ -318,6 +318,7 @@
   },
   "parallelBatch": {
     "enabled": false,
+    "atomicIntegrationEnabled": false,
     "editEnabled": false,
     "maxWorkers": 5,
     "providerConcurrency": {

@@ -1751,7 +1751,15 @@ export function createParallelBatchService({
             changePayloadHash: preparation.changePayloadHash,
             baseCommit: updated.manifest.baseCommit,
             filesChanged: preparation.filesChanged,
-            verification: preparation.verification
+            verification: preparation.verification,
+            authorizationContext: {
+              version: 1,
+              baseCommit: updated.manifest.baseCommit,
+              sourceRefHash: preparation.sourceRefHash || updated.manifest.sourceRefHash,
+              sourceFileStates: preparation.sourceFileStates,
+              sourceFileStatesHash: hashValue(canonicalJson(preparation.sourceFileStates)),
+              sourceFileIdentityHash: hashValue(canonicalJson(preparation.sourceFileIdentities))
+            }
           })
         });
         if (!integrationDetail.stored) {
@@ -1772,6 +1780,8 @@ export function createParallelBatchService({
             sourceRefSnapshot: preparation.sourceRefSnapshot || updated.manifest.sourceRefSnapshot || null,
             filesChanged: preparation.filesChanged,
             sourceFileStates: preparation.sourceFileStates,
+            sourceFileIdentityHash: hashValue(canonicalJson(preparation.sourceFileIdentities)),
+            detailExpiresAt: integrationDetail.expiresAt,
             acceptedTaskIds: preparation.acceptedTaskIds,
             changes: preparation.changes,
             verification: preparation.verification,
@@ -1883,12 +1893,39 @@ export function createParallelBatchService({
   }
 
   async function cancel(rawInput) {
-    await ensureRecovered();
     const batchId = rawInput?.batchId;
     if (typeof batchId !== "string" || !/^[a-f0-9]{16,64}$/.test(batchId)) return { ok: false, reason: "invalid_request", message: "batchId is required" };
-    const manifest = await registry.getBatch(batchId);
+    let manifest = await registry.getBatch(batchId);
+    const activeAtomicOperation = batchConfiguration.atomicIntegrationEnabled === true
+      && manifest?.status === "integrating"
+      && ["applying", "cancel_requested", "committing"].includes(manifest.atomicIntegrationOperation?.status);
+    if (!activeAtomicOperation) {
+      await ensureRecovered();
+      manifest = await registry.getBatch(batchId);
+    }
     if (!manifest || manifest.workspaceHash !== workspaceHash) return { ok: false, reason: "batch_not_found", message: "batch is unknown" };
     if (manifest.status === "integrating") {
+      const operation = manifest.atomicIntegrationOperation;
+      if (batchConfiguration.atomicIntegrationEnabled === true && operation?.status === "applying") {
+        const cancellation = await registry.updateBatch(batchId, (candidate) => {
+          const current = candidate.atomicIntegrationOperation;
+          if (candidate.status !== "integrating" || current?.operationId !== operation.operationId || current.status !== "applying") return false;
+          current.status = "cancel_requested";
+          current.cancelRequestedAt = nowIso();
+          candidate.atomicIntegrationOperations = candidate.atomicIntegrationOperations.map((entry) => entry.operationId === current.operationId ? current : entry);
+          return candidate;
+        });
+        if (cancellation.ok) {
+          return { ok: true, summary: buildSummary(cancellation.manifest, null, "integration cancellation requested before its commit decision"), cancellation: { requested: true } };
+        }
+        const current = await registry.getBatch(batchId);
+        const currentStatus = current?.atomicIntegrationOperation?.status;
+        return {
+          ok: true,
+          summary: buildSummary(current || manifest, null, "integration commit decision already won"),
+          cancellation: { requested: false, reason: currentStatus === "cancel_requested" ? "already_requested" : "commit_decision_won" }
+        };
+      }
       return {
         ok: true,
         summary: buildSummary(manifest, null, "integration is already in progress"),
@@ -2084,6 +2121,336 @@ export function createParallelBatchService({
     }
   }
 
+  async function applyAuthorizedIntegration(rawInput) {
+    await ensureRecovered();
+    const request = rawInput && typeof rawInput === "object" ? rawInput : {};
+    if (batchConfiguration.enabled !== true) return { ok: false, reason: "parallel_batch_disabled", message: "parallel batch is disabled" };
+    if (batchConfiguration.editEnabled !== true || batchConfiguration.atomicIntegrationEnabled !== true) {
+      return { ok: false, reason: "atomic_integration_disabled", message: "atomic integration authorization is disabled" };
+    }
+    if (!worktreeManager || typeof worktreeManager.revalidateIntegration !== "function" || typeof worktreeManager.applyIntegration !== "function") {
+      return { ok: false, reason: "edit_route_unsupported", message: "integration manager is unavailable" };
+    }
+    const lockId = crypto.randomUUID();
+    const lock = await workspaceCoordinator.acquire(trustedWorkspace, "edit", lockId);
+    if (!lock) return { ok: false, reason: "source_workspace_lock_unavailable", message: "source workspace integration lock is unavailable" };
+    const assertWorkspaceLock = () => workspaceCoordinator.assertOwner(trustedWorkspace, lockId) === true;
+    try {
+      let manifest = await registry.getBatch(request.batchId);
+      if (!manifest || manifest.workspaceHash !== workspaceHash) return { ok: false, reason: "batch_not_found", message: "batch is unknown" };
+      if (manifest.status !== "ready_for_approval" || manifest.cancelRequestedAt) return { ok: false, reason: "integration_not_ready", message: "batch is not ready for this integration operation" };
+      const integration = manifest.integration;
+      if (!integration || integration.detailRef !== request.expectedDetailRef
+        || integration.diffHash !== request.expectedDiffHash
+        || integration.diffPreviewHash !== request.expectedDiffPreviewHash
+        || integration.changePayloadHash !== request.expectedChangePayloadHash
+        || integration.baseCommit !== request.expectedBaseCommit
+        || integration.sourceRefHash !== request.expectedSourceRefHash
+        || integration.sourceFileIdentityHash !== request.expectedSourceFileIdentityHash
+        || integration.detailExpiresAt !== request.expectedArtifactExpiresAt) {
+        return { ok: false, reason: "authorization_binding_mismatch", message: "the reviewed integration binding no longer matches the stored batch" };
+      }
+      const nonceHash = hashValue(request.authorizationNonce);
+      const previousOperations = Array.isArray(manifest.atomicIntegrationOperations) ? manifest.atomicIntegrationOperations : [];
+      if (previousOperations.some((entry) => entry?.nonceHash === nonceHash)) return { ok: false, reason: "authorization_replayed", message: "this authorization nonce has already been consumed" };
+      if (previousOperations.length >= 64) return { ok: false, reason: "authorization_history_full", message: "the durable authorization history is full" };
+      const approvalSummary = buildSummary(manifest, null);
+      if (!approvalSummary.approvalRequired || approvalSummary.status !== "ready_for_approval") return { ok: false, reason: "integration_summary_unavailable", message: "the reviewed approval details are unavailable" };
+      if (!Array.isArray(integration.changes) || integration.changePayloadHash !== integrationPayloadHash(integration.changes)
+        || integration.diffHash !== integrationApprovalHash(integration.diffPreviewHash, integration.changePayloadHash)
+        || !Array.isArray(integration.filesChanged) || !Array.isArray(integration.acceptedTaskIds)
+        || !Array.isArray(integration.sourceFileStates) || !validateGitRefSnapshot(integration.sourceRefSnapshot)
+        || integration.sourceRefSnapshot.refsHash !== integration.sourceRefHash) {
+        return { ok: false, reason: "integration_payload_invalid", message: "stored integration payload or source binding is invalid" };
+      }
+      const detail = artifactStore.read({
+        detailRef: request.expectedDetailRef,
+        callerHash,
+        workspaceHash,
+        batchIdHash: hashValue(request.batchId),
+        taskIdHash: hashValue("integration"),
+        cursor: 0,
+        maxBytes: batchConfiguration.maxArtifactBytes || 65536
+      });
+      if (!detail.ok || detail.nextCursor !== null || detail.totalBytes !== Buffer.byteLength(detail.content || "", "utf8")
+        || detail.expiresAt !== request.expectedArtifactExpiresAt || Date.parse(detail.expiresAt) <= clock()) {
+        return { ok: false, reason: detail.reason === "artifact_expired" ? "integration_artifact_expired" : "integration_artifact_unavailable", message: "the exact reviewed integration artifact is unavailable or expired" };
+      }
+      let detailContent;
+      try {
+        detailContent = JSON.parse(detail.content);
+      } catch {
+        return { ok: false, reason: "integration_artifact_invalid", message: "the reviewed integration artifact is invalid" };
+      }
+      const sourceFileStatesHash = hashValue(canonicalJson(integration.sourceFileStates));
+      const authorizationContext = detailContent?.authorizationContext;
+      if (!detailContent || typeof detailContent !== "object" || Array.isArray(detailContent)
+        || detailContent.diffHash !== integration.diffHash
+        || detailContent.diffPreviewHash !== integration.diffPreviewHash
+        || detailContent.changePayloadHash !== integration.changePayloadHash
+        || detailContent.baseCommit !== integration.baseCommit
+        || hashValue(detailContent.diff || "") !== integration.diffPreviewHash
+        || !Array.isArray(detailContent.filesChanged) || canonicalJson(detailContent.filesChanged) !== canonicalJson(integration.filesChanged)
+        || authorizationContext?.version !== 1
+        || authorizationContext.baseCommit !== integration.baseCommit
+        || authorizationContext.sourceRefHash !== integration.sourceRefHash
+        || authorizationContext.sourceFileStatesHash !== sourceFileStatesHash
+        || authorizationContext.sourceFileIdentityHash !== request.expectedSourceFileIdentityHash
+        || canonicalJson(authorizationContext.sourceFileStates) !== canonicalJson(integration.sourceFileStates)
+        || request.expectedSourceFileStatesHash !== sourceFileStatesHash) {
+        return { ok: false, reason: "integration_artifact_invalid", message: "the reviewed artifact does not match the exact stored payload and source conditions" };
+      }
+      const acceptedTasks = integration.acceptedTaskIds.map((taskId) => {
+        const task = manifest.tasks?.[taskId];
+        return task ? { taskId, status: task.status, filesChanged: task.filesChanged } : null;
+      });
+      if (acceptedTasks.some((task) => !task)) return { ok: false, reason: "integration_payload_invalid", message: "stored task ownership metadata is incomplete" };
+      let initialRefState;
+      let initialClean;
+      try {
+        initialClean = worktreeManager.assertCleanSource();
+        initialRefState = worktreeManager.captureRefState();
+      } catch {
+        return { ok: false, reason: "source_state_unavailable", message: "the source binding could not be captured safely" };
+      }
+      if (!initialClean.ok || initialClean.head !== request.expectedBaseCommit || initialRefState.head !== request.expectedBaseCommit) {
+        return { ok: false, reason: "source_head_changed", message: "source HEAD or cleanliness differs from the reviewed conditions" };
+      }
+      if (initialRefState.refsHash !== request.expectedSourceRefHash) return { ok: false, reason: "source_ref_changed", message: "the complete Git ref set differs from the reviewed conditions" };
+      const preparation = worktreeManager.revalidateIntegration({
+        batchId: request.batchId,
+        originalBaseCommit: integration.baseCommit,
+        currentBaseCommit: initialRefState.head,
+        originalSourceFileStates: integration.sourceFileStates,
+        changes: integration.changes,
+        acceptedTasks,
+        expectedDiffHash: integration.diffHash,
+        expectedDiffPreviewHash: integration.diffPreviewHash,
+        expectedChangePayloadHash: integration.changePayloadHash,
+        expectedRefHash: initialRefState.refsHash,
+        expectedRefSnapshot: initialRefState.refSnapshot
+      });
+      if (!preparation.ok) return { ok: false, reason: preparation.reason, message: "the reviewed diff could not be revalidated against the exact source conditions" };
+      if (preparation.baseCommit !== request.expectedBaseCommit
+        || preparation.sourceRefHash !== request.expectedSourceRefHash
+        || preparation.diffHash !== request.expectedDiffHash
+        || preparation.diffPreviewHash !== request.expectedDiffPreviewHash
+        || preparation.changePayloadHash !== request.expectedChangePayloadHash
+        || canonicalJson(preparation.changes) !== canonicalJson(integration.changes)
+        || canonicalJson(preparation.filesChanged) !== canonicalJson(integration.filesChanged)
+        || canonicalJson(preparation.sourceFileStates) !== canonicalJson(integration.sourceFileStates)
+        || hashValue(canonicalJson(preparation.sourceFileStates)) !== request.expectedSourceFileStatesHash
+        || hashValue(canonicalJson(preparation.sourceFileIdentities)) !== request.expectedSourceFileIdentityHash) {
+        return { ok: false, reason: "integration_revalidation_mismatch", message: "revalidation changed the reviewed payload or source conditions" };
+      }
+      if (!assertWorkspaceLock()) return { ok: false, reason: "workspace_lock_lost", message: "source workspace lock ownership was lost" };
+      const ownerEpoch = (Number.isSafeInteger(manifest.ownerEpoch) ? manifest.ownerEpoch : 0) + 1;
+      const operationId = crypto.randomUUID();
+      const createdAt = nowIso();
+      const operationRecord = {
+        operationId,
+        nonceHash,
+        callerHash,
+        workspaceHash,
+        batchId: request.batchId,
+        detailRef: request.expectedDetailRef,
+        artifactExpiresAt: request.expectedArtifactExpiresAt,
+        diffHash: request.expectedDiffHash,
+        diffPreviewHash: request.expectedDiffPreviewHash,
+        changePayloadHash: request.expectedChangePayloadHash,
+        baseCommit: request.expectedBaseCommit,
+        sourceRefHash: request.expectedSourceRefHash,
+        sourceFileStatesHash: request.expectedSourceFileStatesHash,
+        sourceFileIdentityHash: request.expectedSourceFileIdentityHash,
+        status: "applying",
+        createdAt,
+        updatedAt: createdAt
+      };
+      const claimed = await registry.updateBatch(request.batchId, (candidate) => {
+        if (!assertWorkspaceLock() || candidate.status !== "ready_for_approval" || candidate.cancelRequestedAt
+          || candidate.workspaceHash !== workspaceHash || candidate.integration?.detailRef !== request.expectedDetailRef
+          || candidate.integration?.diffHash !== request.expectedDiffHash
+          || candidate.atomicIntegrationOperations?.some((entry) => entry?.nonceHash === nonceHash)
+          || (candidate.atomicIntegrationOperations || []).length >= 64) return false;
+        candidate.status = "integrating";
+        candidate.integrationStartedAt = createdAt;
+        candidate.ownerId = batchOwnerId;
+        candidate.ownerEpoch = ownerEpoch;
+        candidate.ownerLeaseExpiresAt = new Date(clock() + batchOwnerLeaseMs).toISOString();
+        candidate.atomicIntegrationOperations = [...(candidate.atomicIntegrationOperations || []), operationRecord];
+        candidate.atomicIntegrationOperation = operationRecord;
+        return candidate;
+      }, { assertOwner: assertWorkspaceLock });
+      if (!claimed.ok) return { ok: false, reason: "authorization_claim_failed", message: "the one-use authorization could not be durably claimed" };
+      manifest = claimed.manifest;
+      const integrationOwnerEpoch = manifest.ownerEpoch;
+      const decisionAt = nowIso();
+      let commitDecisionFailure = "operation_state_changed";
+      const commitDecision = await registry.updateBatch(request.batchId, (candidate) => {
+        const operation = candidate.atomicIntegrationOperation;
+        if (!assertWorkspaceLock()) {
+          commitDecisionFailure = "workspace_lock_lost";
+          return false;
+        }
+        if (candidate.status !== "integrating" || candidate.ownerId !== batchOwnerId
+          || candidate.ownerEpoch !== integrationOwnerEpoch || operation?.operationId !== operationId || operation.status !== "applying") return false;
+        if (Date.parse(request.expectedArtifactExpiresAt) <= clock()) {
+          commitDecisionFailure = "integration_artifact_expired";
+          return false;
+        }
+        try {
+          const currentRefState = worktreeManager.captureRefState();
+          const currentClean = worktreeManager.assertCleanSource();
+          const currentIdentities = worktreeManager.captureSourceFileIdentityStates(preparation.filesChanged);
+          const currentFileStates = currentIdentities.map((state) => ({
+            relativePath: state.relativePath,
+            state: state.state,
+            ...(state.state === "present" ? { sha256: state.sha256, fileMode: state.fileMode } : {})
+          }));
+          if (currentRefState.head !== request.expectedBaseCommit) commitDecisionFailure = "source_head_changed";
+          else if (currentRefState.refsHash !== request.expectedSourceRefHash) commitDecisionFailure = "source_ref_changed";
+          else if (!currentClean.ok || currentClean.head !== request.expectedBaseCommit) commitDecisionFailure = currentClean.reason || "source_not_clean";
+          else if (canonicalJson(currentFileStates) !== canonicalJson(preparation.sourceFileStates)) commitDecisionFailure = "source_file_state_changed";
+          else if (canonicalJson(currentIdentities) !== canonicalJson(preparation.sourceFileIdentities)) commitDecisionFailure = "source_file_identity_changed";
+          if (commitDecisionFailure !== "operation_state_changed") return false;
+        } catch {
+          commitDecisionFailure = "source_state_unavailable";
+          return false;
+        }
+        operation.status = "committing";
+        operation.commitDecisionAt = decisionAt;
+        operation.updatedAt = decisionAt;
+        candidate.atomicIntegrationOperations = candidate.atomicIntegrationOperations.map((entry) => entry.operationId === operationId ? operation : entry);
+        return candidate;
+      }, { assertOwner: assertWorkspaceLock });
+      if (!commitDecision.ok) {
+        const current = await registry.getBatch(request.batchId);
+        if (current?.atomicIntegrationOperation?.operationId === operationId && current.atomicIntegrationOperation.status === "cancel_requested") {
+          const cancelled = await registry.updateBatch(request.batchId, (candidate) => {
+            const operation = candidate.atomicIntegrationOperation;
+            if (candidate.status !== "integrating" || operation?.operationId !== operationId || operation.status !== "cancel_requested") return false;
+            operation.status = "cancelled";
+            operation.updatedAt = nowIso();
+            candidate.atomicIntegrationOperations = candidate.atomicIntegrationOperations.map((entry) => entry.operationId === operationId ? operation : entry);
+            candidate.status = "cancelled";
+            candidate.endedAt = nowIso();
+            candidate.ownerId = null;
+            candidate.ownerLeaseExpiresAt = null;
+            return candidate;
+          }, { assertOwner: assertWorkspaceLock });
+          return { ok: false, reason: cancelled.ok ? "integration_cancelled" : "recovery_required", message: "integration was cancelled before its durable commit decision" };
+        }
+        if (assertWorkspaceLock() && commitDecisionFailure !== "workspace_lock_lost") {
+          const rejectedAt = nowIso();
+          const rejected = await registry.updateBatch(request.batchId, (candidate) => {
+            const operation = candidate.atomicIntegrationOperation;
+            if (candidate.status !== "integrating" || candidate.ownerId !== batchOwnerId
+              || candidate.ownerEpoch !== integrationOwnerEpoch || operation?.operationId !== operationId || operation.status !== "applying") return false;
+            operation.status = "rejected";
+            operation.failureReason = commitDecisionFailure;
+            operation.rejectedAt = rejectedAt;
+            operation.updatedAt = rejectedAt;
+            candidate.atomicIntegrationOperations = candidate.atomicIntegrationOperations.map((entry) => entry.operationId === operationId ? operation : entry);
+            candidate.integrationFailure = commitDecisionFailure;
+            candidate.status = "ready_for_approval";
+            candidate.ownerId = null;
+            candidate.ownerLeaseExpiresAt = null;
+            return candidate;
+          }, { assertOwner: assertWorkspaceLock });
+          if (!rejected.ok) return { ok: false, reason: "integration_recovery_required", message: "the durable authorization rejection requires recovery" };
+        }
+        return { ok: false, reason: commitDecisionFailure, message: "source, ref, or lock conditions changed before the durable commit decision" };
+      }
+      const internalApprovalRef = crypto.randomBytes(32).toString("hex");
+      const managerManifest = {
+        ...commitDecision.manifest,
+        integration: {
+          ...integration,
+          approvalRef: internalApprovalRef,
+          baseCommit: preparation.baseCommit,
+          sourceRefHash: preparation.sourceRefHash,
+          sourceRefSnapshot: preparation.sourceRefSnapshot,
+          sourceFileStates: preparation.sourceFileStates,
+          sourceFileIdentities: preparation.sourceFileIdentities,
+          changes: preparation.changes,
+          filesChanged: preparation.filesChanged,
+          revalidation: { schemaVersion: 1, sourceFileIdentities: preparation.sourceFileIdentities }
+        }
+      };
+      let result;
+      try {
+        result = worktreeManager.applyIntegration({
+          batchId: request.batchId,
+          approvalRef: internalApprovalRef,
+          expectedDiffHash: request.expectedDiffHash,
+          manifest: managerManifest,
+          assertLockOwner: () => assertWorkspaceLock()
+            && registry.assertBatchOwner(request.batchId, batchOwnerId, integrationOwnerEpoch, new Set(["integrating"]), true)
+            && registry.assertBatchAtomicOperation(request.batchId, operationId, "committing", batchOwnerId, integrationOwnerEpoch)
+        });
+      } catch {
+        result = { ok: false, reason: "promotion_failed", message: "integration promotion failed" };
+      }
+      if (!result.ok) {
+        const failed = await registry.updateBatch(request.batchId, (candidate) => {
+          const operation = candidate.atomicIntegrationOperation;
+          if (!assertWorkspaceLock() || candidate.status !== "integrating" || candidate.ownerId !== batchOwnerId
+            || candidate.ownerEpoch !== integrationOwnerEpoch || operation?.operationId !== operationId || operation.status !== "committing") return false;
+          operation.status = "rejected";
+          operation.failureReason = result.reason;
+          operation.updatedAt = nowIso();
+          candidate.atomicIntegrationOperations = candidate.atomicIntegrationOperations.map((entry) => entry.operationId === operationId ? operation : entry);
+          candidate.integrationFailure = result.reason;
+          candidate.integrationFailureDiagnostics = result.refChanges ? { refChanges: safeRefChanges(result.refChanges) } : null;
+          candidate.status = new Set(["source_file_identity_changed", "source_file_state_changed", "source_head_changed", "source_ref_changed", "workspace_lock_lost"]).has(result.reason)
+            ? "ready_for_approval"
+            : "blocked";
+          candidate.ownerId = null;
+          candidate.ownerLeaseExpiresAt = null;
+          return candidate;
+        }, { assertOwner: assertWorkspaceLock });
+        return failed.ok ? result : { ok: false, reason: "integration_recovery_required", message: "the durable operation requires recovery" };
+      }
+      const committedAt = nowIso();
+      const committed = await registry.updateBatch(request.batchId, (candidate) => {
+        const operation = candidate.atomicIntegrationOperation;
+        if (!assertWorkspaceLock() || candidate.status !== "integrating" || candidate.ownerId !== batchOwnerId
+          || candidate.ownerEpoch !== integrationOwnerEpoch || operation?.operationId !== operationId || operation.status !== "committing") return false;
+        operation.status = "committed";
+        operation.committedAt = committedAt;
+        operation.updatedAt = committedAt;
+        candidate.atomicIntegrationOperations = candidate.atomicIntegrationOperations.map((entry) => entry.operationId === operationId ? operation : entry);
+        candidate.status = "integrated";
+        candidate.integratedAt = committedAt;
+        candidate.integration = { ...result.integration, approvalRef: integration.approvalRef };
+        candidate.integrationFailureDiagnostics = null;
+        candidate.ownerId = null;
+        candidate.ownerLeaseExpiresAt = null;
+        return candidate;
+      }, { assertOwner: assertWorkspaceLock });
+      if (!committed.ok) return { ok: false, reason: "integration_recovery_required", message: "the source commit marker exists and recovery must reconcile the operation" };
+      const finalized = worktreeManager.finalizePromotion?.(request.batchId, {
+        workspaceHash,
+        diffHash: request.expectedDiffHash,
+        assertLockOwner: assertWorkspaceLock
+      });
+      if (finalized?.ok === false) return { ok: true, summary: buildSummary(committed.manifest, null, "integration committed; durable recovery cleanup remains pending") };
+      const appliedAt = nowIso();
+      const applied = await registry.updateBatch(request.batchId, (candidate) => {
+        const operation = candidate.atomicIntegrationOperation;
+        if (!assertWorkspaceLock() || candidate.status !== "integrated" || operation?.operationId !== operationId || operation.status !== "committed") return false;
+        operation.status = "applied";
+        operation.appliedAt = appliedAt;
+        operation.updatedAt = appliedAt;
+        candidate.atomicIntegrationOperations = candidate.atomicIntegrationOperations.map((entry) => entry.operationId === operationId ? operation : entry);
+        return candidate;
+      }, { assertOwner: assertWorkspaceLock });
+      return { ok: true, summary: buildSummary(applied.ok ? applied.manifest : committed.manifest, null, "the reviewed integration was applied") };
+    } finally {
+      workspaceCoordinator.release(lockId);
+    }
+  }
+
   async function revalidateIntegration(rawInput) {
     await ensureRecovered();
     const request = rawInput && typeof rawInput === "object" ? rawInput : {};
@@ -2137,9 +2504,10 @@ export function createParallelBatchService({
       } catch {
         return { ok: false, reason: "integration_artifact_invalid", message: "stored integration detail artifact is invalid" };
       }
-      const expectedDetailKeys = ["baseCommit", "changePayloadHash", "diff", "diffHash", "diffPreviewHash", "filesChanged", "verification"];
+      const expectedLegacyDetailKeys = ["baseCommit", "changePayloadHash", "diff", "diffHash", "diffPreviewHash", "filesChanged", "verification"].sort();
+      const expectedCurrentDetailKeys = [...expectedLegacyDetailKeys, "authorizationContext"].sort();
       if (!previousDetail || typeof previousDetail !== "object" || Array.isArray(previousDetail)
-        || Object.keys(previousDetail).sort().join("|") !== expectedDetailKeys.sort().join("|")
+        || ![expectedLegacyDetailKeys.join("|"), expectedCurrentDetailKeys.join("|")].includes(Object.keys(previousDetail).sort().join("|"))
         || previousDetail.baseCommit !== previous.baseCommit
         || previousDetail.diffHash !== previous.diffHash
         || previousDetail.diffPreviewHash !== previous.diffPreviewHash
@@ -2149,6 +2517,15 @@ export function createParallelBatchService({
         || hashValue(previousDetail.diff) !== previous.diffPreviewHash
         || !Array.isArray(previousDetail.verification)) {
         return { ok: false, reason: "integration_artifact_invalid", message: "stored integration detail artifact does not match the approval payload" };
+      }
+      if (previousDetail.authorizationContext !== undefined
+        && (previousDetail.authorizationContext?.version !== 1
+          || previousDetail.authorizationContext.baseCommit !== previous.baseCommit
+          || previousDetail.authorizationContext.sourceRefHash !== previous.sourceRefHash
+          || previousDetail.authorizationContext.sourceFileStatesHash !== hashValue(canonicalJson(previous.sourceFileStates))
+          || previousDetail.authorizationContext.sourceFileIdentityHash !== previous.sourceFileIdentityHash
+          || canonicalJson(previousDetail.authorizationContext.sourceFileStates) !== canonicalJson(previous.sourceFileStates))) {
+        return { ok: false, reason: "integration_artifact_invalid", message: "stored integration source context does not match the approval binding" };
       }
       const acceptedTasks = previous.acceptedTaskIds.map((taskId) => {
         const task = manifest.tasks?.[taskId];
@@ -2197,7 +2574,15 @@ export function createParallelBatchService({
           ...approvalHashes,
           baseCommit: preparation.baseCommit,
           filesChanged: preparation.filesChanged,
-          verification: preparation.verification
+          verification: preparation.verification,
+          authorizationContext: {
+            version: 1,
+            baseCommit: preparation.baseCommit,
+            sourceRefHash: preparation.sourceRefHash,
+            sourceFileStates: preparation.sourceFileStates,
+          sourceFileStatesHash: hashValue(canonicalJson(preparation.sourceFileStates)),
+          sourceFileIdentityHash: hashValue(canonicalJson(preparation.sourceFileIdentities))
+          }
         })
       });
       if (!newDetail.stored) return { ok: false, reason: `integration_artifact_${newDetail.reason}`, message: "new integration detail artifact could not be stored" };
@@ -2241,6 +2626,8 @@ export function createParallelBatchService({
         sourceRefSnapshot: preparation.sourceRefSnapshot,
         filesChanged: preparation.filesChanged,
         sourceFileStates: preparation.sourceFileStates,
+        sourceFileIdentityHash: hashValue(canonicalJson(preparation.sourceFileIdentities)),
+        detailExpiresAt: newDetail.expiresAt,
         acceptedTaskIds: preparation.acceptedTaskIds,
         changes: preparation.changes,
         verification: preparation.verification,
@@ -2356,12 +2743,14 @@ export function createParallelBatchService({
       ? worktreeManager.hasPendingPromotions?.() !== false || worktreeManager.promotionRecoveryStatus?.().ok === false
       : false;
     const storedBatches = await registry.listBatches();
+    const pendingAtomicOperations = storedBatches.some((manifest) => manifest.workspaceHash === workspaceHash
+      && ["applying", "cancel_requested", "committing", "committed"].includes(manifest.atomicIntegrationOperation?.status));
     const interruptedBatchesPending = storedBatches.some((manifest) =>
       manifest.workspaceHash === workspaceHash && recoveryEligibleBatchStatuses.has(manifest.status));
     const unscopedInterruptedBatchesPending = storedBatches.some((manifest) =>
       recoveryEligibleBatchStatuses.has(manifest.status)
       && (typeof manifest.workspaceHash !== "string" || !/^[a-f0-9]{64}$/.test(manifest.workspaceHash)));
-    if (!promotionRecoveryPending && !interruptedBatchesPending && !unscopedInterruptedBatchesPending) {
+    if (!promotionRecoveryPending && !interruptedBatchesPending && !unscopedInterruptedBatchesPending && !pendingAtomicOperations) {
       return { ok: true, recovered: [], unscopedCount: 0, liveOwnerCount: 0 };
     }
     if (typeof workspaceCoordinator.acquire !== "function" || typeof workspaceCoordinator.release !== "function" || typeof workspaceCoordinator.assertOwner !== "function") {
@@ -2399,6 +2788,47 @@ export function createParallelBatchService({
         const finalized = worktreeManager.finalizePromotion?.(batchId, { workspaceHash, diffHash, assertLockOwner: assertRecoveryLockOwner });
         if (finalized?.ok === false) return { ok: false, recovered: [], reason: finalized.reason };
       }
+      for (const priorManifest of storedBatches) {
+        if (assertRecoveryLockOwner() !== true) return { ok: false, recovered: [], reason: "recovery_lock_lost" };
+        if (priorManifest.workspaceHash !== workspaceHash) continue;
+        const current = await registry.getBatch(priorManifest.batchId);
+        const operation = current?.atomicIntegrationOperation;
+        if (!operation || !["applying", "cancel_requested", "committing", "committed"].includes(operation.status)) continue;
+        if (operation.callerHash !== callerHash || operation.workspaceHash !== workspaceHash || operation.batchId !== current.batchId
+          || !(current.atomicIntegrationOperations || []).some((entry) => entry?.operationId === operation.operationId && entry.nonceHash === operation.nonceHash)) {
+          return { ok: false, recovered: [], reason: "atomic_integration_record_invalid" };
+        }
+        const recoveredAt = nowIso();
+        const completed = await registry.updateBatch(current.batchId, (candidate) => {
+          if (assertRecoveryLockOwner() !== true || candidate.workspaceHash !== workspaceHash
+            || candidate.atomicIntegrationOperation?.operationId !== operation.operationId
+            || !["applying", "cancel_requested", "committing", "committed"].includes(candidate.atomicIntegrationOperation.status)) return false;
+          const record = candidate.atomicIntegrationOperation;
+          if (candidate.status === "integrated" && ["committing", "committed"].includes(record.status)) {
+            record.status = "applied";
+            record.appliedAt = recoveredAt;
+          } else if (candidate.status === "integrating" && record.status === "cancel_requested") {
+            record.status = "cancelled";
+            record.cancelledAt = recoveredAt;
+            candidate.status = "cancelled";
+            candidate.endedAt = recoveredAt;
+          } else if (candidate.status === "integrating" && ["applying", "committing", "committed"].includes(record.status)) {
+            record.status = "rejected";
+            record.failureReason = "process_recovered_before_commit_marker";
+            record.rejectedAt = recoveredAt;
+            candidate.status = "ready_for_approval";
+            candidate.integrationFailure = "integration_interrupted_before_commit";
+          } else {
+            return false;
+          }
+          record.updatedAt = recoveredAt;
+          candidate.atomicIntegrationOperations = (candidate.atomicIntegrationOperations || []).map((entry) => entry.operationId === record.operationId ? record : entry);
+          candidate.ownerId = null;
+          candidate.ownerLeaseExpiresAt = null;
+          return candidate;
+        }, { assertOwner: assertRecoveryLockOwner });
+        if (!completed.ok) return { ok: false, recovered: [], reason: "atomic_integration_recovery_failed" };
+      }
       if (assertRecoveryLockOwner() !== true) return { ok: false, recovered: [], reason: "recovery_lock_lost" };
       const outcome = await registry.recoverInterruptedBatches({ workspaceHash, assertOwner: assertRecoveryLockOwner });
       if (outcome.reason === "owner_lost") return { ok: false, recovered: outcome.recovered, reason: "recovery_lock_lost" };
@@ -2427,6 +2857,7 @@ export function createParallelBatchService({
     getTaskDetail,
     cancel,
     approveIntegration,
+    applyAuthorizedIntegration,
     revalidateIntegration,
     recover,
     callerHash,

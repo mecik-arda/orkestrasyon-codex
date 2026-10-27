@@ -7,6 +7,7 @@ import { validateClaudeSonnetAcceptanceOutput } from "../../services/claude-sonn
 import { controlledEditResultSchema, preparedEditRejectionResultSchema } from "../../schemas/core-schemas.js";
 import {
   approveParallelIntegrationRequestSchema,
+  applyAuthorizedParallelIntegrationRequestSchema,
   cancelParallelBatchRequestSchema,
   getParallelBatchRequestSchema,
   getParallelTaskDetailRequestSchema,
@@ -147,6 +148,7 @@ export const publicToolSchemas = {
   getParallelTaskDetail: getParallelTaskDetailRequestSchema,
   cancelParallelBatch: cancelParallelBatchRequestSchema,
   approveParallelIntegration: approveParallelIntegrationRequestSchema,
+  applyAuthorizedParallelIntegration: applyAuthorizedParallelIntegrationRequestSchema,
   revalidateParallelIntegration: revalidateParallelIntegrationRequestSchema,
   checkProviderCapability: z.object({
     provider: z.enum(["antigravity", "codex", "claude_code"]),
@@ -370,6 +372,10 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
     async approveParallelIntegration(input) {
       const parsed = parse(publicToolSchemas.approveParallelIntegration, input);
       return toParallelBatchResult(await runtime.approveParallelIntegration(parsed, trustedWorkspace));
+    },
+    async applyAuthorizedParallelIntegration(input) {
+      const parsed = parse(publicToolSchemas.applyAuthorizedParallelIntegration, input);
+      return toParallelBatchResult(await runtime.applyAuthorizedParallelIntegration(parsed, trustedWorkspace));
     },
     async revalidateParallelIntegration(input) {
       const parsed = parse(publicToolSchemas.revalidateParallelIntegration, input);

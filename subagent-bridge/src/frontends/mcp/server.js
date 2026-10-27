@@ -423,6 +423,14 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
         inputSchema: publicToolInputShape(publicToolSchemas.approveParallelIntegration),
         annotations: executionAnnotations
       }, safe(handlers.approveParallelIntegration));
+      if (configuration.parallelBatch?.atomicIntegrationEnabled === true) {
+        server.registerTool("apply_authorized_parallel_integration", {
+          title: "Önceden incelenen paralel diff'i tek işlemde uygula",
+          description: "Önceden görülen exact diff/payload, artefakt süresi ve açık HEAD, tüm-ref kümesi hash'i ve kaynak dosya durumları eşleşirse kalıcı tek-kullanımlık yetki kaydı oluşturup aynı kilit altında yeniden doğrular ve uygular. Her kaynak veya ref değişimi işlemi reddeder. Varsayılan olarak kapalıdır; approvalRef yetki değildir. Git commit veya push yapmaz.",
+          inputSchema: publicToolInputShape(publicToolSchemas.applyAuthorizedParallelIntegration),
+          annotations: executionAnnotations
+        }, safe(handlers.applyAuthorizedParallelIntegration));
+      }
     }
   }
 

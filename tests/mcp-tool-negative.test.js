@@ -19,6 +19,19 @@ const wrongTypePayloads = {
   getParallelTaskDetail: { batchId: "a".repeat(32), taskId: "task-one", detailRef: 42 },
   cancelParallelBatch: { batchId: false },
   approveParallelIntegration: { batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: 42 },
+  applyAuthorizedParallelIntegration: {
+    batchId: "a".repeat(32),
+    expectedDiffHash: 42,
+    expectedDiffPreviewHash: "b".repeat(64),
+    expectedChangePayloadHash: "c".repeat(64),
+    expectedDetailRef: "d".repeat(64),
+    expectedArtifactExpiresAt: new Date(Date.now() + 60000).toISOString(),
+    expectedBaseCommit: "e".repeat(40),
+    expectedSourceRefHash: "f".repeat(64),
+    expectedSourceFileStatesHash: "1".repeat(64),
+    expectedSourceFileIdentityHash: "2".repeat(64),
+    authorizationNonce: "3".repeat(64)
+  },
   revalidateParallelIntegration: { batchId: "a".repeat(32), approvalRef: 42, expectedDiffHash: "b".repeat(64) },
   checkProviderCapability: { provider: 42 }
 };

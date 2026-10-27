@@ -17,7 +17,7 @@ const batchTransitions = {
   cancelling: new Set(["cancelled", "unknown", "blocked", "failed", "result_ready"]),
   result_ready: new Set(["integrating", "ready_for_approval", "failed", "cancelled", "blocked"]),
   blocked: new Set(["failed", "cancelled", "unknown"]),
-  integrating: new Set(["ready_for_approval", "integrated", "blocked", "failed", "unknown"]),
+  integrating: new Set(["ready_for_approval", "integrated", "cancelled", "blocked", "failed", "unknown"]),
   ready_for_approval: new Set(["integrating", "integrated", "failed", "cancelled", "blocked"]),
   integrated: new Set(),
   failed: new Set(),
@@ -203,6 +203,19 @@ export function createParallelBatchRegistry({ stateDirectory, staleLockMs = 1500
     }
   }
 
+  function assertBatchAtomicOperation(batchId, operationId, operationStatus, ownerId, ownerEpoch) {
+    try {
+      const manifest = readJsonFile(batchPath(batchId));
+      return manifest?.status === "integrating"
+        && manifest.ownerId === ownerId
+        && manifest.ownerEpoch === ownerEpoch
+        && manifest.atomicIntegrationOperation?.operationId === operationId
+        && manifest.atomicIntegrationOperation.status === operationStatus;
+    } catch {
+      return false;
+    }
+  }
+
   async function listBatches() {
     try {
       return fs.readdirSync(batchesDirectory)
@@ -289,6 +302,7 @@ export function createParallelBatchRegistry({ stateDirectory, staleLockMs = 1500
     updateBatch,
     renewBatchLease,
     assertBatchOwner,
+    assertBatchAtomicOperation,
     listBatches,
     recoverInterruptedBatches,
     validateBatchTransition,

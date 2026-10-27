@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -31,7 +32,7 @@ function createRepository(t) {
   return { root, workspace, baseCommit: git(workspace, ["rev-parse", "HEAD"]).trim() };
 }
 
-function createConfiguration(root, verificationCommands = ["git diff --check"]) {
+function createConfiguration(root, verificationCommands = ["git diff --check"], atomicIntegrationEnabled = false) {
   const stateRoot = path.join(root, "runtime");
   return {
     packageRoot: root,
@@ -47,6 +48,7 @@ function createConfiguration(root, verificationCommands = ["git diff --check"]) 
     parallelBatch: {
       enabled: true,
       editEnabled: true,
+      atomicIntegrationEnabled,
       maxWorkers: 2,
       providerConcurrency: { codex: 1 },
       defaultProviderConcurrency: 1,
@@ -133,9 +135,9 @@ function editTask(verificationCommands = ["git diff --check"]) {
   };
 }
 
-async function createReadyEditFixture(t) {
+async function createReadyEditFixture(t, atomicIntegrationEnabled = false) {
   const repository = createRepository(t);
-  const configuration = createConfiguration(repository.root);
+  const configuration = createConfiguration(repository.root, ["git diff --check"], atomicIntegrationEnabled);
   const observedRequests = [];
   const runtime = createBridgeRuntime({ configuration, adapters: { codex: createEditAdapter(observedRequests) }, sleep: async () => {} });
   const prepared = await runtime.prepareParallelBatch({ objective: "Edit the file", batchMaxReservedCostUsd: 1, tasks: [editTask()] }, repository.workspace);
@@ -145,6 +147,354 @@ async function createReadyEditFixture(t) {
   const ready = await waitForBatch(runtime, repository.workspace, started.batchId, ["ready_for_approval", "blocked", "failed"]);
   return { ...repository, configuration, observedRequests, runtime, started, ready };
 }
+
+async function authorizedIntegrationRequest(fixture) {
+  const manifestPath = path.join(fixture.configuration.statePaths.state, "parallel-batches", "batches", `${fixture.started.batchId}.json`);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const integration = manifest.integration;
+  const detail = await fixture.runtime.getParallelTaskDetail({
+    batchId: fixture.started.batchId,
+    taskId: "integration",
+    detailRef: integration.detailRef,
+    cursor: 0,
+    maxBytes: 65536
+  }, fixture.workspace);
+  assert.equal(detail.ok, true, JSON.stringify(detail));
+  assert.equal(detail.page.nextCursor, null);
+  const content = JSON.parse(detail.page.content);
+  return {
+    batchId: fixture.started.batchId,
+    expectedDiffHash: content.diffHash,
+    expectedDiffPreviewHash: content.diffPreviewHash,
+    expectedChangePayloadHash: content.changePayloadHash,
+    expectedDetailRef: integration.detailRef,
+    expectedArtifactExpiresAt: detail.page.expiresAt,
+    expectedBaseCommit: content.authorizationContext.baseCommit,
+    expectedSourceRefHash: content.authorizationContext.sourceRefHash,
+    expectedSourceFileStatesHash: content.authorizationContext.sourceFileStatesHash,
+    expectedSourceFileIdentityHash: content.authorizationContext.sourceFileIdentityHash,
+    authorizationNonce: crypto.randomBytes(32).toString("hex")
+  };
+}
+
+function createAtomicService(fixture, registryOverride = null, managerOverride = null, coordinatorOptions = {}) {
+  const stateDirectory = path.join(fixture.configuration.statePaths.state, "parallel-batches");
+  const registry = createParallelBatchRegistry({ stateDirectory });
+  const scheduler = fixture.configuration.orchestration.scheduler || {};
+  const workspaceCoordinator = createWorkspaceCoordinator({
+    lockDirectory: path.join(fixture.configuration.statePaths.cache, "locks"),
+    staleLockMs: scheduler.staleLockMs,
+    maxQueuedPerWorkspace: scheduler.maxQueuedPerWorkspace,
+    ...coordinatorOptions
+  });
+  const worktreeManager = managerOverride || createGitWorktreeBatchManager({
+    sourceWorkspace: fixture.workspace,
+    worktreeRoot: fixture.configuration.parallelBatch.worktreeRoot,
+    verificationCommands: fixture.configuration.parallelBatch.verificationCommands
+  });
+  const artifactStore = createParallelArtifactStore({
+    rootDirectory: path.join(fixture.configuration.statePaths.state, "parallel-artifacts"),
+    ttlMs: fixture.configuration.parallelBatch.artifactTtlMs,
+    maxArtifactBytes: fixture.configuration.parallelBatch.maxArtifactBytes,
+    maxTotalBytes: fixture.configuration.parallelBatch.maxArtifactTotalBytes
+  });
+  return createParallelBatchService({
+    configuration: fixture.configuration,
+    registry: registryOverride || registry,
+    artifactStore,
+    runtime: { run: async () => { throw new Error("provider call is not permitted in this operation"); } },
+    trustedWorkspace: fixture.workspace,
+    caller: "codexDesktop",
+    worktreeManager,
+    workspaceCoordinator
+  });
+}
+
+test("P3-OPTION-B-01: authorized integration uses the viewed exact binding once and adds no provider call", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  const providerCallsBefore = fixture.observedRequests.length;
+  const applied = await fixture.runtime.applyAuthorizedParallelIntegration(request, fixture.workspace);
+  assert.equal(applied.ok, true, JSON.stringify(applied));
+  assert.equal(applied.summary.status, "integrated");
+  assert.equal(fixture.observedRequests.length, providerCallsBefore);
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "edited by worker\n");
+  const manifestPath = path.join(fixture.configuration.statePaths.state, "parallel-batches", "batches", `${fixture.started.batchId}.json`);
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  assert.equal(manifest.atomicIntegrationOperation.status, "applied");
+  assert.equal(manifest.atomicIntegrationOperation.nonceHash, crypto.createHash("sha256").update(request.authorizationNonce).digest("hex"));
+  assert.notEqual(manifest.atomicIntegrationOperation.nonceHash, request.authorizationNonce);
+  assert.equal(manifest.atomicIntegrationOperations.length, 1);
+  const replay = await fixture.runtime.applyAuthorizedParallelIntegration(request, fixture.workspace);
+  assert.equal(replay.ok, false);
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "edited by worker\n");
+});
+
+test("P3-OPTION-B-02: complete ref-set drift after the user viewed the artifact rejects the operation", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  git(fixture.workspace, ["update-ref", "refs/heads/option-b-test-ref", fixture.baseCommit]);
+  const applied = await fixture.runtime.applyAuthorizedParallelIntegration(request, fixture.workspace);
+  assert.equal(applied.ok, false);
+  assert.equal(applied.reason, "source_ref_changed");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+});
+
+test("P3-OPTION-B-03: absent feature flag refuses the new runtime operation", async (t) => {
+  const fixture = await createReadyEditFixture(t, false);
+  const request = await authorizedIntegrationRequest(fixture);
+  const applied = await fixture.runtime.applyAuthorizedParallelIntegration(request, fixture.workspace);
+  assert.equal(applied.ok, false);
+  assert.equal(applied.reason, "atomic_integration_disabled");
+});
+
+test("P3-OPTION-B-04: cancellation that wins before the commit decision prevents source writes", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  const registry = createParallelBatchRegistry({ stateDirectory: path.join(fixture.configuration.statePaths.state, "parallel-batches") });
+  let releaseClaim;
+  let signalClaim;
+  const claimPublished = new Promise((resolve) => { signalClaim = resolve; });
+  const claimPaused = new Promise((resolve) => { releaseClaim = resolve; });
+  const registryBarrier = {
+    ...registry,
+    async updateBatch(...args) {
+      const result = await registry.updateBatch(...args);
+      if (result.ok && result.manifest.atomicIntegrationOperation?.status === "applying") {
+        signalClaim();
+        await claimPaused;
+      }
+      return result;
+    }
+  };
+  const service = createAtomicService(fixture, registryBarrier);
+  const applyPromise = service.applyAuthorizedIntegration(request);
+  await claimPublished;
+  const cancellation = await service.cancel({ batchId: fixture.started.batchId });
+  assert.equal(cancellation.cancellation.requested, true);
+  releaseClaim();
+  const result = await applyPromise;
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "integration_cancelled");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  const manifest = await registry.getBatch(fixture.started.batchId);
+  assert.equal(manifest.status, "cancelled");
+  assert.equal(manifest.atomicIntegrationOperation.status, "cancelled");
+  assert.equal(fixture.observedRequests.length, 1);
+});
+
+test("P3-OPTION-B-05: recovery rejects an interrupted pre-decision record without applying it", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  const registry = createParallelBatchRegistry({ stateDirectory: path.join(fixture.configuration.statePaths.state, "parallel-batches") });
+  const manifest = await registry.getBatch(fixture.started.batchId);
+  const operation = {
+    operationId: crypto.randomUUID(),
+    nonceHash: crypto.createHash("sha256").update(request.authorizationNonce).digest("hex"),
+    callerHash: crypto.createHash("sha256").update("codexDesktop").digest("hex"),
+    workspaceHash: manifest.workspaceHash,
+    batchId: fixture.started.batchId,
+    status: "applying",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const interrupted = await registry.updateBatch(fixture.started.batchId, (candidate) => {
+    candidate.status = "integrating";
+    candidate.atomicIntegrationOperation = operation;
+    candidate.atomicIntegrationOperations = [operation];
+    candidate.ownerId = "interrupted-owner";
+    candidate.ownerEpoch = 1;
+    candidate.ownerLeaseExpiresAt = new Date(0).toISOString();
+    return candidate;
+  });
+  assert.equal(interrupted.ok, true);
+  const service = createAtomicService(fixture);
+  const recovery = await service.recover();
+  assert.equal(recovery.reason, undefined, JSON.stringify(recovery));
+  const recovered = await registry.getBatch(fixture.started.batchId);
+  assert.equal(recovered.status, "ready_for_approval");
+  assert.equal(recovered.atomicIntegrationOperation.status, "rejected");
+  assert.equal(recovered.atomicIntegrationOperation.failureReason, "process_recovered_before_commit_marker");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  assert.equal(fixture.observedRequests.length, 1);
+});
+
+test("P3-OPTION-B-06: lock held by another cooperating process prevents authorized integration", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  const service = createAtomicService(fixture, null, null, { maxWaitAttempts: 1 });
+  await service.getBatch({ batchId: fixture.started.batchId });
+  const coordinator = createWorkspaceCoordinator({ lockDirectory: path.join(fixture.configuration.statePaths.cache, "locks") });
+  const lockId = crypto.randomUUID();
+  assert.ok(await coordinator.acquire(fixture.workspace, "edit", lockId));
+  try {
+    const blocked = await service.applyAuthorizedIntegration(request);
+    assert.equal(blocked.ok, false);
+    assert.equal(blocked.reason, "source_workspace_lock_unavailable");
+    assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+  } finally {
+    coordinator.release(lockId);
+  }
+});
+
+test("P3-OPTION-B-07: ref drift during in-operation revalidation is rejected before source writes", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  const manager = createGitWorktreeBatchManager({
+    sourceWorkspace: fixture.workspace,
+    worktreeRoot: fixture.configuration.parallelBatch.worktreeRoot,
+    verificationCommands: fixture.configuration.parallelBatch.verificationCommands
+  });
+  const startupRecovery = manager.recoverPendingPromotions();
+  assert.equal(startupRecovery.ok, true, JSON.stringify(startupRecovery));
+  const originalRevalidate = manager.revalidateIntegration;
+  manager.revalidateIntegration = (input) => {
+    const result = originalRevalidate(input);
+    if (result.ok) git(fixture.workspace, ["update-ref", "refs/heads/option-b-during-revalidation", fixture.baseCommit]);
+    return result;
+  };
+  const service = createAtomicService(fixture, null, manager);
+  const applied = await service.applyAuthorizedIntegration(request);
+  assert.equal(applied.ok, false);
+  assert.equal(applied.reason, "source_ref_changed");
+  const registry = createParallelBatchRegistry({ stateDirectory: path.join(fixture.configuration.statePaths.state, "parallel-batches") });
+  const manifest = await registry.getBatch(fixture.started.batchId);
+  assert.equal(manifest.status, "ready_for_approval");
+  assert.equal(manifest.atomicIntegrationOperation.status, "rejected");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "alpha\n");
+});
+
+test("P3-OPTION-B-08: recovery completes a durable manager commit marker without replaying promotion", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  const stateDirectory = path.join(fixture.configuration.statePaths.state, "parallel-batches");
+  const registry = createParallelBatchRegistry({ stateDirectory });
+  const manifest = await registry.getBatch(fixture.started.batchId);
+  const integration = manifest.integration;
+  const manager = createGitWorktreeBatchManager({
+    sourceWorkspace: fixture.workspace,
+    worktreeRoot: fixture.configuration.parallelBatch.worktreeRoot,
+    verificationCommands: fixture.configuration.parallelBatch.verificationCommands
+  });
+  const startupRecovery = manager.recoverPendingPromotions();
+  assert.equal(startupRecovery.ok, true, JSON.stringify(startupRecovery));
+  const acceptedTasks = integration.acceptedTaskIds.map((taskId) => ({
+    taskId,
+    status: manifest.tasks[taskId].status,
+    filesChanged: manifest.tasks[taskId].filesChanged
+  }));
+  const refState = manager.captureRefState();
+  const preparation = manager.revalidateIntegration({
+    batchId: fixture.started.batchId,
+    originalBaseCommit: integration.baseCommit,
+    currentBaseCommit: refState.head,
+    originalSourceFileStates: integration.sourceFileStates,
+    changes: integration.changes,
+    acceptedTasks,
+    expectedDiffHash: integration.diffHash,
+    expectedDiffPreviewHash: integration.diffPreviewHash,
+    expectedChangePayloadHash: integration.changePayloadHash,
+    expectedRefHash: refState.refsHash,
+    expectedRefSnapshot: refState.refSnapshot
+  });
+  assert.equal(preparation.ok, true, JSON.stringify(preparation));
+  const operationId = crypto.randomUUID();
+  const operation = {
+    operationId,
+    nonceHash: crypto.createHash("sha256").update(request.authorizationNonce).digest("hex"),
+    callerHash: crypto.createHash("sha256").update("codexDesktop").digest("hex"),
+    workspaceHash: manifest.workspaceHash,
+    batchId: fixture.started.batchId,
+    detailRef: request.expectedDetailRef,
+    artifactExpiresAt: request.expectedArtifactExpiresAt,
+    diffHash: request.expectedDiffHash,
+    diffPreviewHash: request.expectedDiffPreviewHash,
+    changePayloadHash: request.expectedChangePayloadHash,
+    baseCommit: request.expectedBaseCommit,
+    sourceRefHash: request.expectedSourceRefHash,
+    sourceFileStatesHash: request.expectedSourceFileStatesHash,
+    sourceFileIdentityHash: request.expectedSourceFileIdentityHash,
+    status: "committing",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const lockDirectory = path.join(fixture.configuration.statePaths.cache, "locks");
+  const coordinator = createWorkspaceCoordinator({ lockDirectory });
+  const lockId = crypto.randomUUID();
+  assert.ok(await coordinator.acquire(fixture.workspace, "edit", lockId));
+  try {
+    const claimed = await registry.updateBatch(fixture.started.batchId, (candidate) => {
+      candidate.status = "integrating";
+      candidate.ownerId = "crashed-atomic-owner";
+      candidate.ownerEpoch = 7;
+      candidate.ownerLeaseExpiresAt = new Date(0).toISOString();
+      candidate.atomicIntegrationOperation = operation;
+      candidate.atomicIntegrationOperations = [operation];
+      return candidate;
+    });
+    assert.equal(claimed.ok, true);
+    const internalApprovalRef = crypto.randomBytes(32).toString("hex");
+    const applied = manager.applyIntegration({
+      batchId: fixture.started.batchId,
+      approvalRef: internalApprovalRef,
+      expectedDiffHash: request.expectedDiffHash,
+      manifest: {
+        ...claimed.manifest,
+        integration: {
+          ...integration,
+          approvalRef: internalApprovalRef,
+          baseCommit: preparation.baseCommit,
+          sourceRefHash: preparation.sourceRefHash,
+          sourceRefSnapshot: preparation.sourceRefSnapshot,
+          sourceFileStates: preparation.sourceFileStates,
+          changes: preparation.changes,
+          filesChanged: preparation.filesChanged,
+          revalidation: { schemaVersion: 1, sourceFileIdentities: preparation.sourceFileIdentities }
+        }
+      },
+      assertLockOwner: () => coordinator.assertOwner(fixture.workspace, lockId)
+        && registry.assertBatchAtomicOperation(fixture.started.batchId, operationId, "committing", "crashed-atomic-owner", 7)
+    });
+    assert.equal(applied.ok, true, JSON.stringify(applied));
+  } finally {
+    coordinator.release(lockId);
+  }
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "edited by worker\n");
+  const service = createAtomicService(fixture);
+  const recovery = await service.recover();
+  assert.equal(recovery.reason, undefined, JSON.stringify(recovery));
+  const recovered = await registry.getBatch(fixture.started.batchId);
+  assert.equal(recovered.status, "integrated");
+  assert.equal(recovered.atomicIntegrationOperation.status, "applied");
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "src", "a.txt"), "utf8"), "edited by worker\n");
+  assert.equal(fixture.observedRequests.length, 1);
+});
+
+test("P3-OPTION-B-09: same-content replacement with a different file identity is rejected", async (t) => {
+  const fixture = await createReadyEditFixture(t, true);
+  const request = await authorizedIntegrationRequest(fixture);
+  const target = path.join(fixture.workspace, "src", "a.txt");
+  const replacement = `${target}.${crypto.randomUUID()}.replacement`;
+  const manager = createGitWorktreeBatchManager({
+    sourceWorkspace: fixture.workspace,
+    worktreeRoot: fixture.configuration.parallelBatch.worktreeRoot,
+    verificationCommands: fixture.configuration.parallelBatch.verificationCommands
+  });
+  const beforeIdentity = manager.captureSourceFileIdentityStates(["src/a.txt"])[0];
+  fs.copyFileSync(target, replacement);
+  fs.rmSync(target);
+  fs.renameSync(replacement, target);
+  const afterIdentity = manager.captureSourceFileIdentityStates(["src/a.txt"])[0];
+  assert.equal(afterIdentity.state, "present");
+  assert.equal(afterIdentity.sha256, beforeIdentity.sha256);
+  assert.notEqual(`${afterIdentity.dev}:${afterIdentity.ino}`, `${beforeIdentity.dev}:${beforeIdentity.ino}`);
+  assert.equal(git(fixture.workspace, ["status", "--porcelain"]).trim(), "");
+  const applied = await fixture.runtime.applyAuthorizedParallelIntegration(request, fixture.workspace);
+  assert.equal(applied.ok, false);
+  assert.equal(applied.reason, "integration_revalidation_mismatch");
+  assert.equal(fs.readFileSync(target, "utf8"), "alpha\n");
+  assert.equal(fixture.observedRequests.length, 1);
+});
 
 async function createSourceRefRejectedFixture(t) {
   const fixture = await createReadyEditFixture(t);

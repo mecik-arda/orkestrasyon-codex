@@ -168,6 +168,20 @@ export const approveParallelIntegrationRequestSchema = z.object({
   expectedDiffHash: z.string().regex(/^[a-f0-9]{64}$/)
 }).strict();
 
+export const applyAuthorizedParallelIntegrationRequestSchema = z.object({
+  batchId: z.string().regex(/^[a-f0-9]{16,64}$/),
+  expectedDiffHash: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedDiffPreviewHash: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedChangePayloadHash: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedDetailRef: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedArtifactExpiresAt: z.string().datetime(),
+  expectedBaseCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
+  expectedSourceRefHash: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedSourceFileStatesHash: z.string().regex(/^[a-f0-9]{64}$/),
+  expectedSourceFileIdentityHash: z.string().regex(/^[a-f0-9]{64}$/),
+  authorizationNonce: z.string().regex(/^[a-f0-9]{64}$/)
+}).strict();
+
 export const revalidateParallelIntegrationRequestSchema = z.object({
   batchId: z.string().regex(/^[a-f0-9]{16,64}$/),
   approvalRef: z.string().regex(/^[a-f0-9]{64}$/),

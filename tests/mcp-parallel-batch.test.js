@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -57,6 +58,10 @@ function createStubRuntime(overrides = {}) {
       calls.push({ method: "approve", input });
       return { ok: false, reason: "integration_not_ready", message: "not ready" };
     },
+    async applyAuthorizedParallelIntegration(input) {
+      calls.push({ method: "applyAuthorized", input });
+      return { ok: false, reason: "integration_not_ready", message: "not ready" };
+    },
     async revalidateParallelIntegration(input) {
       calls.push({ method: "revalidate", input });
       return { ok: false, reason: "integration_revalidation_unavailable", message: "not ready" };
@@ -75,6 +80,21 @@ test("V2-MCP: public parallel batch schemas reject bridge-owned metadata", () =>
   assert.equal(publicToolSchemas.getParallelBatch.safeParse({ batchId: "a".repeat(32) }).success, true);
   assert.equal(publicToolSchemas.revalidateParallelIntegration.safeParse({ batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: "c".repeat(64) }).success, true);
   assert.equal(publicToolSchemas.revalidateParallelIntegration.safeParse({ batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: "c".repeat(64), workspace: "C:\\x" }).success, false);
+  const authorized = {
+    batchId: "a".repeat(32),
+    expectedDiffHash: "b".repeat(64),
+    expectedDiffPreviewHash: "c".repeat(64),
+    expectedChangePayloadHash: "d".repeat(64),
+    expectedDetailRef: "e".repeat(64),
+    expectedArtifactExpiresAt: new Date(Date.now() + 60000).toISOString(),
+    expectedBaseCommit: "f".repeat(40),
+    expectedSourceRefHash: "1".repeat(64),
+    expectedSourceFileStatesHash: "2".repeat(64),
+    expectedSourceFileIdentityHash: "4".repeat(64),
+    authorizationNonce: "3".repeat(64)
+  };
+  assert.equal(publicToolSchemas.applyAuthorizedParallelIntegration.safeParse(authorized).success, true);
+  assert.equal(publicToolSchemas.applyAuthorizedParallelIntegration.safeParse({ ...authorized, approvalRef: "4".repeat(64) }).success, false);
   assert.equal(publicToolSchemas.cancelParallelBatch.safeParse({ batchId: "a".repeat(32), force: true }).success, false);
 });
 
@@ -108,6 +128,21 @@ test("V2-MCP: start, get, detail, cancel and approve handlers map results and er
   assert.equal(revalidated.isError, true);
   assert.equal(revalidated.structuredContent.reason, "integration_revalidation_unavailable");
   assert.equal(runtime.calls.at(-1).method, "revalidate");
+  const authorized = await handlers.applyAuthorizedParallelIntegration({
+    batchId: "a".repeat(32),
+    expectedDiffHash: "b".repeat(64),
+    expectedDiffPreviewHash: "c".repeat(64),
+    expectedChangePayloadHash: "d".repeat(64),
+    expectedDetailRef: "e".repeat(64),
+    expectedArtifactExpiresAt: new Date(Date.now() + 60000).toISOString(),
+    expectedBaseCommit: "f".repeat(40),
+    expectedSourceRefHash: "1".repeat(64),
+    expectedSourceFileStatesHash: "2".repeat(64),
+    expectedSourceFileIdentityHash: "4".repeat(64),
+    authorizationNonce: "3".repeat(64)
+  });
+  assert.equal(authorized.isError, true);
+  assert.equal(runtime.calls.at(-1).method, "applyAuthorized");
 });
 
 test("V2-MCP: handlers reject injected bridge fields before runtime access", async () => {
@@ -207,6 +242,14 @@ test("V2-MCP: parallel tools are registered only under the enabled and approval 
   for (const name of ["prepare_parallel_batch", "start_parallel_batch", "get_parallel_batch", "get_parallel_task_detail", "cancel_parallel_batch", "approve_parallel_integration", "revalidate_parallel_integration"]) {
     assert.equal(enabledTools.includes(name), true, `${name} should be registered`);
   }
+  assert.equal(enabledTools.includes("apply_authorized_parallel_integration"), false);
+  const optInTools = await listRegisteredToolNames(createSubagentMcpServer({
+    runtime: createStubRuntime(),
+    configuration: { parallelBatch: { enabled: true, atomicIntegrationEnabled: true } },
+    trustedWorkspace: process.cwd(),
+    enableOrchestratorApproval: true
+  }));
+  assert.equal(optInTools.includes("apply_authorized_parallel_integration"), true);
   const noApprovalTools = await listRegisteredToolNames(createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration: { parallelBatch: { enabled: true } },
@@ -216,6 +259,7 @@ test("V2-MCP: parallel tools are registered only under the enabled and approval 
   assert.equal(noApprovalTools.includes("prepare_parallel_batch"), true);
   assert.equal(noApprovalTools.includes("approve_parallel_integration"), false);
   assert.equal(noApprovalTools.includes("revalidate_parallel_integration"), false);
+  assert.equal(noApprovalTools.includes("apply_authorized_parallel_integration"), false);
   const disabledTools = await listRegisteredToolNames(createSubagentMcpServer({
     runtime: createStubRuntime(),
     configuration: { parallelBatch: { enabled: false } },
@@ -557,6 +601,7 @@ test("V2-MCP-E2E: edit batch birleşik diff'i MCP üzerinden sunar ve ayrı onay
     parallelBatch: {
       enabled: true,
       editEnabled: true,
+      atomicIntegrationEnabled: true,
       maxWorkers: 1,
       providerConcurrency: { codex: 1 },
       defaultProviderConcurrency: 1,
@@ -650,6 +695,30 @@ test("V2-MCP-E2E: edit batch birleşik diff'i MCP üzerinden sunar ve ayrı onay
     assert.equal(preview.diffHash, summary.approval.diffHash);
     assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "alpha\n");
     assert.equal(runGit(["status", "--porcelain"]).trim(), "");
+    assert.equal(listed.tools.some((tool) => tool.name === "apply_authorized_parallel_integration"), true);
+    const applied = await client.callTool({
+      name: "apply_authorized_parallel_integration",
+      arguments: {
+        batchId: started.structuredContent.batchId,
+        expectedDiffHash: preview.diffHash,
+        expectedDiffPreviewHash: preview.diffPreviewHash,
+        expectedChangePayloadHash: preview.changePayloadHash,
+        expectedDetailRef: detail.structuredContent.page.detailRef,
+        expectedArtifactExpiresAt: detail.structuredContent.page.expiresAt,
+        expectedBaseCommit: preview.authorizationContext.baseCommit,
+        expectedSourceRefHash: preview.authorizationContext.sourceRefHash,
+        expectedSourceFileStatesHash: preview.authorizationContext.sourceFileStatesHash,
+        expectedSourceFileIdentityHash: preview.authorizationContext.sourceFileIdentityHash,
+        authorizationNonce: crypto.randomBytes(32).toString("hex")
+      }
+    });
+    assert.equal(applied.isError, false, JSON.stringify(applied.structuredContent));
+    assert.equal(applied.structuredContent.summary.status, "integrated");
+    const finalBatch = await client.callTool({ name: "get_parallel_batch", arguments: { batchId: started.structuredContent.batchId } });
+    assert.equal(finalBatch.structuredContent.summary.status, "integrated");
+    assert.equal(adapterCalls, 1);
+    assert.equal(fs.readFileSync(path.join(workspace, "src", "a.txt"), "utf8"), "edited by worker\n");
+    assert.match(runGit(["status", "--porcelain"]).trim(), /^ ?M src\/a\.txt$/u);
   } finally {
     await client.close();
   }

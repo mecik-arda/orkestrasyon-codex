@@ -1121,6 +1121,8 @@ export function createGitWorktreeBatchManager({
       }
       if (expectedChanges.size === 0 && accepted.length > 0) return { ok: false, reason: "task_diff_payload_missing" };
       const changes = [...expectedChanges.values()].sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0);
+      const sourceFileIdentities = captureSourceFileIdentityStates(changes.map((change) => change.relativePath));
+      if (sourceFileIdentities.some((state) => state.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
       for (const change of changes) {
         const applied = applyIntegrationPayload(integrationPath, change);
         if (!applied.ok) return { ok: false, reason: applied.reason, taskId: expectedOwners.get(change.relativePath) };
@@ -1168,6 +1170,14 @@ export function createGitWorktreeBatchManager({
       if (!diff.trim()) return { ok: false, reason: "integration_empty_diff" };
       const sourceFileStates = captureSourceFileStates(changes.map((change) => change.relativePath));
       if (sourceFileStates.some((state) => state.state === "rejected")) return { ok: false, reason: "source_state_rejected" };
+      const finalSourceFileIdentities = captureSourceFileIdentityStates(changes.map((change) => change.relativePath));
+      if (JSON.stringify(finalSourceFileIdentities) !== JSON.stringify(sourceFileIdentities)) return { ok: false, reason: "source_file_identity_changed" };
+      const identitySourceFileStates = finalSourceFileIdentities.map((state) => ({
+        relativePath: state.relativePath,
+        state: state.state,
+        ...(state.state === "present" ? { sha256: state.sha256, fileMode: state.fileMode } : {})
+      }));
+      if (JSON.stringify(identitySourceFileStates) !== JSON.stringify(sourceFileStates)) return { ok: false, reason: "source_file_state_changed" };
       const approvalHashes = integrationDiffHash(diff, changes);
       let finalRefState;
       try {
@@ -1194,6 +1204,7 @@ export function createGitWorktreeBatchManager({
         diff,
         filesChanged: changes.map((change) => change.relativePath),
         sourceFileStates,
+        sourceFileIdentities: finalSourceFileIdentities,
         changes,
         verification: verification.results
       };

@@ -219,6 +219,7 @@ const configurationSchema = z.object({
   parallelBatch: z.object({
     enabled: z.boolean(),
     editEnabled: z.boolean(),
+    atomicIntegrationEnabled: z.boolean().optional(),
     maxWorkers: z.number().int().min(1).max(5),
     providerConcurrency: z.record(z.string().min(1).max(64), z.number().int().min(1).max(10)).optional(),
     defaultProviderConcurrency: z.number().int().min(1).max(10).optional(),

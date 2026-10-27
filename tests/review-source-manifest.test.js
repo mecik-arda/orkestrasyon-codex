@@ -198,19 +198,30 @@ test("RSM-05C: trusted workspace rebinding after initial validation is rejected"
     fs.rmSync(originalRoot, { recursive: true, force: true });
   });
   const requestedPaths = ["selected.js"];
+  let linkUnavailable = false;
   requestedPaths.map = (normalizePath) => {
     fs.renameSync(root, originalRoot);
     try {
       fs.symlinkSync(outsideRoot, root, process.platform === "win32" ? "junction" : "dir");
     } catch (error) {
       fs.renameSync(originalRoot, root);
-      if (["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP"].includes(error.code)) return t.skip("directory-link creation is unavailable");
+      if (["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP"].includes(error.code)) {
+        linkUnavailable = true;
+        return Array.prototype.map.call(requestedPaths, normalizePath);
+      }
       throw error;
     }
     return Array.prototype.map.call(requestedPaths, normalizePath);
   };
 
-  assert.throws(() => createReviewSourceManifest(root, requestedPaths), { code: "review_scope_changed" });
+  let failure;
+  try {
+    createReviewSourceManifest(root, requestedPaths);
+  } catch (error) {
+    failure = error;
+  }
+  if (linkUnavailable) return t.skip("directory-link creation is unavailable");
+  assert.equal(failure?.code, "review_scope_changed");
 });
 
 test("RSM-ERROR-01: pre-open path failures retain the bounded source error classification", (t) => {

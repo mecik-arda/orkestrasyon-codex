@@ -140,7 +140,7 @@ test("pilot CLI args omit workspace grants while normal Antigravity calls retain
 
 test("Antigravity adapter starts one fake provider CLI without granting workspace context", async (t) => {
   const fixturePath = fileURLToPath(new URL("./fixtures/claude-sonnet-pilot-read-only-fixture.js", import.meta.url));
-  for (const scenario of ["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "provider_failure", "provider_spawn_failure"]) {
+  for (const scenario of ["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "invalid_task_json", "wrong_task_type", "wrong_carrier_type", "missing_carrier_result", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-sonnet-pilot-cli-"));
     const temporaryDirectory = path.join(root, "temporary");
     fs.mkdirSync(temporaryDirectory);
@@ -218,7 +218,7 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.recentProviderCode, "permission_denied");
         assert.equal(result.recentOsErrorCode, "EPERM");
         assert.equal(result.recentExitCode, null);
-      } else if (scenario === "success" || scenario === "provider_failure") {
+      } else if (!["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "provider_spawn_failure"].includes(scenario)) {
         assert.equal(result.providerPurposeStarts, 1);
         assert.equal(result.readOnlyEnforcementObserved, true);
         assert.equal(result.settingsLockObserved, true);
@@ -227,11 +227,52 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.workspaceGrantAbsent, true);
         assert.equal(result.temporaryCwdRemoved, true);
       }
-      if (scenario === "success") {
+      if (scenario === "success" || scenario === "valid_response_carrier") {
         assert.equal(result.mcpIsError, false);
         assert.equal(result.acceptancePassed, true);
         assert.equal(result.recentFailureClass, null);
         assert.equal(result.recentFailureStage, null);
+        assert.equal(result.recentOutputIntegrity, "complete");
+        assert.equal(result.recentTaskCompletion, "completed");
+        assert.equal(result.requestedModel, "claude_sonnet");
+        assert.equal(result.resolvedModel, "claude-sonnet-4-6", scenario);
+        assert.equal(result.outputIntegrity, "complete");
+        assert.equal(result.taskCompletion, "completed");
+      }
+      if (scenario === "invalid_task_json" || scenario === "wrong_task_type") {
+        assert.equal(result.mcpIsError, true);
+        assert.equal(result.acceptancePassed, false);
+        assert.equal(result.reason, "schema_invalid");
+        assert.equal(result.failureStage, "result_parse");
+        assert.equal(result.requestedModel, "claude_sonnet");
+        assert.equal(result.resolvedModel, "claude-sonnet-4-6", scenario);
+        assert.equal(result.outputIntegrity, "complete");
+        assert.equal(result.taskCompletion, "partial");
+        assert.equal(result.recentFailureClass, "schema_invalid");
+        assert.equal(result.recentFailureStage, "result_parse");
+        assert.equal(result.recentOutputIntegrity, "complete");
+        assert.equal(result.recentTaskCompletion, "partial");
+      }
+      if (["wrong_carrier_type", "missing_carrier_result", "truncated_output", "multiple_output_records"].includes(scenario)) {
+        assert.equal(result.mcpIsError, true);
+        assert.equal(result.acceptancePassed, false);
+        assert.equal(result.reason, "output_parse_invalid");
+        assert.equal(result.failureStage, "result_parse");
+        assert.equal(result.requestedModel, "claude_sonnet");
+        assert.equal(result.resolvedModel, "claude-sonnet-4-6", scenario);
+        assert.equal(result.outputIntegrity, "complete");
+        assert.equal(result.taskCompletion, "partial");
+        assert.equal(result.recentFailureClass, "output_parse_invalid");
+        assert.equal(result.recentFailureStage, "result_parse");
+        assert.equal(result.recentOutputIntegrity, "complete");
+        assert.equal(result.recentTaskCompletion, "partial");
+      }
+      if (scenario === "empty_output") {
+        assert.equal(result.mcpIsError, true);
+        assert.equal(result.acceptancePassed, false);
+        assert.equal(result.reason, "empty_output");
+        assert.equal(result.failureStage, "result_parse");
+        assert.equal(result.providerFailureDiagnostics.providerCode, "empty_output");
       }
       if (scenario === "provider_failure") {
         assert.equal(result.mcpIsError, true);

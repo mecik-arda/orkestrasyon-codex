@@ -523,22 +523,32 @@ function failureStageForClassification(errorClass, fallback = "provider_executio
   return fallback;
 }
 
-function extractAntigravityResult(stdout) {
+function parseAntigravityResult(stdout) {
   const trimmed = stdout.trim();
-  if (!trimmed) return null;
+  if (!trimmed) return { resultText: null, failureClass: "empty_output" };
 
   try {
     const parsed = JSON.parse(trimmed);
     if (parsed && Object.hasOwn(parsed, "structured_output")) {
-      return normalizeCarrierStructuredOutput(parsed.structured_output);
+      const resultText = normalizeCarrierStructuredOutput(parsed.structured_output);
+      return resultText
+        ? { resultText, failureClass: null }
+        : { resultText: null, failureClass: "output_parse_invalid" };
     }
     if (typeof parsed?.response === "string") {
-      return parsed.response.trim() || null;
+      const resultText = parsed.response.trim();
+      return resultText
+        ? { resultText, failureClass: null }
+        : { resultText: null, failureClass: "empty_output" };
     }
-    return JSON.stringify(parsed);
+    return { resultText: JSON.stringify(parsed), failureClass: null };
   } catch {
-    return trimmed;
+    return { resultText: trimmed, failureClass: null };
   }
+}
+
+function extractAntigravityResult(stdout) {
+  return parseAntigravityResult(stdout).resultText;
 }
 
 function readUrlErrorIsPermissionDenied(error) {
@@ -1077,13 +1087,19 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
             return failure;
           }
 
-          const resultText = webReadTrace ? streamTrace.resultText : extractAntigravityResult(processResult.stdout);
+          const extraction = webReadTrace
+            ? { resultText: streamTrace.resultText, failureClass: streamTrace.resultText ? null : "empty_output" }
+            : parseAntigravityResult(processResult.stdout);
+          const resultText = extraction.resultText;
           if (!resultText) {
+            const malformedPilotCarrier = request.claudeSonnetAcceptancePilot === true && extraction.failureClass === "output_parse_invalid";
+            const failureClass = malformedPilotCarrier ? "output_parse_invalid" : "empty_output";
             const failure = mapCategoryToSubagentError(
-              "empty_output", "provider returned an empty result",
+              failureClass,
+              malformedPilotCarrier ? "provider returned an invalid structured carrier" : "provider returned an empty result",
               "antigravity", model.model,
-              Date.now() - startedAt, 0, 0, null,
-              createAttemptDiagnostics("result_parse", "empty_output", {
+              Date.now() - startedAt, 0, processResult.code, null,
+              createAttemptDiagnostics("result_parse", malformedPilotCarrier ? null : "empty_output", {
                 settingsLockWaitMs,
                 providerExecutionMs,
                 stdoutBytes: Buffer.byteLength(processResult.stdout, "utf8"),

@@ -1,5 +1,7 @@
 # Codex Desktop uçtan uca geçiş planı
 
+P1b result_parse takibi — 2026-10-27: Tek live pilot `schema_invalid/result_parse` ile görev kabulünü geçmedi. Güvenli hata metni kaynakta task validator ret noktasına eşleşiyor; geçmiş ham yanıt yok ve canonical okuyucu bu shell'de kayıt bulmadığından dış taşıyıcının tam biçimi bilinmiyor. Sentetik structured-output testinde handler/runtime/adapter zincirinde carrier unwrap eksikliği yeniden üretildi, taşıyıcı strict açma ve hata metadata'sında bilinen model/exit bilgisi koruması eklendi. P1b canlı kabulü açık; P2/P3/P6 değişmedi. Ayrıntı [P1b inceleme raporunda](../reports/P1B_CLAUDE_RESULT_PARSE_DOGRULAMASI_2026-10-27.md).
+
 ## Güncel durum notu — 2026-10-27
 
 Bu plan tarihsel prosedür ve kabul ölçütlerini korur. Güncel kaynak incelemesine göre P1b görev kabulü, P2 canlı onay/red/stale/recovery ve kaynak entegrasyonu, P3 edit batch kaynak entegrasyonu ve P6 nihai uzlaştırma açıktır. P3 salt-okunur DAG ile cancel/restart-unknown canlı alt kanıtları tamamlanmıştır ve tekrarlanmayacaktır. P3 entegrasyonundaki tüm-ref guard ve `source_ref_changed` retleri korunur. Hades workspace identity eşleşmesi kod revision/startup attestation değildir. Review permit yerel bileşeni production MCP/runtime'a bağlı değildir; güvenlik auto-review kararı ayrı dış engeldir. Bu planın güncel kanıt eşlemesi ve yürütme kartları [2026-10-27 durum raporundadır](../reports/GECIS_KALAN_KABULLER_VE_YURUTME_SIRASI_2026-10-27.md). Genel geçiş tamamlanmamıştır.

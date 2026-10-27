@@ -1,5 +1,7 @@
 # Geçişte kalan kabuller ve yürütme sırası
 
+P1b ek durumu — 2026-10-27: Bu raporun önceki snapshot'ından sonra, etkin Claude pilot aracına tek canlı çağrı yapıldı ve `schema_invalid/result_parse` ile görev kabulü geçmedi. Yerel kaynak testi `structured_output` taşıyıcısının pilotta açılmadığı kusurunu yeniden üretti; düzeltilen yerel handler/runtime/adapter zinciri test edildi. Bu sentetik sonuç geçmiş ham cevabın biçimini kanıtlamaz. Geçmiş canlı metadata bu shell'in canonical okuyucusunda bulunamadı; raporun önceki kod revision'ı iddiası güncel değildir. Detay ve son doğrulama [P1b inceleme raporunda](P1B_CLAUDE_RESULT_PARSE_DOGRULAMASI_2026-10-27.md). P1b canlı kabulü açık; diğer kapılar değişmedi.
+
 Tarih: 2026-10-27 Türkiye
 
 ## Başlangıç ve kapsam

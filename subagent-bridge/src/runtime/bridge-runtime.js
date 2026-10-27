@@ -266,7 +266,7 @@ function createRuntimeFailure(backend, model, error, overrides = {}) {
     metrics: overrides.metrics,
     reviewContract: overrides.reviewContract,
     requestedModel: model,
-    resolvedModel: null
+    resolvedModel: Object.hasOwn(overrides, "resolvedModel") ? overrides.resolvedModel : null
   });
   result.metrics.adapterAttempts = overrides.adapterAttempts ?? 0;
   return result;
@@ -1130,7 +1130,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
           }
           try {
             result = normalizeProviderResult(result, {
-              requireCarrier: webEvidenceMode === "strict" || webEvidenceMode === "repair",
+              requireCarrier: webEvidenceMode === "strict" || webEvidenceMode === "repair" || input.claudeSonnetAcceptancePilot === true,
               allowPlainRepair: webEvidenceMode === "repair",
               rejectRestricted: webEvidenceMode !== "off",
               webIntentHeuristics: runtimeConfiguration.orchestration?.webIntentHeuristics === true,
@@ -1143,13 +1143,21 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
           } catch (error) {
             const adapterDiagnostics = result?.metrics?.diagnostics || {};
             const evidenceFailureCode = classifyWebEvidenceValidationFailure(error);
-            result = createRuntimeFailure(route.backend, route.model, `provider returned invalid web evidence (${evidenceFailureCode})`, {
+            const pilotCarrierFailure = input.claudeSonnetAcceptancePilot === true;
+            result = createRuntimeFailure(
+              route.backend,
+              route.model,
+              pilotCarrierFailure ? "adapter returned an invalid structured carrier" : `provider returned invalid web evidence (${evidenceFailureCode})`,
+              {
+                exitCode: result?.exitCode ?? null,
               durationMs: Date.now() - startedAt,
               retries: attemptNumber - 1,
               adapterAttempts: attemptNumber,
-              reason: "web_evidence_invalid",
+              reason: pilotCarrierFailure ? "output_parse_invalid" : "web_evidence_invalid",
+              resolvedModel: result?.resolvedModel ?? (result?.model && result.model !== "default" ? result.model : null),
               metrics: {
                 totalCostUsd: result?.metrics?.totalCostUsd ?? null,
+                reservedCostUsd: result?.metrics?.reservedCostUsd ?? null,
                 ...(result?.metrics?.webReadStatus ? { webReadStatus: result.metrics.webReadStatus } : {}),
                 diagnostics: {
                   settingsLockWaitMs: null,
@@ -1157,9 +1165,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
                   stdoutBytes: null,
                   stderrBytes: null,
                   ...adapterDiagnostics,
-                  failureStage: "evidence_invalid",
+                  failureStage: pilotCarrierFailure ? "result_parse" : "evidence_invalid",
                   providerCode: null,
-                  webEvidenceFailureCode: evidenceFailureCode
+                  webEvidenceFailureCode: pilotCarrierFailure ? null : evidenceFailureCode
                 }
               }
             });
@@ -1191,7 +1199,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
                 durationMs: Date.now() - startedAt,
                 retries: attemptNumber - 1,
                 adapterAttempts: attemptNumber,
+                exitCode: result.exitCode,
                 reason: validation.errorClass,
+                resolvedModel: result.resolvedModel ?? null,
                 metrics: {
                   totalCostUsd: result?.metrics?.totalCostUsd ?? null,
                   reservedCostUsd: result?.metrics?.reservedCostUsd ?? null,
@@ -1210,7 +1220,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
                 durationMs: Date.now() - startedAt,
                 retries: attemptNumber - 1,
                 adapterAttempts: attemptNumber,
+                exitCode: result.exitCode,
                 reason: validation.errorClass,
+                resolvedModel: result.resolvedModel ?? null,
                 metrics: {
                   totalCostUsd: result.metrics?.totalCostUsd ?? null,
                   reservedCostUsd: result.metrics?.reservedCostUsd ?? null,

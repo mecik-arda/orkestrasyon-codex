@@ -24,7 +24,7 @@ const processObservations = [];
 let providerPurposeStarts = 0;
 
 assert.equal(typeof root, "string");
-assert.equal(["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "provider_failure", "provider_spawn_failure"].includes(scenario), true);
+assert.equal(["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "invalid_task_json", "wrong_task_type", "wrong_carrier_type", "missing_carrier_result", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"].includes(scenario), true);
 fs.mkdirSync(settingsDirectory, { recursive: true });
 fs.writeFileSync(settingsPath, initialSettings);
 const originalMkdtempSync = fs.mkdtempSync;
@@ -94,7 +94,23 @@ const adapter = createAntigravityAdapter({
         && fs.readdirSync(options.cwd).length === 0
     });
     if (scenario === "provider_failure") return { code: 1, stdout: "", stderr: "", signal: null };
-    return { code: 0, stdout: JSON.stringify({ response: "{\"result\":42}" }), stderr: "", signal: null };
+    if (scenario === "empty_output") return { code: 0, stdout: "", stderr: "", signal: null };
+    if (scenario === "truncated_output") return { code: 0, stdout: '{"structured_output":{"result":', stderr: "", signal: null };
+    if (scenario === "multiple_output_records") return { code: 0, stdout: `${JSON.stringify({ response: "first" })}\n${JSON.stringify({ response: "second" })}`, stderr: "", signal: null };
+    const outputByScenario = {
+      success: { structured_output: { result: "{\"result\":42}", webEvidence: null } },
+      valid_response_carrier: { response: "{\"result\":\"{\\\"result\\\":42}\",\"webEvidence\":null}" },
+      invalid_task_json: { structured_output: { result: "{\"result\":42", webEvidence: null } },
+      wrong_task_type: { structured_output: { result: "{\"result\":\"42\"}", webEvidence: null } },
+      wrong_carrier_type: { structured_output: { result: 42, webEvidence: null } },
+      missing_carrier_result: { structured_output: { webEvidence: null } },
+      preflight_failure: { response: "unused" },
+      preflight_spawn_failure: { response: "unused" },
+      preflight_non_spawn_permission_failure: { response: "unused" },
+      temporary_workspace_failure: { response: "unused" },
+      provider_spawn_failure: { response: "unused" }
+    };
+    return { code: 0, stdout: JSON.stringify(outputByScenario[scenario]), stderr: "", signal: null };
   }
 });
 
@@ -161,7 +177,13 @@ process.stdout.write(JSON.stringify({
   recentProviderCode: recentRun?.providerCode || null,
   recentExitCode: recentRun?.exitCode ?? null,
   recentOsErrorCode: recentRun?.osErrorCode || null,
+  recentOutputIntegrity: recentRun?.outputIntegrity || null,
+  recentTaskCompletion: recentRun?.taskCompletion || null,
   reason: result.reason || null,
+  requestedModel: result.requestedModel || null,
+  resolvedModel: result.resolvedModel || null,
+  outputIntegrity: result.metrics.outputIntegrity || null,
+  taskCompletion: result.metrics.taskCompletion || null,
   failureStage: attempt?.failureStage || diagnostics.failureStage || null,
     providerCode: attempt?.providerCode || diagnostics.providerCode || null,
     osErrorCode: attempt?.osErrorCode || diagnostics.osErrorCode || null,

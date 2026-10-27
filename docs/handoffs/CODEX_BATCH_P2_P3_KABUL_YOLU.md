@@ -1,5 +1,9 @@
 # Codex batch P2/P3 kabul yolu
 
+## Review-source preflight ret katmanı ve karar — 2026-10-27
+
+Mevcut source-review istisna yolu yoktur. `reviewScope` üretim `classifySecretLikeContent` kontrolünden manifest oluşturulurken geçer; sinyalde manifest/hash/source delivery tamamlanmaz, sonuç `mcp_preflight`/`blocked` olur. `best_effort` tarama muafiyeti değildir. 2026-10-26 exact-prompt boyut limiti ve ardından scope-parçalama girişimini reddeden platform auto-review ayrı katmanlardır. Eski Option B scope listesi yok; önceki preflight sınıfları güvenli raporlarda kayıtlıdır. Hades direct review detail aracı olmadığı için metadata mevcut kayıtlarla sınırlı kaldı; yeni Sol isteği yapılmadı. Karar önerisi, hash/kullanım/expiry/audit ve negatif test koşulları [raporda](../reports/REVIEW_PREFLIGHT_RET_KATMANI_VE_KARAR_2026-10-27.md). Üretim politika ve Option B kapalı; canlı kabul kapıları açık.
+
 ## Sözdizimi farkındalıklı secret sınıflandırıcı prototipi — 2026-10-27
 
 JavaScript/TypeScript için ayrı AST tabanlı araştırma modülü ve sentetik regresyon testleri eklendi; mevcut production `classifySecretLikeContent`, review preflight ve Vault kararı değişmedi. Option B kaydındaki `high_entropy` için tam `reviewScope` bulunmadığından dosya eşlemesi belirsizdir. `tests/optimization.test.js` içindeki dinamik `token: crypto.randomUUID()` ifadesinin yerel `known_signature` sonucu ayrı çağrı sınıfıdır; `package-lock.json` SHA-512 SRI değerlerinin reddedilen Option B scope'unda olduğuna dair kanıt yoktur. Prototip üretim onayı değildir, Option B kapalıdır. Son hedefli testler 10/10 ve 16/16, seçili memory secret testleri 3/3, `npm test` 1016/1012/4/0, verify ve verify:ci başarılıdır. Sol inceleme preflight'ta blocked/not_attempted kaldı; POSIX ve canlı P1b/P2/P3/P6 kapıları açık kalır. Ayrıntı [prototip raporundadır](../reports/SYNTAX_AWARE_SECRET_CLASSIFIER_PROTOTIPI_2026-10-27.md).

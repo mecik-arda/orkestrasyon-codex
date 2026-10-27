@@ -24,7 +24,7 @@ const processObservations = [];
 let providerPurposeStarts = 0;
 
 assert.equal(typeof root, "string");
-assert.equal(["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "invalid_task_json", "wrong_task_type", "wrong_carrier_type", "missing_carrier_result", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"].includes(scenario), true);
+assert.equal(["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "valid_whitespace_task_json", "invalid_task_json", "plain_number_task_json", "wrong_task_type", "nested_wrong_task_type", "wrong_task_value", "extra_task_field", "missing_task_result", "empty_task_object", "null_task_json", "array_task_json", "fenced_task_json", "explanatory_task_json", "multiple_task_json_values", "wrong_carrier_type", "missing_carrier_result", "empty_task_content", "missing_outer_carrier", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"].includes(scenario), true);
 fs.mkdirSync(settingsDirectory, { recursive: true });
 fs.writeFileSync(settingsPath, initialSettings);
 const originalMkdtempSync = fs.mkdtempSync;
@@ -78,10 +78,25 @@ const adapter = createAntigravityAdapter({
       throw error;
     }
     const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    const carrierSchemaIndex = args.indexOf("--json-schema");
+    const carrierSchemaPath = carrierSchemaIndex >= 0 ? args[carrierSchemaIndex + 1] : null;
+    const carrierSchema = carrierSchemaPath && fs.existsSync(carrierSchemaPath)
+      ? JSON.parse(fs.readFileSync(carrierSchemaPath, "utf8"))
+      : null;
+    const pilotPrompt = args.at(-1);
+    const pilotTaskInstructionObserved = pilotPrompt.includes('Return the required JSON carrier with its result string containing only {"result":42}.');
+    const adapterCarrierInstructionObserved = pilotPrompt.includes('For every read-only response, return exactly one JSON object shaped as {"result":"...","webEvidence":null}.');
     processObservations.push({
       executable,
       args,
       options,
+      pilotTaskInstructionObserved,
+      adapterCarrierInstructionObserved,
+      carrierSchemaStrict: carrierSchema?.type === "object"
+        && carrierSchema.additionalProperties === false
+        && carrierSchema.required?.includes("result") === true
+        && carrierSchema.properties?.result?.type === "string"
+        && carrierSchema.properties.result.minLength === 1,
       readOnlyEnforcement: settings.allowNonWorkspaceAccess === false
         && settings.permissions?.deny?.includes("write_file(*)") === true,
       settingsLock: fs.existsSync(settingsLockPath),
@@ -100,10 +115,24 @@ const adapter = createAntigravityAdapter({
     const outputByScenario = {
       success: { structured_output: { result: "{\"result\":42}", webEvidence: null } },
       valid_response_carrier: { response: "{\"result\":\"{\\\"result\\\":42}\",\"webEvidence\":null}" },
+      valid_whitespace_task_json: { structured_output: { result: " \n\t{\"result\":42}\r\n ", webEvidence: null } },
       invalid_task_json: { structured_output: { result: "{\"result\":42", webEvidence: null } },
+      plain_number_task_json: { structured_output: { result: "42", webEvidence: null } },
       wrong_task_type: { structured_output: { result: "{\"result\":\"42\"}", webEvidence: null } },
+      nested_wrong_task_type: { structured_output: { result: "{\"result\":\"{\\\"result\\\":42}\"}", webEvidence: null } },
+      wrong_task_value: { structured_output: { result: "{\"result\":41}", webEvidence: null } },
+      extra_task_field: { structured_output: { result: "{\"result\":42,\"extra\":true}", webEvidence: null } },
+      missing_task_result: { structured_output: { result: "{\"other\":42}", webEvidence: null } },
+      empty_task_object: { structured_output: { result: "{}", webEvidence: null } },
+      null_task_json: { structured_output: { result: "null", webEvidence: null } },
+      array_task_json: { structured_output: { result: "[42]", webEvidence: null } },
+      fenced_task_json: { structured_output: { result: "```json\n{\"result\":42}\n```", webEvidence: null } },
+      explanatory_task_json: { structured_output: { result: "Answer: {\"result\":42}", webEvidence: null } },
+      multiple_task_json_values: { structured_output: { result: "{\"result\":42} {\"result\":42}", webEvidence: null } },
       wrong_carrier_type: { structured_output: { result: 42, webEvidence: null } },
       missing_carrier_result: { structured_output: { webEvidence: null } },
+      empty_task_content: { structured_output: { result: "", webEvidence: null } },
+      missing_outer_carrier: { status: "SUCCESS", response: "{\"result\":42}" },
       preflight_failure: { response: "unused" },
       preflight_spawn_failure: { response: "unused" },
       preflight_non_spawn_permission_failure: { response: "unused" },
@@ -188,6 +217,9 @@ process.stdout.write(JSON.stringify({
     providerCode: attempt?.providerCode || diagnostics.providerCode || null,
     osErrorCode: attempt?.osErrorCode || diagnostics.osErrorCode || null,
   readOnlyEnforcementObserved: providerObservation?.readOnlyEnforcement === true,
+  pilotTaskInstructionObserved: providerObservation?.pilotTaskInstructionObserved === true,
+  adapterCarrierInstructionObserved: providerObservation?.adapterCarrierInstructionObserved === true,
+  carrierSchemaStrict: providerObservation?.carrierSchemaStrict === true,
   settingsLockObserved: providerObservation?.settingsLock === true && providerObservation?.settingsSentinel === true,
   readOnlyPlanMode: providerArguments[providerArguments.indexOf("--mode") + 1] === "plan",
   emptyTemporaryCwd: providerObservation?.emptyTemporaryCwd === true,

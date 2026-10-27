@@ -1,15 +1,18 @@
 export function validateClaudeSonnetAcceptanceOutput(normalizedResult) {
-  if (typeof normalizedResult !== "string") return { ok: false, errorClass: "schema_invalid" };
+  if (typeof normalizedResult !== "string") return { ok: false, errorClass: "task_json_content_type_invalid" };
   let parsed;
   try {
     parsed = JSON.parse(normalizedResult.trim());
   } catch {
-    return { ok: false, errorClass: "schema_invalid" };
+    return { ok: false, errorClass: "task_json_parse_invalid" };
   }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { ok: false, errorClass: "schema_invalid" };
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false, errorClass: "task_json_top_level_type_invalid" };
+  }
   const keys = Object.keys(parsed);
-  if (keys.length !== 1 || keys[0] !== "result" || typeof parsed.result !== "number" || parsed.result !== 42) {
-    return { ok: false, errorClass: "schema_invalid" };
-  }
+  if (!keys.includes("result")) return { ok: false, errorClass: "task_json_result_missing" };
+  if (keys.length !== 1) return { ok: false, errorClass: "task_json_additional_fields" };
+  if (typeof parsed.result !== "number") return { ok: false, errorClass: "task_json_result_type_invalid" };
+  if (parsed.result !== 42) return { ok: false, errorClass: "task_json_result_value_invalid" };
   return { ok: true };
 }

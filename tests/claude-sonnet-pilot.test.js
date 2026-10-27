@@ -140,7 +140,7 @@ test("pilot CLI args omit workspace grants while normal Antigravity calls retain
 
 test("Antigravity adapter starts one fake provider CLI without granting workspace context", async (t) => {
   const fixturePath = fileURLToPath(new URL("./fixtures/claude-sonnet-pilot-read-only-fixture.js", import.meta.url));
-  for (const scenario of ["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "invalid_task_json", "wrong_task_type", "wrong_carrier_type", "missing_carrier_result", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"]) {
+  for (const scenario of ["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "valid_whitespace_task_json", "invalid_task_json", "plain_number_task_json", "nested_wrong_task_type", "wrong_task_type", "wrong_task_value", "extra_task_field", "missing_task_result", "empty_task_object", "null_task_json", "array_task_json", "fenced_task_json", "explanatory_task_json", "multiple_task_json_values", "wrong_carrier_type", "missing_carrier_result", "empty_task_content", "missing_outer_carrier", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-sonnet-pilot-cli-"));
     const temporaryDirectory = path.join(root, "temporary");
     fs.mkdirSync(temporaryDirectory);
@@ -221,13 +221,16 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
       } else if (!["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "provider_spawn_failure"].includes(scenario)) {
         assert.equal(result.providerPurposeStarts, 1);
         assert.equal(result.readOnlyEnforcementObserved, true);
+        assert.equal(result.pilotTaskInstructionObserved, true);
+        assert.equal(result.adapterCarrierInstructionObserved, true);
+        assert.equal(result.carrierSchemaStrict, true);
         assert.equal(result.settingsLockObserved, true);
         assert.equal(result.readOnlyPlanMode, true);
         assert.equal(result.emptyTemporaryCwd, true);
         assert.equal(result.workspaceGrantAbsent, true);
         assert.equal(result.temporaryCwdRemoved, true);
       }
-      if (scenario === "success" || scenario === "valid_response_carrier") {
+      if (["success", "valid_response_carrier", "valid_whitespace_task_json"].includes(scenario)) {
         assert.equal(result.mcpIsError, false);
         assert.equal(result.acceptancePassed, true);
         assert.equal(result.recentFailureClass, null);
@@ -239,21 +242,36 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.outputIntegrity, "complete");
         assert.equal(result.taskCompletion, "completed");
       }
-      if (scenario === "invalid_task_json" || scenario === "wrong_task_type") {
+      const taskFailureClasses = {
+        invalid_task_json: "task_json_parse_invalid",
+        fenced_task_json: "task_json_parse_invalid",
+        explanatory_task_json: "task_json_parse_invalid",
+        multiple_task_json_values: "task_json_parse_invalid",
+        plain_number_task_json: "task_json_top_level_type_invalid",
+        null_task_json: "task_json_top_level_type_invalid",
+        array_task_json: "task_json_top_level_type_invalid",
+        wrong_task_type: "task_json_result_type_invalid",
+        nested_wrong_task_type: "task_json_result_type_invalid",
+        wrong_task_value: "task_json_result_value_invalid",
+        extra_task_field: "task_json_additional_fields",
+        missing_task_result: "task_json_result_missing",
+        empty_task_object: "task_json_result_missing"
+      };
+      if (Object.hasOwn(taskFailureClasses, scenario)) {
         assert.equal(result.mcpIsError, true);
         assert.equal(result.acceptancePassed, false);
-        assert.equal(result.reason, "schema_invalid");
+        assert.equal(result.reason, taskFailureClasses[scenario]);
         assert.equal(result.failureStage, "result_parse");
         assert.equal(result.requestedModel, "claude_sonnet");
         assert.equal(result.resolvedModel, "claude-sonnet-4-6", scenario);
         assert.equal(result.outputIntegrity, "complete");
         assert.equal(result.taskCompletion, "partial");
-        assert.equal(result.recentFailureClass, "schema_invalid");
+        assert.equal(result.recentFailureClass, taskFailureClasses[scenario]);
         assert.equal(result.recentFailureStage, "result_parse");
         assert.equal(result.recentOutputIntegrity, "complete");
         assert.equal(result.recentTaskCompletion, "partial");
       }
-      if (["wrong_carrier_type", "missing_carrier_result", "truncated_output", "multiple_output_records"].includes(scenario)) {
+      if (["wrong_carrier_type", "missing_carrier_result", "empty_task_content", "missing_outer_carrier", "truncated_output", "multiple_output_records"].includes(scenario)) {
         assert.equal(result.mcpIsError, true);
         assert.equal(result.acceptancePassed, false);
         assert.equal(result.reason, "output_parse_invalid");

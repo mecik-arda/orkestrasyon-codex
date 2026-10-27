@@ -117,16 +117,18 @@ function parseNestedCarrierText(text) {
   return parsed;
 }
 
-function normalizeCarrierStructuredOutput(value) {
+function normalizeCarrierStructuredOutput(value, { unwrapNested = true } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   if (typeof value.result !== "string" || value.result.trim().length === 0) return null;
   let resultText = value.result;
   let evidenceValue = value.webEvidence;
-  for (let depth = 0; depth < 2; depth += 1) {
-    const nested = parseNestedCarrierText(resultText);
-    if (!nested) break;
-    resultText = nested.result;
-    if (evidenceValue === undefined || evidenceValue === null) evidenceValue = nested.webEvidence;
+  if (unwrapNested) {
+    for (let depth = 0; depth < 2; depth += 1) {
+      const nested = parseNestedCarrierText(resultText);
+      if (!nested) break;
+      resultText = nested.result;
+      if (evidenceValue === undefined || evidenceValue === null) evidenceValue = nested.webEvidence;
+    }
   }
   return JSON.stringify({ result: resultText, webEvidence: normalizeCarrierEvidence(evidenceValue) });
 }
@@ -523,14 +525,14 @@ function failureStageForClassification(errorClass, fallback = "provider_executio
   return fallback;
 }
 
-function parseAntigravityResult(stdout) {
+function parseAntigravityResult(stdout, { unwrapNestedCarrier = true } = {}) {
   const trimmed = stdout.trim();
   if (!trimmed) return { resultText: null, failureClass: "empty_output" };
 
   try {
     const parsed = JSON.parse(trimmed);
     if (parsed && Object.hasOwn(parsed, "structured_output")) {
-      const resultText = normalizeCarrierStructuredOutput(parsed.structured_output);
+      const resultText = normalizeCarrierStructuredOutput(parsed.structured_output, { unwrapNested: unwrapNestedCarrier });
       return resultText
         ? { resultText, failureClass: null }
         : { resultText: null, failureClass: "output_parse_invalid" };
@@ -1089,7 +1091,7 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
 
           const extraction = webReadTrace
             ? { resultText: streamTrace.resultText, failureClass: streamTrace.resultText ? null : "empty_output" }
-            : parseAntigravityResult(processResult.stdout);
+            : parseAntigravityResult(processResult.stdout, { unwrapNestedCarrier: request.claudeSonnetAcceptancePilot !== true });
           const resultText = extraction.resultText;
           if (!resultText) {
             const malformedPilotCarrier = request.claudeSonnetAcceptancePilot === true && extraction.failureClass === "output_parse_invalid";

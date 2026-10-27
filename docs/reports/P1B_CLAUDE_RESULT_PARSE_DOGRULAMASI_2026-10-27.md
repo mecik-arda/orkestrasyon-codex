@@ -2,6 +2,18 @@
 
 Tarih: 2026-10-27 Türkiye
 
+## Sonraki yerel takip — taşıyıcı ve görev JSON'u ayrımı
+
+Son canlı denemenin bu görev için verilen doğrulanmış metadata'sı `requestedModel=claude_sonnet`, `resolvedModel=claude-sonnet-4-6`, `exitCode=0`, `timedOut=false`, `outputIntegrity=complete`, `taskCompletion=partial`, `result=null`, `schema_invalid/result_parse`, `adapterAttempts=1`, `retries=0`, `telemetryWriteStatus=written` ve maliyet alanları `null` değerleridir. Bu; seçilen model kimliğinin çözüldüğünü, CLI sürecinin başarılı çıktığını ve görev kabulünün geçmediğini gösterir. Ham yanıt yoktur; görev reddinin alt nedeni ve önceki kaydın içeriği bilinmiyor.
+
+Kaynakta sabit görev talimatı, dış CLI taşıyıcısı ve taşıyıcı şeması tutarlı bulundu. Görev, dış taşıyıcının `result` string'i içinde yalnız `{"result":42}` ister; adaptör talimatı ve strict CLI şeması ise dış nesnenin `result` alanını string olarak ister. Normalizasyon dış taşıyıcıyı kaldırıp iç görev JSON string'ini doğrulayıcıya verir.
+
+Yerel sahte CLI ile gerçek pilot handler → runtime → Antigravity adapter zincirinde ek bir kusur yeniden üretildi: genel Antigravity normalizasyonu, `result` string'i taşıyıcıya benziyorsa tekrar açıyordu. Böylece iç görev nesnesinin `result` değeri string olarak başka bir `{"result":42}` içerdiğinde, geçersiz görev JSON'u geçerli sayısal 42 nesnesine dönüşebiliyordu. Düzeltme, yalnız Claude kabul pilotunda iç içe taşıyıcı açmayı kapatıp dış taşıyıcıyı aynen bir kez normalize eder; normal Antigravity yolu önceki iç içe taşıyıcı davranışını korur.
+
+Görev validator'ı artık güvenli ve kapalı `task_json_*` nedenleriyle içerik türü, JSON parse, üst tür, eksik/ek alan, `result` türü ve sayısal değer retlerini ayırır. Kabul koşulu değişmedi: yalnız boşlukla çevrili tek JSON nesnesindeki sayısal `result=42` kabul edilir. Refusal sinyali olmayan metin ret olarak tahmin edilmez; JSON parse hatası sınıfında kalır. Gerçek CLI cevabı hiçbir tanı çıktısına eklenmez.
+
+Hedefli sahte süreç testleri taşıyıcı başarı/ret durumlarını ve gerçek MCP yolundan dönen güvenli metadata'yı sınar; bunlar geçmiş canlı yanıtın nedenini kanıtlamaz. Önceki ve son canlı kaydın ham içeriği bulunmadığından tarihsel neden belirlenemiyor. Son hedefli doğrulama 61/61 geçti. Son `npm.cmd test` 1.025 testten 1.021 geçti, 4 Windows koşullu test atlandı ve 0 başarısız oldu. `npm.cmd run verify`, `npm.cmd run verify:ci` ve `git diff --check` geçti. Verify içindeki DeepSeek health erişilemez (`apiAvailable=false`), Codex model erişimi `not_probed`; inference veya capability probe yapılmadı. MCP public şeması değişmediği için smoke çalıştırılmadı. Bu kod değişikliği Hades runtime yeniden başlatılmadan canlıya yansımaz. P1b canlı kabulü açık kalır; yeni tek pilot ancak restart sonrası ve ayrı kullanıcı onayıyla çalıştırılabilir.
+
 ## Kapsam ve canlı kanıt
 
 Bu inceleme yeni provider, model veya pilot çağrısı yapmadı. Başlangıç checkout'u `main` dalında `f0d9b3cf93630cdf5fb9cdb092ced26922c3e979` idi; başlangıç çalışma ağacı temiz, `origin/main` karşısında 16 commit ilerideydi.

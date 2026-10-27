@@ -1,6 +1,12 @@
 # Codex batch P2/P3 kabul yolu
 
-## Güncel kabul özeti — 2026-10-27
+## Güncel yerel durum — 2026-10-27
+
+Repository `main` HEAD `94ed8b960aaa69ca68f53f845797f79254561e71`, çalışma ağacı temiz ve `origin/main` önünde 19 commit. P2 prepared-edit onay/red/stale/recovery gerçek MCP handler/runtime ve sahte adapter testlerinde mevcut; ilgili yedi suite son kaynakta 92/92 geçti. Sandbox'ta bir E2E test Git for Windows iç `sh` sürecine OS nesne erişimi yüzünden `clone` aşamasında düştü; aynı suite izin yükseltilmiş yerel testte geçti. Bu ortam bulgusudur, ürün kusuru değildir.
+
+Öncelikli sonraki kabul P2 canlı prepared-edit çevrimidir. Bu iş provider çalıştıracağından bu incelemede başlamadı; etkin runtime profile/model ve sınırları canlı preview'de gösterilmeli. Diff kullanıcıya gösterildikten sonra approve veya reject ayrı ve exact diff kararıdır. P3 batch prepare kaynak policy şablonunda kapalıdır; çağrılmadı. Eski P3 batch/approval/artifact yenilenmiş sayılmaz. Ayrıntı [P2/P3 yerel kabul incelemesinde](../reports/P2_P3_YEREL_KABUL_INCELEMESI_2026-10-27.md).
+
+## Önceki kabul özeti — 2026-10-27 (HEAD 0883da2)
 
 Güncel repository `main` HEAD `0883da2d7ca1fb227eac04f65c47a52b08044730`, başlangıçta temiz ve `origin/main` önünde 15 commit idi. Workspace identity beklenen hash ile eşleşti; bu çalışan kaynak revizyonı veya startup rules kanıtı değildir. Bu oturumda Hades tool envanterinde `run_codex_profile_edit_pilot`, batch prepare/start/get/detail/cancel ve prepared/parallel integration onay araçları görünür; dedicated Claude Sonnet acceptance ve Option B `apply_authorized_parallel_integration` görünmez. Tool görünürlüğü execution başarısı veya active code revision kanıtı değildir. Hades health/provider aracı çağrılmadı.
 

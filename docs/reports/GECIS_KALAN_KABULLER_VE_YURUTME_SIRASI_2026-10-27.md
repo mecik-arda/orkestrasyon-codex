@@ -1,5 +1,7 @@
 # Geçişte kalan kabuller ve yürütme sırası
 
+P2/P3 yerel kabul incelemesi — 2026-10-27: Güncel kaynak HEAD `94ed8b960aaa69ca68f53f845797f79254561e71`, çalışma ağacı temiz ve `origin/main` önünde 19 commit. P2 onay/red/stale/recovery yerel kaynak ve testleri doğrulandı; ilgili sahte provider/yerel MCP suite'i izinli Git child-process erişimiyle 92/92 geçti. Sandbox koşusundaki `clone` retinin nedeni Git for Windows iç `sh` sürecine OS adlandırılmış nesne erişiminin reddedilmesiydi; ürün kusuru olarak sınıflandırılmadı. P2 canlı onay çevrimi açık. P3 prepare tracked policy'de kapalı; yerel batch planı üretilmedi ve önceki source-ref entegrasyon sorunu çözülmedi. Ayrıntı [P2/P3 yerel inceleme raporunda](P2_P3_YEREL_KABUL_INCELEMESI_2026-10-27.md). P1b/P2/P3/P6 canlı kapıları açık.
+
 P1b ek durumu — 2026-10-27: Bu raporun önceki snapshot'ından sonra, etkin Claude pilot aracına tek canlı çağrı yapıldı ve `schema_invalid/result_parse` ile görev kabulü geçmedi. Yerel kaynak testi `structured_output` taşıyıcısının pilotta açılmadığı kusurunu yeniden üretti; düzeltilen yerel handler/runtime/adapter zinciri test edildi. Bu sentetik sonuç geçmiş ham cevabın biçimini kanıtlamaz. Geçmiş canlı metadata bu shell'in canonical okuyucusunda bulunamadı; raporun önceki kod revision'ı iddiası güncel değildir. Detay ve son doğrulama [P1b inceleme raporunda](P1B_CLAUDE_RESULT_PARSE_DOGRULAMASI_2026-10-27.md). P1b canlı kabulü açık; diğer kapılar değişmedi.
 
 Tarih: 2026-10-27 Türkiye

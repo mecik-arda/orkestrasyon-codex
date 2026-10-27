@@ -1,5 +1,9 @@
 # Codex batch P2/P3 kabul yolu
 
+## P2 recovery incelemesi — 2026-10-27
+
+P2 yedek adlarını ve kaynak kimliğini kalıcı journal'a yazmaz. Gerçek süreç çöküşünden sonra aynı workspace kilidiyle P3 journal recovery çağrıldığında boş P3 kayıtları için başarı dönse de P2 kaynağı geri yüklenmez ve artefaktlar kalır. Güvenilir kayıt-bağlı P2 recovery yolu henüz yok; aynı içerik farklı dosya kimliğini doğrulamaz. Ayrıntı ve test sınırı [P2 raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).
+
 ## P2 host prepared-edit takibi — 2026-10-27
 
 Varsayılanı kapalı ayrı yol artık sabit model, dosya kapsamı ve host sınırlarıyla disposable alanda hazırlar; düşük etkili değişikliği de ayrı prepared-edit onayına bağlar. Genel profil yolu değişmedi. Yerel sahte adapter testleri canlı kabul yerine geçmez; süreç belleğindeki onay kaydının restart sonrası kaybı, dış yazıcı atomikliği, POSIX ve bağımsız denetim sınırları [uygulama raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) açıklanmıştır. Canlı provider, onay veya entegrasyon yapılmadı.

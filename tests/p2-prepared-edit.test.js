@@ -47,8 +47,14 @@ function createConfiguration(root, { enabled = true, ttlMs = 300000 } = {}) {
 }
 
 function createHarness(t, { initialState = "baseline", enabled = true, ttlMs = 300000, beforeResult } = {}) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "p2-prepared-edit-"));
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const temporaryRoot = fs.realpathSync(os.tmpdir());
+  const root = fs.mkdtempSync(path.join(temporaryRoot, "p2-prepared-edit-"));
+  t.after(() => {
+    assert.equal(path.dirname(root), temporaryRoot);
+    assert.ok(path.basename(root).startsWith("p2-prepared-edit-"));
+    assert.equal(fs.realpathSync(root), root);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
   const targetPath = path.join(root, ...p2PreparedEditPolicy.relativePath.split("/"));
   fs.mkdirSync(path.dirname(targetPath), { recursive: true });
   if (initialState === "baseline") fs.writeFileSync(targetPath, p2PreparedEditPolicy.baselineContent, "utf8");
@@ -285,6 +291,40 @@ test("P2-EDIT-08C: promotion ortasinda surec cokerse recovery engeli yeniden uyg
   const approved = await harness.handlers.approvePreparedEdit({ approvalRequestId: fresh.structuredContent.approvalRequestId });
   assert.equal(approved.structuredContent.applied, true);
   assert.equal(fs.readFileSync(harness.targetPath, "utf8"), p2PreparedEditPolicy.preparedContent);
+});
+
+test("P2-RECOVERY-01: P3 journal kurtaricisi P2 cokusu icin kurtarma kaydi bulmaz", async (t) => {
+  const harness = createHarness(t);
+  const originalIdentity = fs.statSync(harness.targetPath, { bigint: true });
+  const childPath = fileURLToPath(new URL("./fixtures/p2-prepared-edit-crash-child.js", import.meta.url));
+  const crash = spawnSync(process.execPath, [childPath, harness.root, JSON.stringify(harness.configuration), "promotion"], { encoding: "utf8", timeout: 60000 });
+  assert.equal(crash.status, 75);
+  const parent = path.dirname(harness.targetPath);
+  const artifacts = fs.readdirSync(parent).filter((entry) => entry.startsWith(".p2-approval-probe.txt.") && (entry.endsWith(".tmp") || entry.endsWith(".tmp.backup")));
+  assert.equal(artifacts.length, 2);
+  const backupPath = path.join(parent, artifacts.find((entry) => entry.endsWith(".backup")));
+  const backupIdentity = fs.statSync(backupPath, { bigint: true });
+  assert.equal(backupIdentity.dev, originalIdentity.dev);
+  assert.equal(backupIdentity.ino, originalIdentity.ino);
+  assert.equal(backupIdentity.mode, originalIdentity.mode);
+  assert.equal(fs.readFileSync(backupPath, "utf8"), p2PreparedEditPolicy.baselineContent);
+  const recoveryChild = fileURLToPath(new URL("./fixtures/p2-recovery-inspect-child.js", import.meta.url));
+  const recovery = spawnSync(process.execPath, [recoveryChild, harness.root, JSON.stringify(harness.configuration)], { encoding: "utf8", timeout: 60000 });
+  assert.equal(recovery.status, 0, recovery.stderr);
+  assert.deepEqual(JSON.parse(recovery.stdout), { lockOwned: true, beforeCount: 1, afterCount: 1, scanFailed: false, sourceExists: false, recoveryOk: true });
+  assert.equal(fs.existsSync(harness.targetPath), false);
+  assert.deepEqual(fs.readdirSync(parent).filter((entry) => artifacts.includes(entry)).sort(), artifacts.sort());
+  fs.writeFileSync(harness.targetPath, p2PreparedEditPolicy.baselineContent, "utf8");
+  const externalIdentity = fs.statSync(harness.targetPath, { bigint: true });
+  assert.notEqual(externalIdentity.ino, backupIdentity.ino);
+  const repeated = spawnSync(process.execPath, [recoveryChild, harness.root, JSON.stringify(harness.configuration)], { encoding: "utf8", timeout: 60000 });
+  assert.equal(repeated.status, 0, repeated.stderr);
+  assert.deepEqual(JSON.parse(repeated.stdout), { lockOwned: true, beforeCount: 1, afterCount: 1, scanFailed: false, sourceExists: true, recoveryOk: true });
+  const afterIdentity = fs.statSync(harness.targetPath, { bigint: true });
+  assert.equal(afterIdentity.dev, externalIdentity.dev);
+  assert.equal(afterIdentity.ino, externalIdentity.ino);
+  assert.equal(fs.readFileSync(harness.targetPath, "utf8"), p2PreparedEditPolicy.baselineContent);
+  assert.equal(fs.existsSync(backupPath), true);
 });
 
 test("P2-EDIT-09: promotion recovery artifakti onayli uygulamayi fail closed tutar", async (t) => {

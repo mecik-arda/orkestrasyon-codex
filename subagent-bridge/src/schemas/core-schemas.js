@@ -345,6 +345,7 @@ export const controlledEditResultSchema = z.object({
   sourceFileSha256After: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   disposableFileSha256: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   approvalClass: z.enum(["low_impact", "new_file", "multiple_files", "policy_config", "external_service", "irreversible"]).optional(),
+  approvalScope: z.enum(["p2_prepared_edit"]).optional(),
   approvalRequired: z.boolean().optional(),
   approvalRequestId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   approvalExpiresAt: z.string().datetime().optional(),
@@ -366,8 +367,8 @@ export const controlledEditResultSchema = z.object({
   if (result.failureClass === "cleanup_failed" && result.cleanupCompleted === true) context.addIssue({ code: z.ZodIssueCode.custom, path: ["cleanupCompleted"], message: "cleanup failure must report incomplete cleanup" });
   if (result.failureClass === "approval_required" && !validApprovalPending) context.addIssue({ code: z.ZodIssueCode.custom, path: ["failureClass"], message: "approval-required result must be pending and unapplied" });
   if (result.approvalRequired === true && !validPreview && !validApprovalPending) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequired"], message: "approval-required result must await approval or be a preview" });
-  if (result.approvalRequired === true && (!result.executionIdHash || !result.changeSetHash || !result.approvalClass || result.approvalClass === "low_impact")) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequired"], message: "approval-required result must include a high-impact binding" });
-  if (result.approvalRequestId && (!validApprovalPending || result.preview === true || !["new_file", "multiple_files"].includes(result.approvalClass))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequestId"], message: "approval request id requires an orchestrator-approvable pending result" });
+  if (result.approvalRequired === true && (!result.executionIdHash || !result.changeSetHash || !result.approvalClass || (result.approvalClass === "low_impact" && result.approvalScope !== "p2_prepared_edit"))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequired"], message: "approval-required result must include an approvable source binding" });
+  if (result.approvalRequestId && (!validApprovalPending || result.preview === true || (!["new_file", "multiple_files"].includes(result.approvalClass) && !(result.approvalClass === "low_impact" && result.approvalScope === "p2_prepared_edit")))) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalRequestId"], message: "approval request id requires an orchestrator-approvable pending result" });
   if (result.approvalRequestId && !result.approvalExpiresAt) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalExpiresAt"], message: "approval request id requires an expiration" });
   if (result.approvalExpiresAt && !result.approvalRequestId) context.addIssue({ code: z.ZodIssueCode.custom, path: ["approvalExpiresAt"], message: "approval expiration requires an approval request id" });
 });

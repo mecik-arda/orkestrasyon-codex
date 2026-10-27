@@ -206,7 +206,8 @@ const configurationSchema = z.object({
     }).strict(),
     acceptancePilots: z.object({
       claudeSonnet: z.object({ enabled: z.boolean() }).strict().optional(),
-      codexProfileEdit: z.object({ enabled: z.boolean() }).strict().optional()
+      codexProfileEdit: z.object({ enabled: z.boolean() }).strict().optional(),
+      p2PreparedEdit: z.object({ enabled: z.boolean() }).strict().optional()
     }).strict().optional(),
     slo: z.object({
       windowDays: z.number().int().positive().max(90),

@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { approvalClassValues, isPreparedEditApprovable } from "./approval-boundary.js";
+import { approvalClassValues, orchestratorApprovableApprovalScopes, isPreparedEditApprovable } from "./approval-boundary.js";
 
 const hashPattern = /^[a-f0-9]{64}$/;
 const changeTypeValues = new Set(["created", "modified"]);
@@ -78,6 +78,7 @@ function project(entry) {
     executionIdHash: entry.executionIdHash,
     changeSetHash: entry.changeSetHash,
     approvalClass: entry.approvalClass,
+    ...(entry.approvalScope ? { approvalScope: entry.approvalScope } : {}),
     sourceApprovalClass: entry.sourceApprovalClass,
     workspaceHash: entry.workspaceHash,
     sourceStateHash: entry.sourceStateHash,
@@ -97,6 +98,7 @@ function matchesBinding(entry, binding) {
   return entry.executionIdHash === binding.executionIdHash
     && entry.changeSetHash === binding.changeSetHash
     && entry.approvalClass === binding.approvalClass
+    && (entry.approvalScope || null) === (binding.approvalScope || null)
     && entry.workspaceHash === binding.workspaceHash
     && entry.sourceStateHash === binding.sourceStateHash;
 }
@@ -136,6 +138,8 @@ export function createPreparedEditRegistry({ ttlMs = defaultTtlMs, maxEntries = 
     const changeSetHash = requireHash(record.changeSetHash, "change set hash");
     const workspaceHash = requireHash(record.workspaceHash, "workspace hash");
     const sourceStateHash = requireHash(record.sourceStateHash, "source state hash");
+    const approvalScope = record.approvalScope === undefined ? null : record.approvalScope;
+    if (approvalScope !== null && !orchestratorApprovableApprovalScopes.includes(approvalScope)) throw new Error("invalid prepared edit approval scope");
     if (!approvalClassValues.includes(record.approvalClass) || !isPreparedEditApprovable(record)) throw new Error("prepared edit class is not approvable in the orchestrator channel");
     const changes = normalizeChanges(record.changes);
     const changedPaths = changes.map((change) => change.relativePath);
@@ -162,6 +166,7 @@ export function createPreparedEditRegistry({ ttlMs = defaultTtlMs, maxEntries = 
       executionIdHash,
       changeSetHash,
       approvalClass: record.approvalClass,
+      approvalScope,
       sourceApprovalClass: record.sourceApprovalClass,
       workspaceHash,
       sourceStateHash,

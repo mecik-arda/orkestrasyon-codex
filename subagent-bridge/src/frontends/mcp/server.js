@@ -337,6 +337,15 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     annotations: executionAnnotations
   }, safe(handlers.runProfile));
 
+  if (configuration.orchestration?.acceptancePilots?.p2PreparedEdit?.enabled === true) {
+    server.registerTool("prepare_p2_acceptance_edit", {
+      title: "P2 prepared edit",
+      description: "Prepare the fixed P2 edit in a disposable workspace. Source changes require a separate approve_prepared_edit call.",
+      inputSchema: publicToolInputShape(publicToolSchemas.prepareP2AcceptanceEdit),
+      annotations: executionAnnotations
+    }, safe(handlers.prepareP2AcceptanceEdit));
+  }
+
   server.registerTool("check_subagent_bridge", {
     title: "Subagent bridge runtime bağlantısını kontrol et",
     description: "Runtime servislerini ve tüm provider adapter health durumlarını doğrular. dailySpentUsd/monthlySpentUsd are compatibility aliases for observed-plus-estimated accounting totals, not provider invoices; costBudget.costAccounting.limitMode distinguishes advisory from admission-blocking behavior.",

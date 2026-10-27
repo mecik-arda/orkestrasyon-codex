@@ -31,6 +31,7 @@ import { createParallelBatchService } from "../services/parallel-batch.js";
 import { createGitWorktreeBatchManager } from "../services/git-worktree-batch.js";
 import { createParallelDashboardLauncher } from "../services/parallel-dashboard-launcher.js";
 import { createReviewSourceManifest, ReviewSourceManifestError } from "../services/review-source-manifest.js";
+import { createP2PreparedEditInput, p2PreparedEditPolicy } from "../services/p2-prepared-edit-policy.js";
 import { classifyProcessFailure, isRetryableFailure } from "../retry.js";
 import {
   appendRedactedRunMetric,
@@ -242,7 +243,8 @@ export function hashSourceState(sourceStateEntries) {
 }
 
 function matchesExpectedDisposableFile(disposable, changes, expectedFile) {
-  if (changes.changes.length !== 1 || changes.changes[0].relativePath !== expectedFile.relativePath || changes.changes[0].changeType !== "modified") return false;
+  const acceptedChangeTypes = expectedFile.changeTypes || [expectedFile.changeType || "modified"];
+  if (changes.changes.length !== 1 || changes.changes[0].relativePath !== expectedFile.relativePath || !acceptedChangeTypes.includes(changes.changes[0].changeType)) return false;
   try {
     return readSafeWorkspaceFile(disposable.workspace, expectedFile.relativePath).equals(expectedFile.content);
   } catch {
@@ -1702,6 +1704,38 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     });
   }
 
+  async function prepareP2AcceptanceEdit(trustedWorkspace, abortSignal) {
+    const enabled = runtimeConfiguration.orchestration?.acceptancePilots?.p2PreparedEdit?.enabled === true;
+    if (!enabled) throw new Error("P2 prepared edit is disabled until explicitly enabled in the active runtime configuration");
+    if (!approvalChannelEnabled) throw new Error("P2 prepared edit requires the separate prepared edit approval channel");
+    const input = { ...createP2PreparedEditInput(), model: p2PreparedEditPolicy.model };
+    const baselineHash = crypto.createHash("sha256").update(p2PreparedEditPolicy.baselineContent).digest("hex");
+    const absentStateHash = hashSourceState([{ relativePath: p2PreparedEditPolicy.relativePath, state: "absent" }]);
+    const baselineStateHash = hashSourceState([{ relativePath: p2PreparedEditPolicy.relativePath, state: "present", sha256: baselineHash }]);
+    return executeControlledEdit(input, trustedWorkspace, abortSignal, {
+      promote: true,
+      preparedOnly: true,
+      approvalScope: p2PreparedEditPolicy.approvalScope,
+      expectedSourceStateHashes: [absentStateHash, baselineStateHash],
+      attempts: [{ target: p2PreparedEditPolicy.backend, model: p2PreparedEditPolicy.model, caller: "codex_profile_edit_pilot", providerLabel: "Codex" }],
+      prompt: buildProfileEditPrompt(input),
+      providerLabel: "P2 prepared edit",
+      timeoutMs: p2PreparedEditPolicy.timeoutMs,
+      maxOutputBytes: p2PreparedEditPolicy.maxOutputBytes,
+      expectedDisposableFile: {
+        relativePath: p2PreparedEditPolicy.relativePath,
+        content: Buffer.from(p2PreparedEditPolicy.preparedContent, "utf8"),
+        changeTypes: ["created", "modified"]
+      }
+    });
+  }
+
+  function createPreparedEditSourceChangedError() {
+    const error = new Error("P2 prepared edit source changed during preparation");
+    error.failureClass = "source_workspace_changed";
+    return error;
+  }
+
   function createControlledEditAttempt(target, model) {
     if (target === "codex") return { target, model, caller: "codex_edit", providerLabel: "Codex" };
     if (target === "deepseek") return { target, model, caller: "deepseek_edit", providerLabel: "DeepSeek" };
@@ -1847,22 +1881,54 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     let terminalFailure = false;
     let observedCostUsd = 0;
     let costObserved = true;
+    let preparedSourceStateEntries = null;
+    if (options.preparedOnly) {
+      try {
+        preparedSourceStateEntries = captureSourceState(sourceWorkspace, input.files);
+        if (!options.expectedSourceStateHashes.includes(hashSourceState(preparedSourceStateEntries))) {
+          const error = new Error("P2 prepared edit source fixture precondition failed");
+          error.failureClass = "fixture_precondition_failed";
+          throw error;
+        }
+      } catch (error) {
+        finalPayload = { status: "failed", backend: attempts[0].target, model: attempts[0].model, requestedModel: input.model, resolvedModel: attempts[0].model, accessMode: "edit", summary: error.failureClass ? error.message : "P2 prepared edit source fixture could not be verified", failureClass: error.failureClass || "fixture_precondition_failed", filesChanged: [], diff: "", applied: false, fallbacks: 0, executionIdHash };
+        terminalFailure = true;
+      }
+    }
     try {
-      for (let index = 0; index < attempts.length; index += 1) {
+      for (let index = 0; index < attempts.length && !terminalFailure; index += 1) {
         const attempt = attempts[index];
         let disposable;
         try {
           const contextFiles = input.contextFiles || [];
           disposable = provisionDisposableWorkspace(runtimeConfiguration, sourceWorkspace, [...input.files, ...contextFiles], input.files);
+          if (options.preparedOnly) {
+            let currentSourceStateEntries;
+            try {
+              currentSourceStateEntries = captureSourceState(sourceWorkspace, input.files);
+            } catch {
+              throw createPreparedEditSourceChangedError();
+            }
+            if (hashSourceState(currentSourceStateEntries) !== hashSourceState(preparedSourceStateEntries)) throw createPreparedEditSourceChangedError();
+          }
           const runtimeResult = await run({ target: attempt.target, prompt, model: attempt.model, mode: "edit", trustedWorkspace: disposable.workspace, caller: attempt.caller, delegationDepth: 0, timeoutMs: options.timeoutMs ?? (input.timeout_seconds ? input.timeout_seconds * 1000 : attempt.timeoutMs || runtimeConfiguration[attempt.target]?.timeoutMs), ...(options.maxOutputBytes !== undefined ? { maxOutputBytes: options.maxOutputBytes } : {}), maxSchemaRepairAttempts: 0, abortSignal });
           const resolvedModel = runtimeResult.resolvedModel ?? attempt.model;
           const attemptCostUsd = runtimeResult.metrics?.totalCostUsd;
           if (Number.isFinite(attemptCostUsd)) observedCostUsd += attemptCostUsd;
           else if (runtimeResult.metrics?.cacheHit !== true) costObserved = false;
+          if (options.preparedOnly) {
+            let currentSourceStateEntries;
+            try {
+              currentSourceStateEntries = captureSourceState(sourceWorkspace, input.files);
+            } catch {
+              throw createPreparedEditSourceChangedError();
+            }
+            if (hashSourceState(currentSourceStateEntries) !== hashSourceState(preparedSourceStateEntries)) throw createPreparedEditSourceChangedError();
+          }
           let changes = disposable.collectChanges();
           const changeSetHash = calculateChangeSetHash(changes.changes);
           const approvalClass = classifyChangeSet(changes.changes, options.riskSignals);
-          const approvalRequired = approvalClass !== "low_impact";
+          const approvalRequired = options.preparedOnly === true || approvalClass !== "low_impact";
           const summary = runtimeResult.ok ? runtimeResult.result || `${attempt.providerLabel} edit completed` : runtimeResult.error || `${attempt.providerLabel} edit failed`;
           const secretDetected = containsSecretLikeValue(summary) || containsSecretLikeAddedValue(changes.diff);
           const noChanges = runtimeResult.ok && changes.filesChanged.length === 0;
@@ -1874,19 +1940,23 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
             terminalFailure = true;
           } else if (runtimeResult.ok && !noChanges) {
             if (promote && approvalRequired) {
-              const orchestratorApprovable = isPreparedEditApprovable({ approvalClass });
+              const orchestratorApprovable = isPreparedEditApprovable({ approvalClass, approvalScope: options.approvalScope });
               let approvalRequestId;
               let approvalExpiresAt;
               let classificationStable = true;
               if (orchestratorApprovable) {
                 const prepared = disposable.capturePreparedChanges();
                 classificationStable = calculateChangeSetHash(prepared.changes) === changeSetHash && classifyChangeSet(prepared.changes, options.riskSignals) === approvalClass;
+                if (options.preparedOnly) classificationStable = classificationStable
+                  && hashSourceState(prepared.expectedStates) === hashSourceState(preparedSourceStateEntries)
+                  && hashSourceState(captureSourceState(sourceWorkspace, prepared.filesChanged)) === hashSourceState(preparedSourceStateEntries);
                 if (classificationStable) {
-                  const sourceStateEntries = captureSourceState(sourceWorkspace, prepared.filesChanged);
+                  const sourceStateEntries = options.preparedOnly ? preparedSourceStateEntries : captureSourceState(sourceWorkspace, prepared.filesChanged);
                   const stored = preparedEditRegistry.store({
                     executionIdHash,
                     changeSetHash,
                     approvalClass,
+                    ...(options.approvalScope ? { approvalScope: options.approvalScope } : {}),
                     workspaceHash: fingerprintTrustedWorkspace(sourceWorkspace),
                     sourceStateHash: hashSourceState(sourceStateEntries),
                     changedPaths: prepared.filesChanged,
@@ -1912,7 +1982,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
                     ? `${attempt.providerLabel} edit requires explicit approval`
                     : `${attempt.providerLabel} edit requires explicit approval; orchestrator approval channel is disabled in this session, so the content is returned as a diff and cannot be applied here`)
                   : `${attempt.providerLabel} edit requires operator approval outside the orchestrator channel`;
-                finalPayload = { status: "failed", backend: runtimeResult.backend, model: runtimeResult.model, requestedModel: input.model, resolvedModel, accessMode: "edit", summary: approvalSummary, failureClass: "approval_required", filesChanged: changes.filesChanged, diff: changes.diff, applied: false, fallbacks: fallbackCount, executionIdHash, changeSetHash, approvalClass, approvalRequired: true, ...(approvalRequestId ? { approvalRequestId, approvalExpiresAt } : {}) };
+                finalPayload = { status: "failed", backend: runtimeResult.backend, model: runtimeResult.model, requestedModel: input.model, resolvedModel, accessMode: "edit", summary: approvalSummary, failureClass: "approval_required", filesChanged: changes.filesChanged, diff: changes.diff, applied: false, fallbacks: fallbackCount, executionIdHash, changeSetHash, approvalClass, ...(options.approvalScope ? { approvalScope: options.approvalScope } : {}), approvalRequired: true, ...(approvalRequestId ? { approvalRequestId, approvalExpiresAt } : {}) };
               }
               terminalFailure = true;
             } else if (promote) {
@@ -1940,7 +2010,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
         } catch (error) {
           if (error.cleanupIncomplete === true) allCleanupCompleted = false;
           costObserved = false;
-          finalPayload = { status: "failed", backend: attempt.target, model: attempt.model, requestedModel: input.model, resolvedModel: attempt.model, accessMode: "edit", summary: error.message, failureClass: error.failureClass || "pilot_failed", filesChanged: [], diff: "", applied: false, fallbacks: fallbackCount, executionIdHash };
+          finalPayload = { status: "failed", backend: attempt.target, model: attempt.model, requestedModel: input.model, resolvedModel: attempt.model, accessMode: "edit", summary: options.preparedOnly && error.failureClass === "source_workspace_changed" ? "P2 prepared edit source changed during preparation" : error.message, failureClass: error.failureClass || "pilot_failed", filesChanged: [], diff: "", applied: false, fallbacks: fallbackCount, executionIdHash };
           break;
         } finally {
           try {
@@ -1953,6 +2023,11 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
       }
     } finally {
       if (sourceLockId) coordinator.release(sourceLockId);
+    }
+    if (!allCleanupCompleted && options.preparedOnly && finalPayload?.approvalRequestId) {
+      preparedEditRegistry.invalidate(finalPayload.approvalRequestId);
+      const { approvalRequestId, approvalExpiresAt, ...withoutApproval } = finalPayload;
+      finalPayload = { ...withoutApproval, status: "failed", summary: "P2 prepared edit cleanup failed; no approval request is available", failureClass: "cleanup_failed", filesChanged: [], diff: "", applied: false, approvalRequired: false };
     }
     let completedPayload;
     if (allCleanupCompleted) {
@@ -2062,6 +2137,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
         executionIdHash: request.executionIdHash,
         changeSetHash: request.changeSetHash,
         approvalClass: request.approvalClass,
+        approvalScope: request.approvalScope,
         workspaceHash,
         sourceStateHash: hashSourceState(sourceStateEntries)
       });
@@ -2286,6 +2362,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     runDeepSeek,
     runDeepSeekEditPilot,
     runProfileEdit,
+    prepareP2AcceptanceEdit,
     runProfileEditPilot,
     runCodexProfileEditPilot,
     approvePreparedEdit,

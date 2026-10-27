@@ -6,6 +6,7 @@ const wrongTypePayloads = {
   runAntigravity: { prompt: 42, model: "gemini_flash_3_8", mode: "read_only" },
   runClaudeSonnetAcceptancePilot: { unexpected_field_for_test: 42 },
   runCodexProfileEditPilot: { files: ["any-file"] },
+  prepareP2AcceptanceEdit: { model: "gpt-6.1-sol" },
   runClaudeCode: { prompt: 42, mode: "read_only" },
   runCodex: { prompt: false, mode: "read_only" },
   runProfile: { prompt: "soru", profile: 42 },
@@ -53,6 +54,10 @@ test("MCP-NEG-02: her public MCP şeması boş girdiyi reddeder", () => {
       continue;
     }
     if (name === "runCodexProfileEditPilot") {
+      assert.equal(result.success, true, `${name} boş girdili sabit pilot sözleşmesini reddetti`);
+      continue;
+    }
+    if (name === "prepareP2AcceptanceEdit") {
       assert.equal(result.success, true, `${name} boş girdili sabit pilot sözleşmesini reddetti`);
       continue;
     }

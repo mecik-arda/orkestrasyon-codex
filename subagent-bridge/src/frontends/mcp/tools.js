@@ -4,6 +4,7 @@ import { validateWorkspace } from "../../config.js";
 import { ANTIGRAVITY_MODEL_MAP } from "../../adapters/antigravity-adapter.js";
 import { detectWebIntent } from "../../web-evidence.js";
 import { validateClaudeSonnetAcceptanceOutput } from "../../services/claude-sonnet-acceptance.js";
+import { p2PreparedEditPolicy } from "../../services/p2-prepared-edit-policy.js";
 import { controlledEditResultSchema, preparedEditRejectionResultSchema } from "../../schemas/core-schemas.js";
 import {
   approveParallelIntegrationRequestSchema,
@@ -74,6 +75,7 @@ export const storeMemorySchema = z.object({
 export const publicToolSchemas = {
   runClaudeSonnetAcceptancePilot: z.object({}).strict(),
   runCodexProfileEditPilot: z.object({}).strict(),
+  prepareP2AcceptanceEdit: z.object({}).strict(),
   runAntigravity: z.object({
     prompt: z.string().min(1).max(60000),
     model: z.enum(["gemini_flash", "gemini_flash_3_8", "claude_sonnet"]),
@@ -286,6 +288,29 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
       const strictValidation = controlledEditResultSchema.safeParse(payload);
       if (!strictValidation.success) throw new Error("Codex disposable edit pilot result failed host validation");
       return { isError: strictValidation.data.status !== "completed", content: [{ type: "text", text: JSON.stringify(strictValidation.data, null, 2) }], structuredContent: strictValidation.data };
+    },
+    async prepareP2AcceptanceEdit(input, context = {}) {
+      if (configuration.orchestration?.acceptancePilots?.p2PreparedEdit?.enabled !== true) {
+        throw new Error("P2 prepared edit is disabled until explicitly enabled in the active runtime configuration");
+      }
+      parse(publicToolSchemas.prepareP2AcceptanceEdit, input);
+      const result = await runtime.prepareP2AcceptanceEdit(trustedWorkspace, context.signal);
+      const validation = controlledEditResultSchema.safeParse(result);
+      if (!validation.success || validation.data.applied === true) throw new Error("P2 prepared edit result failed host validation");
+      if (validation.data.failureClass === "approval_required" && (
+        validation.data.approvalRequired !== true
+        || validation.data.approvalScope !== p2PreparedEditPolicy.approvalScope
+        || !["low_impact", "new_file"].includes(validation.data.approvalClass)
+        || validation.data.approvalRequestId === undefined
+        || validation.data.approvalExpiresAt === undefined
+        || validation.data.cleanupCompleted !== true
+        || validation.data.backend !== p2PreparedEditPolicy.backend
+        || validation.data.requestedModel !== p2PreparedEditPolicy.model
+        || validation.data.fallbacks !== 0
+        || validation.data.filesChanged.length !== 1
+        || validation.data.filesChanged[0] !== p2PreparedEditPolicy.relativePath
+      )) throw new Error("P2 prepared edit approval binding failed host validation");
+      return { isError: validation.data.status !== "completed", content: [{ type: "text", text: JSON.stringify(validation.data, null, 2) }], structuredContent: validation.data };
     },
     async runAntigravity(input, context = {}) {
       const parsed = parse(publicToolSchemas.runAntigravity, input);

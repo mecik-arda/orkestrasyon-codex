@@ -1,5 +1,9 @@
 # Codex batch P2/P3 kabul yolu
 
+## P2 host prepared-edit takibi — 2026-10-27
+
+Varsayılanı kapalı ayrı yol artık sabit model, dosya kapsamı ve host sınırlarıyla disposable alanda hazırlar; düşük etkili değişikliği de ayrı prepared-edit onayına bağlar. Genel profil yolu değişmedi. Yerel sahte adapter testleri canlı kabul yerine geçmez; süreç belleğindeki onay kaydının restart sonrası kaybı, dış yazıcı atomikliği, POSIX ve bağımsız denetim sınırları [uygulama raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) açıklanmıştır. Canlı provider, onay veya entegrasyon yapılmadı.
+
 ## Güncel yerel durum — 2026-10-27
 
 Repository `main` HEAD `94ed8b960aaa69ca68f53f845797f79254561e71`, çalışma ağacı temiz ve `origin/main` önünde 19 commit. P2 prepared-edit onay/red/stale/recovery gerçek MCP handler/runtime ve sahte adapter testlerinde mevcut; ilgili yedi suite son kaynakta 92/92 geçti. Sandbox'ta bir E2E test Git for Windows iç `sh` sürecine OS nesne erişimi yüzünden `clone` aşamasında düştü; aynı suite izin yükseltilmiş yerel testte geçti. Bu ortam bulgusudur, ürün kusuru değildir.

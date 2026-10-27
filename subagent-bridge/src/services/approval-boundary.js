@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 export const approvalClassValues = ["low_impact", "new_file", "multiple_files", "policy_config", "external_service", "irreversible"];
 
 export const orchestratorApprovableApprovalClasses = ["new_file", "multiple_files"];
+export const orchestratorApprovableApprovalScopes = ["p2_prepared_edit"];
 
 const policyConfigDirectoryPattern = /^(?:config|\.github|\.gitlab|\.circleci|\.buildkite|\.opencode|\.agents|agents|manifest|mcp|ci)(?:[\\/]|$)/i;
 const policyConfigFilePattern = /^(?:policy|agent|agents|opencode|manifest|mcp)(?:[.-][a-z0-9_-]+)*\.(?:json|jsonc|ya?ml|toml)$/i;
@@ -61,7 +62,8 @@ export function isOrchestratorApprovableClass(approvalClass) {
 }
 
 export function isPreparedEditApprovable(record) {
-  return isOrchestratorApprovableClass(record?.approvalClass);
+  return isOrchestratorApprovableClass(record?.approvalClass)
+    || (record?.approvalClass === "low_impact" && orchestratorApprovableApprovalScopes.includes(record?.approvalScope));
 }
 
 export function isPolicyConfigPath(relativePath) {

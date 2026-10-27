@@ -140,7 +140,7 @@ test("pilot CLI args omit workspace grants while normal Antigravity calls retain
 
 test("Antigravity adapter starts one fake provider CLI without granting workspace context", async (t) => {
   const fixturePath = fileURLToPath(new URL("./fixtures/claude-sonnet-pilot-read-only-fixture.js", import.meta.url));
-  for (const scenario of ["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "valid_whitespace_task_json", "invalid_task_json", "plain_number_task_json", "nested_wrong_task_type", "wrong_task_type", "wrong_task_value", "extra_task_field", "missing_task_result", "empty_task_object", "null_task_json", "array_task_json", "fenced_task_json", "explanatory_task_json", "multiple_task_json_values", "wrong_carrier_type", "missing_carrier_result", "empty_task_content", "missing_outer_carrier", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"]) {
+  for (const scenario of ["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "valid_whitespace_task_json", "whitespace_task_json_structured", "whitespace_task_json_response", "invalid_task_json", "plain_number_task_json", "nested_wrong_task_type", "wrong_task_type", "wrong_task_value", "extra_task_field", "missing_task_result", "empty_task_object", "null_task_json", "array_task_json", "fenced_task_json", "explanatory_task_json", "multiple_task_json_values", "wrong_carrier_type", "missing_carrier_result", "empty_task_content", "empty_task_content_response", "missing_outer_carrier", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"]) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-sonnet-pilot-cli-"));
     const temporaryDirectory = path.join(root, "temporary");
     fs.mkdirSync(temporaryDirectory);
@@ -243,6 +243,8 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.taskCompletion, "completed");
       }
       const taskFailureClasses = {
+        whitespace_task_json_structured: "task_json_empty",
+        whitespace_task_json_response: "task_json_empty",
         invalid_task_json: "task_json_parse_invalid",
         fenced_task_json: "task_json_parse_invalid",
         explanatory_task_json: "task_json_parse_invalid",
@@ -271,7 +273,7 @@ test("Antigravity adapter starts one fake provider CLI without granting workspac
         assert.equal(result.recentOutputIntegrity, "complete");
         assert.equal(result.recentTaskCompletion, "partial");
       }
-      if (["wrong_carrier_type", "missing_carrier_result", "empty_task_content", "missing_outer_carrier", "truncated_output", "multiple_output_records"].includes(scenario)) {
+      if (["wrong_carrier_type", "missing_carrier_result", "empty_task_content", "empty_task_content_response", "missing_outer_carrier", "truncated_output", "multiple_output_records"].includes(scenario)) {
         assert.equal(result.mcpIsError, true);
         assert.equal(result.acceptancePassed, false);
         assert.equal(result.reason, "output_parse_invalid");

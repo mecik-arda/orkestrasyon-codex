@@ -395,6 +395,8 @@ test("AG-AC-16b: carrier şeması zorunlu alanları ve serbest kanıt alanını 
   assert.equal(schema.additionalProperties, false);
   assert.equal(normalizeCarrierStructuredOutput({ result: "x", webEvidence: {} }), JSON.stringify({ result: "x", webEvidence: null }));
   assert.equal(normalizeCarrierStructuredOutput({ webEvidence: null }), null);
+  assert.equal(normalizeCarrierStructuredOutput({ result: " \t ", webEvidence: null }), null);
+  assert.equal(normalizeCarrierStructuredOutput({ result: " \t ", webEvidence: null }, { allowWhitespaceTaskPayload: true }), JSON.stringify({ result: " \t ", webEvidence: null }));
 });
 
 test("AG-AC-16d: iç içe carrier metni sınırlı derinlikte açılır", () => {

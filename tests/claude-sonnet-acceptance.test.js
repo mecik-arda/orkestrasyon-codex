@@ -32,6 +32,17 @@ test("P1b görev doğrulayıcı dizge dışı taşıyıcı sonucunu kapalı içe
   });
 });
 
+test("P1b görev doğrulayıcı boş ve yalnız boşluk içeren task JSON girdisini ayrı sınıflandırır", () => {
+  assert.deepEqual(validateClaudeSonnetAcceptanceOutput(""), {
+    ok: false,
+    errorClass: "task_json_empty"
+  });
+  assert.deepEqual(validateClaudeSonnetAcceptanceOutput(" \n\t\r "), {
+    ok: false,
+    errorClass: "task_json_empty"
+  });
+});
+
 test("P1b yerel kabul: görev JSON retleri kapalı alt nedenlere ayrılır", () => {
   const cases = [
     ['{"result":"42"}', "task_json_result_type_invalid"],

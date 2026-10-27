@@ -24,7 +24,7 @@ const processObservations = [];
 let providerPurposeStarts = 0;
 
 assert.equal(typeof root, "string");
-assert.equal(["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "valid_whitespace_task_json", "invalid_task_json", "plain_number_task_json", "wrong_task_type", "nested_wrong_task_type", "wrong_task_value", "extra_task_field", "missing_task_result", "empty_task_object", "null_task_json", "array_task_json", "fenced_task_json", "explanatory_task_json", "multiple_task_json_values", "wrong_carrier_type", "missing_carrier_result", "empty_task_content", "missing_outer_carrier", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"].includes(scenario), true);
+assert.equal(["preflight_failure", "preflight_spawn_failure", "preflight_non_spawn_permission_failure", "temporary_workspace_failure", "success", "valid_response_carrier", "valid_whitespace_task_json", "whitespace_task_json_structured", "whitespace_task_json_response", "invalid_task_json", "plain_number_task_json", "wrong_task_type", "nested_wrong_task_type", "wrong_task_value", "extra_task_field", "missing_task_result", "empty_task_object", "null_task_json", "array_task_json", "fenced_task_json", "explanatory_task_json", "multiple_task_json_values", "wrong_carrier_type", "missing_carrier_result", "empty_task_content", "empty_task_content_response", "missing_outer_carrier", "empty_output", "truncated_output", "multiple_output_records", "provider_failure", "provider_spawn_failure"].includes(scenario), true);
 fs.mkdirSync(settingsDirectory, { recursive: true });
 fs.writeFileSync(settingsPath, initialSettings);
 const originalMkdtempSync = fs.mkdtempSync;
@@ -116,6 +116,8 @@ const adapter = createAntigravityAdapter({
       success: { structured_output: { result: "{\"result\":42}", webEvidence: null } },
       valid_response_carrier: { response: "{\"result\":\"{\\\"result\\\":42}\",\"webEvidence\":null}" },
       valid_whitespace_task_json: { structured_output: { result: " \n\t{\"result\":42}\r\n ", webEvidence: null } },
+      whitespace_task_json_structured: { structured_output: { result: " \n\t ", webEvidence: null } },
+      whitespace_task_json_response: { response: JSON.stringify({ result: " \n\t ", webEvidence: null }) },
       invalid_task_json: { structured_output: { result: "{\"result\":42", webEvidence: null } },
       plain_number_task_json: { structured_output: { result: "42", webEvidence: null } },
       wrong_task_type: { structured_output: { result: "{\"result\":\"42\"}", webEvidence: null } },
@@ -132,6 +134,7 @@ const adapter = createAntigravityAdapter({
       wrong_carrier_type: { structured_output: { result: 42, webEvidence: null } },
       missing_carrier_result: { structured_output: { webEvidence: null } },
       empty_task_content: { structured_output: { result: "", webEvidence: null } },
+      empty_task_content_response: { response: JSON.stringify({ result: "", webEvidence: null }) },
       missing_outer_carrier: { status: "SUCCESS", response: "{\"result\":42}" },
       preflight_failure: { response: "unused" },
       preflight_spawn_failure: { response: "unused" },

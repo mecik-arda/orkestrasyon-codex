@@ -1,8 +1,10 @@
 export function validateClaudeSonnetAcceptanceOutput(normalizedResult) {
   if (typeof normalizedResult !== "string") return { ok: false, errorClass: "task_json_content_type_invalid" };
+  const taskJsonText = normalizedResult.trim();
+  if (taskJsonText.length === 0) return { ok: false, errorClass: "task_json_empty" };
   let parsed;
   try {
-    parsed = JSON.parse(normalizedResult.trim());
+    parsed = JSON.parse(taskJsonText);
   } catch {
     return { ok: false, errorClass: "task_json_parse_invalid" };
   }

@@ -117,9 +117,9 @@ function parseNestedCarrierText(text) {
   return parsed;
 }
 
-function normalizeCarrierStructuredOutput(value, { unwrapNested = true } = {}) {
+function normalizeCarrierStructuredOutput(value, { unwrapNested = true, allowWhitespaceTaskPayload = false } = {}) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  if (typeof value.result !== "string" || value.result.trim().length === 0) return null;
+  if (typeof value.result !== "string" || value.result.length === 0 || (!allowWhitespaceTaskPayload && value.result.trim().length === 0)) return null;
   let resultText = value.result;
   let evidenceValue = value.webEvidence;
   if (unwrapNested) {
@@ -525,14 +525,17 @@ function failureStageForClassification(errorClass, fallback = "provider_executio
   return fallback;
 }
 
-function parseAntigravityResult(stdout, { unwrapNestedCarrier = true } = {}) {
+function parseAntigravityResult(stdout, { unwrapNestedCarrier = true, allowWhitespaceTaskPayload = false } = {}) {
   const trimmed = stdout.trim();
   if (!trimmed) return { resultText: null, failureClass: "empty_output" };
 
   try {
     const parsed = JSON.parse(trimmed);
     if (parsed && Object.hasOwn(parsed, "structured_output")) {
-      const resultText = normalizeCarrierStructuredOutput(parsed.structured_output, { unwrapNested: unwrapNestedCarrier });
+      const resultText = normalizeCarrierStructuredOutput(parsed.structured_output, {
+        unwrapNested: unwrapNestedCarrier,
+        allowWhitespaceTaskPayload
+      });
       return resultText
         ? { resultText, failureClass: null }
         : { resultText: null, failureClass: "output_parse_invalid" };
@@ -1091,7 +1094,10 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
 
           const extraction = webReadTrace
             ? { resultText: streamTrace.resultText, failureClass: streamTrace.resultText ? null : "empty_output" }
-            : parseAntigravityResult(processResult.stdout, { unwrapNestedCarrier: request.claudeSonnetAcceptancePilot !== true });
+            : parseAntigravityResult(processResult.stdout, {
+              unwrapNestedCarrier: request.claudeSonnetAcceptancePilot !== true,
+              allowWhitespaceTaskPayload: request.claudeSonnetAcceptancePilot === true
+            });
           const resultText = extraction.resultText;
           if (!resultText) {
             const malformedPilotCarrier = request.claudeSonnetAcceptancePilot === true && extraction.failureClass === "output_parse_invalid";

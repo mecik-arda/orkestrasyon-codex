@@ -285,40 +285,77 @@ test("PROCESS-TREE: timeout parent kapanırken bağımsız descendant'ı sonland
   let childPid = null;
   let processOutput = "";
   let outputChanged;
-  let readinessTimer;
   const childReady = new Promise((resolve) => { outputChanged = resolve; });
-  const promise = runProcess(process.execPath, [
-    "--input-type=module",
-    "--eval",
-    `import { spawn } from "node:child_process"; import fs from "node:fs"; const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 30000)"], { stdio: "ignore" }); console.log("CHILD:" + child.pid); process.stdin.resume(); process.stdin.on("end", () => { fs.writeFileSync(${JSON.stringify(markerPath)}, "closed", "utf8"); process.exit(0); }); setInterval(() => {}, 30000);`
-  ], {
-    timeoutMs: 300,
-    gracefulShutdownMs: 1000,
-    keepStdinOpen: true,
-    onSpawn: (child) => { parentPid = child.pid; },
-    onStdout: (chunk) => {
-      processOutput += chunk.toString("utf8");
-      const match = processOutput.match(/CHILD:(\d+)/);
-      if (match) {
-        childPid = Number(match[1]);
-        outputChanged();
-      }
-    }
-  });
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  let readinessTimer;
+  let executionSettled = false;
+  let executionTimersEnabled = false;
+  let observedExecutionOutcome;
   try {
-    await Promise.race([
-      childReady,
-      new Promise((_, reject) => {
-        readinessTimer = setTimeout(() => reject(new Error("child process did not become ready")), 10000);
-        readinessTimer.unref?.();
-      })
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    executionTimersEnabled = true;
+    const readinessTimeout = new Promise((_, reject) => {
+      readinessTimer = realSetTimeout(() => reject(new Error("descendant process did not become ready")), 10000);
+      readinessTimer.unref?.();
+    });
+    const executionOutcome = runProcess(process.execPath, [
+      "--eval",
+      `const { spawn } = require("node:child_process"); const fs = require("node:fs"); let child = null; process.stdin.on("data", () => { if (child) return; child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 30000)"], { stdio: "ignore" }); process.stdout.write("CHILD:" + child.pid + "\\n"); }); process.stdin.resume(); process.stdin.on("end", () => { fs.writeFileSync(${JSON.stringify(markerPath)}, "closed", "utf8"); process.exit(0); }); setInterval(() => {}, 30000);`
+    ], {
+      timeoutMs: 300,
+      gracefulShutdownMs: 1000,
+      keepStdinOpen: true,
+      onSpawn: (child) => { parentPid = child.pid; child.stdin.write("start"); },
+      onStdout: (chunk) => {
+        processOutput += chunk.toString("utf8");
+        const match = processOutput.match(/CHILD:(\d+)/);
+        if (match) {
+          childPid = Number(match[1]);
+          outputChanged();
+        }
+      }
+    });
+    observedExecutionOutcome = executionOutcome.then(
+      () => ({ status: "resolved", error: null }),
+      (error) => ({ status: "rejected", error })
+    ).finally(() => {
+      executionSettled = true;
+    });
+    const readiness = await Promise.race([
+      childReady.then(() => ({ status: "ready" })),
+      readinessTimeout
     ]);
-    await assert.rejects(promise, /timed out/i);
+    assert.equal(readiness.status, "ready", "descendant should report readiness before the execution timeout");
+    t.mock.timers.tick(299);
+    await Promise.resolve();
+    assert.equal(executionSettled, false, "execution timeout should remain pending before 300 ms");
+    t.mock.timers.tick(1);
+    if (process.platform === "win32") {
+      await Promise.race([
+        observedExecutionOutcome,
+        new Promise((resolve) => realSetTimeout(resolve, 1000))
+      ]);
+      assert.equal(executionSettled, true, "execution timeout should fire at 300 ms");
+    } else {
+      await Promise.race([
+        observedExecutionOutcome,
+        new Promise((resolve) => realSetTimeout(resolve, 1000))
+      ]);
+      assert.equal(fs.existsSync(markerPath), true, "timeout should close parent stdin at 300 ms");
+      if (!executionSettled) t.mock.timers.tick(1000);
+    }
+    const execution = await observedExecutionOutcome;
+    assert.equal(execution.status, "rejected");
+    assert.match(execution.error.message, /timed out/i);
+    t.mock.timers.reset();
+    executionTimersEnabled = false;
     assert.equal(await waitForProcessExit(parentPid, 5000), true, "parent process should be terminated");
     assert.equal(await waitForProcessExit(childPid, 5000), true, "descendant process should be terminated");
     if (process.platform !== "win32") assert.equal(fs.readFileSync(markerPath, "utf8"), "closed");
   } finally {
-    clearTimeout(readinessTimer);
+    if (executionTimersEnabled) t.mock.timers.reset();
+    if (readinessTimer) realClearTimeout(readinessTimer);
     if (Number.isInteger(parentPid) && processIsRunning(parentPid)) killProcessTree(parentPid);
     if (Number.isInteger(childPid) && processIsRunning(childPid)) killProcessTree(childPid);
   }

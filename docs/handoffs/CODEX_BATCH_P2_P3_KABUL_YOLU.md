@@ -1,5 +1,9 @@
 # Codex batch P2/P3 kabul yolu
 
+## Sözdizimi farkındalıklı secret sınıflandırıcı prototipi — 2026-10-27
+
+JavaScript/TypeScript için ayrı AST tabanlı araştırma modülü ve sentetik regresyon testleri eklendi; mevcut production `classifySecretLikeContent`, review preflight ve Vault kararı değişmedi. Option B kaydındaki `high_entropy` için tam `reviewScope` bulunmadığından dosya eşlemesi belirsizdir. `tests/optimization.test.js` içindeki dinamik `token: crypto.randomUUID()` ifadesinin yerel `known_signature` sonucu ayrı çağrı sınıfıdır; `package-lock.json` SHA-512 SRI değerlerinin reddedilen Option B scope'unda olduğuna dair kanıt yoktur. Prototip üretim onayı değildir, Option B kapalıdır. Son hedefli testler 10/10 ve 16/16, seçili memory secret testleri 3/3, `npm test` 1016/1012/4/0, verify ve verify:ci başarılıdır. Sol inceleme preflight'ta blocked/not_attempted kaldı; POSIX ve canlı P1b/P2/P3/P6 kapıları açık kalır. Ayrıntı [prototip raporundadır](../reports/SYNTAX_AWARE_SECRET_CLASSIFIER_PROTOTIPI_2026-10-27.md).
+
 ## Option B varsayılanı kapalı üretim MCP/runtime uygulaması — 2026-10-27
 
 Yeni `apply_authorized_parallel_integration` MCP işlemi yalnız ayrı `parallelBatch.atomicIntegrationEnabled` bayrağı ve mevcut batch/edit kapıları etkinse yayımlanır; sürümlü `config/policy.json` değeri `false` kaldı. Gerçek stdio smoke bu varsayılan durumda aracı yayımlamadı. In-memory MCP E2E testi ise test içi bayrakla açıp gerçek MCP handler, runtime, batch service, artifact store, coordinator ve Git/worktree manager zincirini çalıştırdı. Kullanıcı önceden görüntülediği exact diff/preview/payload hash'lerini, artifact expiry'yi, base commit'i, tüm-ref kümesi hash'ini, kaynak dosya durumları ve opaque identity hash'ini, nonce'u ve caller/workspace/batch bağını gönderir. İşlem aynı workspace kernel edit kilidinde koşulları yeniden kontrol eder. Onay/ref istisnası yoktur; all-ref guard korunmuştur.

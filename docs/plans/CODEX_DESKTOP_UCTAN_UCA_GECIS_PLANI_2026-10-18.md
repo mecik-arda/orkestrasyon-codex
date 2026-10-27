@@ -1,5 +1,9 @@
 # Codex Desktop uçtan uca geçiş planı
 
+## Güncel durum notu — 2026-10-27
+
+Bu plan tarihsel prosedür ve kabul ölçütlerini korur. Güncel kaynak incelemesine göre P1b görev kabulü, P2 canlı onay/red/stale/recovery ve kaynak entegrasyonu, P3 edit batch kaynak entegrasyonu ve P6 nihai uzlaştırma açıktır. P3 salt-okunur DAG ile cancel/restart-unknown canlı alt kanıtları tamamlanmıştır ve tekrarlanmayacaktır. P3 entegrasyonundaki tüm-ref guard ve `source_ref_changed` retleri korunur. Hades workspace identity eşleşmesi kod revision/startup attestation değildir. Review permit yerel bileşeni production MCP/runtime'a bağlı değildir; güvenlik auto-review kararı ayrı dış engeldir. Bu planın güncel kanıt eşlemesi ve yürütme kartları [2026-10-27 durum raporundadır](../reports/GECIS_KALAN_KABULLER_VE_YURUTME_SIRASI_2026-10-27.md). Genel geçiş tamamlanmamıştır.
+
 Yerel coordinator guard güncellemesi — 2026-10-26 Türkiye: Eski stale guard yarışı ayrı süreçlerde deterministik tekrarlandı. Sabit guard/execution dosyalarında kernel OS kilitleri ve exclusive kilitle doğrulanan intent recovery uygulandı. Hedefli suite 75/75, tam `npm.cmd test` 982 toplam/978 geçti/4 Windows skip/0 fail; verify, yerel stdio smoke, verify:ci ve diff-check geçti. Gerçek `gpt-6.1-sol` ilk denetimde intent retry boşluğunu buldu; düzeltme sonrası follow-up yeni bulgu bulmadı. POSIX ortamı WSL `E_ACCESSDENIED` nedeniyle erişilemedi. Bu yerel düzeltme canlı kabul kapılarını değiştirmez. Güncel kanıt [handoff'tadır](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md).
 Patch düzeyinde exact diff final Sol çağrısı MCP'nin 60.000 karakter sınırı ve `known_signature` preflight reddi yüzünden tamamlanmadı; bu incelemeyi source-level follow-up yerine sayma.
 

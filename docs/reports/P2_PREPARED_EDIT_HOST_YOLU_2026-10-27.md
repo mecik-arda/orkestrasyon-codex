@@ -1,5 +1,11 @@
 # P2 prepared-edit host yolu — 2026-10-27
 
+## 2026-11-01: Canlı P2 sabit pilotunun kapanışı
+
+Kullanıcının tek çağrı yetkisiyle `prepare_p2_acceptance_edit({})` bir kez çalıştı. `gpt-5.6-luna` için `approval_required` sonucu exact tek dosya diff'i, `applied=false`, `approvalRequestId=e0d9e0a754179865f07059126d407a54f3653297986d8c224ec1e2e076697924` ve `changeSetHash=e753a94e2ad7c72c170d4bd78d86405d9e5d428e7a0d09a8c67aec33ae1bf3f1` döndürdü. Kullanıcı bu diff için ayrı onay verdi; tek `approve_prepared_edit` çağrısı `completed`/`applied=true`, `fallbacks=0` ve `cleanupCompleted=true` döndürdü. Çalışma ağacı uygulama öncesinde temiz ve hedef yoktu; sonrasında yalnız onaylı hedef dosya untracked olarak oluştu. Dosya 18 bayt ve beklenen içeriğe byte-byte eşleşiyor; tam bir sondaki LF var. HEAD değişmedi ve commit/push yapılmadı.
+
+Canlı sabit P2 hazırlığı ve ayrı onaylı uygulama başarılı olduğundan pilot kapatıldı. Son Hades restart'ından sonra salt okunur katalogda `prepare_p2_acceptance_edit` bulunmadı; hazırlık aracı tekrar çağrılmadı. Etkin runtime config'teki P2 opt-in önceki tanımsız durumundadır. Bu sonuç canlı red, stale kaynak, recovery, genel P2 entegrasyonu veya bağımsız son diff denetimini kapatmaz; P1b/P2 diğer alt kapıları, P3 ve P6 açık kalır. Gerçek maliyet ve CLI içi inference sayısı bilinmiyor. Genel geçiş tamamlanmış değildir.
+
 ## 2026-11-01: Son doğrulama ve inceleme durumu
 
 `npm test` artık ana test kümesini ve 5.000-not arama performans testini art arda çalıştırır. Performans testi her `npm test` çağrısında zorunlu kalır; yalnız arama süresini ölçer, 30 saniye assertion'ı korunur ve başarısızlığı genel komutu başarısız yapar. Önceki tam koşuda 80,7 saniyeye çıkan arama, yeni tam koşunun seri performans fazında 12,4 saniyede geçti. Yeni tam Windows koşusu ana fazda 1.055 testten 1.051 başarılı, 4 platform atlaması ve 0 başarısızlık; performans fazında 1 başarılı ve 0 başarısızlık verdi. Node v24.17.0 ve npm 11.13.0 kullanıldı; yalnız test süreçlerinde standart kullanıcı TEMP/TMP yolu ayarlandı. Ana faz 406,3 saniye sürdü. Önceki yüksek sürenin tek kök nedeni ayrıştırılmadı; seri faz kontrollü ve tekrarlanabilir test koşulunu koruyor.

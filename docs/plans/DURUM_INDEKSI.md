@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+P2 canlı sabit pilot kapanışı — 2026-11-01: Tek `prepare_p2_acceptance_edit({})` hazırlığına verilen ayrı onaylı `approve_prepared_edit` uygulaması `completed`/`applied=true` döndürdü. Sabit fixture kontrollü bakımda kaldırıldı; P2 opt-in önceki tanımsız disk config durumuna döndürüldü. Hades restart'ından sonra araç salt okunur katalogda sunulmuyor. Bu, yalnız sabit pilotu kapatır; red/stale/recovery, genel P2 entegrasyonu, bağımsız diff denetimi ve diğer P1b/P2/P3/P6 kapıları açık. [P2 uygulama raporu](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) ve [kabul handoff'u](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md).
+
 P2 host prepared-edit yolu — 2026-10-27: Varsayılanı kapalı, sabit kapsamlı yol disposable alanda diff hazırlar ve düşük etkili değişiklikler dahil ayrı onay ister. Yerel test, denetim ve canlı kabul sınırları [uygulama raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) ayrı tutulur. P2 canlı kabulü açık kalır.
 
 P2/P3 yerel kabul incelemesi — 2026-10-27: P2 hazırlanmış edit onay/red/stale/recovery zinciri ve P3 batch/worktree regresyonları 92/92 geçti. Sandbox `clone` sorunu Git for Windows iç süreç erişim reddi olarak doğrulandı; izinli Windows test koşusu başarılı. P2 canlı onay çevrimi açık; sürümlü policy P3 batch hazırlığını kapalı tutuyor ve kaynak ref entegrasyonu kabul edilmedi. [İnceleme raporu](../reports/P2_P3_YEREL_KABUL_INCELEMESI_2026-10-27.md).

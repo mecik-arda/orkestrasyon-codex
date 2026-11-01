@@ -1,5 +1,9 @@
 # Codex batch P2/P3 kabul yolu
 
+## Güncel canlı P2 sabit pilot kapanışı — 2026-11-01
+
+Tek `prepare_p2_acceptance_edit({})` çağrısı `approval_required` ile exact diff ve `applied=false` üretti; kullanıcı ayrı diff onayını verdi ve tek `approve_prepared_edit` çağrısı `completed`/`applied=true` döndürdü. Yalnız sabit fixture hedefi uygulandı; dosya 18 bayt ve beklenen içerikle byte-byte eşleşti, ardından onaylı bakımda kaldırıldı. Son Hades restart'ından sonra salt okunur katalogda `prepare_p2_acceptance_edit` yok; P2 opt-in önceki tanımsız disk config durumuna döndürüldü. Sabit canlı pilot kapalıdır. Canlı red/stale/recovery, genel P2 entegrasyonu, bağımsız son diff denetimi ve P1b/P2 diğer alt kapıları/P3/P6 açık kalır. Gerçek maliyet ve CLI içi inference sayısı bilinmiyor. Ayrıntı [P2 raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).
+
 ## Güncel P2 yerel doğrulama durumu — 2026-11-01
 
 P2 journal/recovery hedefli Windows testleri 30/30, tam `npm test` ana fazı 1.055 testte 1.051 başarılı / 4 platform atlaması / 0 başarısız ve zorunlu seri 5.000-not benchmark fazı 1/1 başarılı / 0 başarısız oldu. Benchmark her `npm test` içinde zorunlu çalışır; arama süresi için 30 saniye sınırı korunmuştur. Ana ve benchmark fazı sıralı çalışır. Standart kullanıcı TEMP/TMP yalnız test süreçlerinde ayarlandı; export testleri 2/2 ve tam koşuda daha önce hata veren P3 worktree entegrasyonu geçti. P3 hatasının önceki tam koşudaki kesin alt nedeni bilinmiyor.

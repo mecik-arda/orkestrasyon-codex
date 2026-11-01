@@ -1,5 +1,13 @@
 # P2 prepared-edit host yolu — 2026-10-27
 
+## 2026-11-01: Canlı P2 stale kaynak alt kapısının kapanışı
+
+P2 opt-in başlangıçtaki unset durumundan yalnız bu sınama için true yapıldı ve config runtime şemasıyla doğrulandı. Restart sonrası hedef absent, repository temiz ve launcher aynı repository sunucu girişini seçiyordu. Tek `prepare_p2_acceptance_edit({})` çağrısı sabit `gpt-5.6-luna` hedefinde yalnız izinli dosya için `approval_required`, `applied=false` ve geçerli onay kaydı döndürdü. Hazırlıktan sonra hedef exclusive oluşturmayla 25 baytlık `P2 stale source sentinel` içeriğine getirildi; SHA-256 `1e0a44a6896b7d4ef01be81bdec67038c709976e9e0667f672829889a8330d43` ve Windows dosya kimliği kaydedildi.
+
+Hazırlık kaydının `2026-11-01T20:28:45.492Z` son kullanım zamanından önce, aynı dönen kayıt kimliğiyle tek `approve_prepared_edit` çağrısı yapıldı. Sonuç `status=failed`, `failureClass=approval_invalid`, kaynak bağı uyuşmazlığı özeti ve `applied=false` oldu; `filesChanged` boştu. Kaynak kodda registry tüketimi workspace ve kaynak snapshot hash'ini karşılaştırır; eşleşmeyen kaynakta kayıt tüketilemez, runtime pending kaydı geçersizleştirir ve uygulama yoluna girmez. Çağrı sona erme veya yanlış ID nedeniyle oluşmadı. Onay yolu saklanan değişikliği kullanır; ikinci provider çağrısı yapmaz. Sentinelin byte içeriği, SHA-256 ve dosya kimliği onay sonrasında aynı kaldı. Yalnız doğrulanan sentinel silindi; hedef absent ve Git durumu başlangıçtaki gibi temiz oldu.
+
+P2 opt-in taze yedek alınarak yalnız ilgili alan unset yapılacak biçimde geri döndürüldü; runtime şeması ve diğer alanlarla semantik eşitlik doğrulandı. Kullanıcının kapanış restart'ından sonra salt okunur katalogda `prepare_p2_acceptance_edit` sunulmuyordu. Canlı P2 stale kaynak alt kapısı ve önceki canlı red alt kapısı doğrulandı; pilot kapalıdır. Canlı P2 recovery, bağımsız diff denetimi ve diğer P1b/P2/P3/P6 kapıları açık kalır. Gerçek inference sayısı ve maliyet bilinmiyor. Genel geçiş tamamlanmış değildir.
+
 ## 2026-11-01: Canlı P2 red alt kapısının kapanışı
 
 P2 opt-in sıfırlandıktan sonraki Hades restart'ından sonra salt okunur araç kataloğunda `prepare_p2_acceptance_edit` sunulmadı. Önceki tek hazırlık çağrısı `approval_required` ve `applied=false` döndürdü; yalnız o çağrının kaydı için yapılan tek `reject_prepared_edit` çağrısı `status=rejected` ve `outcome=prepared_edit_rejected` döndürdü. Approval veya promotion çağrısı yapılmadı. Kaynak fixture absent kaldı ve repository `main` dalında `7d7dff2ed27d48ca57e175ae3dcee2e1f4bbfbea` HEAD'inde temiz kaldı. Etkin config'te `orchestration.acceptancePilots.p2PreparedEdit` yeniden unset; runtime şeması geçerli.

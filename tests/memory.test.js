@@ -6,7 +6,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { performance } from "node:perf_hooks";
 import { analyzePersistentMemoryWrite, checkPersistentMemory, inspectMemoryVaultSchema, promotePersistentMemory, pruneMemoryAuditFiles, readPersistentMemory, reviewPersistentMemory, searchPersistentMemory, storePersistentMemory, suggestConsolidationCandidates } from "../subagent-bridge/src/memory.js";
 
 function createConfiguration(vaultRootPath) {
@@ -655,39 +654,6 @@ test("hafıza mutation kilidi eşzamanlı aynı-hash yazımında tek kazanan ür
   assert.equal(results.filter((result) => result.stdout === "stored").length, 1);
   assert.equal(results.filter((result) => result.stdout.startsWith("error:")).length, 1);
   assert.equal(fs.existsSync(path.join(vaultRootPath, "00_Inbox", "EsZamanli.md")), true);
-});
-
-test("hafıza araması 5000 notta performans sınırını korur", { timeout: 35000 }, (context) => {
-  const vaultRootPath = fs.mkdtempSync(path.join(os.tmpdir(), "orchestrator-memory-search-benchmark-"));
-  context.after(() => fs.rmSync(vaultRootPath, { recursive: true, force: true }));
-  const noteDirectory = path.join(vaultRootPath, "03_Resources");
-  fs.mkdirSync(noteDirectory, { recursive: true });
-  for (let index = 0; index < 5000; index += 1) {
-    fs.writeFileSync(path.join(noteDirectory, `Not-${index}.md`), [
-      "---",
-      `title: "Not ${index}"`,
-      "created: \"2026-08-11T00:00:00.000Z\"",
-      "updated: \"2026-08-11T00:00:00.000Z\"",
-      "confidence: \"high\"",
-      "verification: \"verified\"",
-      "stage: \"published\"",
-      "memory_type: \"semantic\"",
-      "tags:",
-      `  - \"etiket-${index}\"`,
-      "sources:",
-      "---",
-      "",
-      `# Not ${index}`,
-      "",
-      `kelime${index} alfa${index} beta${index} gama${index} delta${index} epsilon${index} zeta${index}`
-    ].join("\n"), "utf8");
-  }
-  const configuration = createConfiguration(vaultRootPath);
-  configuration.memory.maxIndexedFiles = 5000;
-  const startedAt = performance.now();
-  const result = searchPersistentMemory(configuration, { query: "kelime4321", limit: 5 });
-  assert.ok(performance.now() - startedAt < 30000);
-  assert.equal(result.matches.some((match) => match.relativePath.endsWith("Not-4321.md")), true);
 });
 
 test("promote_memory kaynak ve hedef sınırlarını zorlar ve PROMOTE audit olayı yazar", (context) => {

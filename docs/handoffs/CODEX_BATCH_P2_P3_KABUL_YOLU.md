@@ -1,6 +1,16 @@
 # Codex batch P2/P3 kabul yolu
 
-## P2 recovery incelemesi — 2026-10-27
+## Güncel P2 yerel doğrulama durumu — 2026-11-01
+
+P2 journal/recovery hedefli Windows testleri 30/30, tam `npm test` ana fazı 1.055 testte 1.051 başarılı / 4 platform atlaması / 0 başarısız ve zorunlu seri 5.000-not benchmark fazı 1/1 başarılı / 0 başarısız oldu. Benchmark her `npm test` içinde zorunlu çalışır; arama süresi için 30 saniye sınırı korunmuştur. Ana ve benchmark fazı sıralı çalışır. Standart kullanıcı TEMP/TMP yalnız test süreçlerinde ayarlandı; export testleri 2/2 ve tam koşuda daha önce hata veren P3 worktree entegrasyonu geçti. P3 hatasının önceki tam koşudaki kesin alt nedeni bilinmiyor.
+
+`npm run verify` ve `npm run verify:ci` geçti; `git diff --check` doküman güncellemesinden sonra tamamlanacak. Final GPT-6.1-Sol isteği `tests/memory.test.js` için güvenlik preflight reddi aldı (`mixed`, 2 yüksek-entropi adayı, `adapterAttempts=0`); kaynak teslimi veya inceleme olmadı ve bu ret aşılmadı. Önceki Sol denetimi yalnız kendi kapsamındaki P2 dosyalarını kapsar; yeni benchmark düzenlemesi bağımsız incelenmiş sayılmaz. POSIX ve güç kaybı sınırları açık; canlı P2 kabulü yapılmadı. Ayrıntı [P2 uygulama raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).
+
+## Güncel P2 journal recovery durumu — 2026-11-01
+
+Yerel P2 promotion yolu artık kaynak yedeğe taşınmadan önce sürümlü journal yayımlıyor; journal özgün/yedek/staged dosya kimliklerini, hash/boyut/modu ve workspace/onay bağlarını taşıyor. Ayrı süreçli gerçek P2 recovery testi elle dosya taşımadan rollback, çakışma koruması, recovery çöküşü, eşzamanlı recovery ve replay davranışını kapsıyor. Sol’un dört bulgusu giderildi; son salt-okunur GPT-6.1-Sol diff denetimi yeni bulgu vermedi. Son Windows hedefli suite 30/30 geçti. Son tam `npm test` 1.056 testten 1.048 başarılı, 4 platform atlaması ve 4 başarısızlıkla tamamlandı: iki export testi repository içi TEMP yolundaki Unicode kök nedeniyle başarısız oldu ve standart kullanıcı TEMP'siyle 2/2 geçti; P3 worktree testi tam koşuda başarısız, standart kullanıcı TEMP'siyle tekil koşuda geçti; 5.000-not benchmark'ı 80,7 saniyeyle 30 saniye sınırını aştı. `npm run verify:ci` ve `git diff --check` geçti. `npm run verify` dış health ve persistent-memory/Vault erişimi içerdiğinden çalıştırılmadı; MCP şeması değişmediği için smoke gerekmedi. Canlı P2 kabulü yapılmadı; özellik varsayılan kapalı. Benchmark nedeni, POSIX doğrulaması, güç kaybı dayanıklılığı ve kilide uymayan dış yazıcılara karşı atomiklik açık kalıyor. Ayrıntı [P2 uygulama raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).
+
+## Tarihsel P2 recovery incelemesi — 2026-10-27
 
 P2 yedek adlarını ve kaynak kimliğini kalıcı journal'a yazmaz. Gerçek süreç çöküşünden sonra aynı workspace kilidiyle P3 journal recovery çağrıldığında boş P3 kayıtları için başarı dönse de P2 kaynağı geri yüklenmez ve artefaktlar kalır. Güvenilir kayıt-bağlı P2 recovery yolu henüz yok; aynı içerik farklı dosya kimliğini doğrulamaz. Ayrıntı ve test sınırı [P2 raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).
 

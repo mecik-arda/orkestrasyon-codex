@@ -32,6 +32,7 @@ import { createGitWorktreeBatchManager } from "../services/git-worktree-batch.js
 import { createParallelDashboardLauncher } from "../services/parallel-dashboard-launcher.js";
 import { createReviewSourceManifest, ReviewSourceManifestError } from "../services/review-source-manifest.js";
 import { createP2PreparedEditInput, p2PreparedEditPolicy } from "../services/p2-prepared-edit-policy.js";
+import { applyP2PreparedChange, recoverP2PreparedChanges } from "../services/p2-promotion-journal.js";
 import { classifyProcessFailure, isRetryableFailure } from "../retry.js";
 import {
   appendRedactedRunMetric,
@@ -1708,6 +1709,10 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     const enabled = runtimeConfiguration.orchestration?.acceptancePilots?.p2PreparedEdit?.enabled === true;
     if (!enabled) throw new Error("P2 prepared edit is disabled until explicitly enabled in the active runtime configuration");
     if (!approvalChannelEnabled) throw new Error("P2 prepared edit requires the separate prepared edit approval channel");
+    const recovery = await recoverP2PreparedEdits(trustedWorkspace);
+    if (!["no_work", "already_terminal", "recovered"].includes(recovery.outcome)) throw Object.assign(new Error("P2 prepared edit recovery is blocked"), { failureClass: recovery.failureClass || "p2_recovery_conflict" });
+    const recoveryScan = detectRecoveryArtifacts(canonicalizeTrustedWorkspace(trustedWorkspace), [p2PreparedEditPolicy.relativePath]);
+    if (recoveryScan.affectedPaths.length > 0 || recoveryScan.scanFailed) throw Object.assign(new Error("P2 prepared edit has legacy recovery artifacts"), { failureClass: "recovery_required" });
     const input = { ...createP2PreparedEditInput(), model: p2PreparedEditPolicy.model };
     const baselineHash = crypto.createHash("sha256").update(p2PreparedEditPolicy.baselineContent).digest("hex");
     const absentStateHash = hashSourceState([{ relativePath: p2PreparedEditPolicy.relativePath, state: "absent" }]);
@@ -2148,7 +2153,26 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
       let releasedForRecovery = false;
       try {
         if (calculateChangeSetHash(consumed.changes) !== consumed.changeSetHash) return approvalInvalidResult("prepared edit approval record integrity check failed", request);
-        const outcome = applyPreparedChanges(sourceWorkspace, consumed.changes, consumed.sourceStateEntries);
+        if (consumed.approvalScope === p2PreparedEditPolicy.approvalScope
+          && (consumed.changes.length !== 1
+            || consumed.backend !== p2PreparedEditPolicy.backend
+            || consumed.model !== p2PreparedEditPolicy.model
+            || consumed.requestedModel !== p2PreparedEditPolicy.model
+            || consumed.resolvedModel !== p2PreparedEditPolicy.model
+            || consumed.changes[0].relativePath !== p2PreparedEditPolicy.relativePath)) return approvalInvalidResult("P2 prepared edit approval binding is invalid", request);
+        const outcome = consumed.approvalScope === p2PreparedEditPolicy.approvalScope
+          ? applyP2PreparedChange({
+            sourceRoot: sourceWorkspace,
+            journalDirectory: p2JournalDirectory(workspaceHash),
+            workspaceHash,
+            approvalIdHash: crypto.createHash("sha256").update(input.approvalRequestId).digest("hex"),
+            executionIdHash: consumed.executionIdHash,
+            changeSetHash: consumed.changeSetHash,
+            relativePath: consumed.changes[0]?.relativePath,
+            content: consumed.changes[0]?.content,
+            expectedState: consumed.sourceStateEntries.find((entry) => entry.relativePath === consumed.changes[0]?.relativePath)
+          })
+          : applyPreparedChanges(sourceWorkspace, consumed.changes, consumed.sourceStateEntries);
         if (outcome.cleanupFailed === true) {
           return validateControlledEditResult({
             status: "failed",
@@ -2191,10 +2215,11 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
           preview: false
         }).data;
       } catch (error) {
-        if (error.failureClass === "recovery_required") {
+        if (error.failureClass === "recovery_required" && consumed.approvalScope !== p2PreparedEditPolicy.approvalScope) {
           preparedEditRegistry.release(input.approvalRequestId);
           releasedForRecovery = true;
         }
+        const failureClass = error.failureClass || (error.sourceStateChanged === true ? "approval_invalid" : "approval_apply_failed");
         return validateControlledEditResult({
           status: "failed",
           backend: consumed.backend,
@@ -2202,8 +2227,8 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
           requestedModel: consumed.requestedModel,
           resolvedModel: consumed.resolvedModel,
           accessMode: "edit",
-          summary: error.message,
-          failureClass: error.failureClass || (error.sourceStateChanged === true ? "approval_invalid" : "approval_apply_failed"),
+          summary: consumed.approvalScope === p2PreparedEditPolicy.approvalScope ? "P2 prepared edit failed safely; inspect its recovery state before retrying" : error.message,
+          failureClass,
           filesChanged: [],
           diff: "",
           applied: false,
@@ -2217,6 +2242,22 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
       } finally {
         if (!releasedForRecovery) preparedEditRegistry.settle(input.approvalRequestId);
       }
+    } finally {
+      coordinator.release(lockId);
+    }
+  }
+
+  function p2JournalDirectory(workspaceHash) {
+    return path.join(runtimeConfiguration.statePaths.state, "p2-prepared-edit-journals", workspaceHash);
+  }
+
+  async function recoverP2PreparedEdits(trustedWorkspace) {
+    const sourceWorkspace = canonicalizeTrustedWorkspace(trustedWorkspace);
+    const lockId = createExecutionId();
+    if (!await coordinator.acquire(sourceWorkspace, "edit", lockId)) return { outcome: "conflict", failureClass: "workspace_lock_unavailable", recovered: 0 };
+    try {
+      const workspaceHash = fingerprintTrustedWorkspace(sourceWorkspace);
+      return recoverP2PreparedChanges({ sourceRoot: sourceWorkspace, journalDirectory: p2JournalDirectory(workspaceHash), workspaceHash });
     } finally {
       coordinator.release(lockId);
     }
@@ -2366,6 +2407,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     runProfileEditPilot,
     runCodexProfileEditPilot,
     approvePreparedEdit,
+    recoverP2PreparedEdits,
     rejectPreparedEdit,
     probeCapability,
     prepareParallelBatch: (input, trustedWorkspace) => parallelServiceFor(trustedWorkspace).prepare(input),

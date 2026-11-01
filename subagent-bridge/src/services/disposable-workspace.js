@@ -128,6 +128,18 @@ function hasFilesystemEntry(filePath) {
   }
 }
 
+function captureFileIdentity(filePath) {
+  const status = fs.lstatSync(filePath, { bigint: true });
+  if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1n) throw new Error("pilot file identity rejected");
+  return { dev: status.dev, ino: status.ino };
+}
+
+function matchesFileIdentity(filePath, expected) {
+  if (!expected || !hasFilesystemEntry(filePath)) return false;
+  const actual = captureFileIdentity(filePath);
+  return actual.dev === expected.dev && actual.ino === expected.ino;
+}
+
 function requireSafeSourceFile(sourceRoot, relativePath) {
   let current = sourceRoot;
   for (const segment of relativePath.split("/")) {
@@ -275,7 +287,7 @@ export function applyPreparedChanges(sourceRoot, preparedChanges, expectedStates
       const temporaryPath = path.join(parentPath, `.${path.basename(sourcePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`);
       const backupPath = `${temporaryPath}.backup`;
       fs.writeFileSync(temporaryPath, item.content, { flag: "wx" });
-      prepared.push({ sourcePath, temporaryPath, backupPath, relativePath: item.relativePath, content: item.content, expected: item.expected, existed: currentContent !== null });
+      prepared.push({ sourcePath, temporaryPath, backupPath, relativePath: item.relativePath, content: item.content, expected: item.expected, existed: currentContent !== null, sourceIdentity: currentContent === null ? null : captureFileIdentity(sourcePath), temporaryIdentity: captureFileIdentity(temporaryPath) });
       if (currentContent !== null) fs.chmodSync(temporaryPath, fs.statSync(sourcePath).mode);
     }
   } catch (error) {
@@ -294,14 +306,10 @@ export function applyPreparedChanges(sourceRoot, preparedChanges, expectedStates
         ? currentContent === null
         : currentContent !== null && sha256Hex(currentContent) === item.expected.sha256;
       if (!stateMatches) throw sourceStateChangedError();
+      if (item.existed && !matchesFileIdentity(item.sourcePath, item.sourceIdentity)) throw sourceStateChangedError();
       if (item.existed) fs.renameSync(item.sourcePath, item.backupPath);
-      try {
-        fs.renameSync(item.temporaryPath, item.sourcePath);
-        applied.push(item);
-      } catch (error) {
-        if (item.existed && fs.existsSync(item.backupPath)) fs.renameSync(item.backupPath, item.sourcePath);
-        throw error;
-      }
+      fs.renameSync(item.temporaryPath, item.sourcePath);
+      applied.push(item);
     }
     for (const item of applied) {
       const promotedContent = requireSafeSourceFile(normalizedRoot, item.relativePath);
@@ -312,8 +320,18 @@ export function applyPreparedChanges(sourceRoot, preparedChanges, expectedStates
     let rollbackFailed = false;
     for (const item of rollbackItems) {
       try {
-        if (fs.existsSync(item.sourcePath)) fs.rmSync(item.sourcePath, { force: true });
-        if (item.existed && fs.existsSync(item.backupPath)) fs.renameSync(item.backupPath, item.sourcePath);
+        if (item.existed) {
+          const backupRelativePath = path.relative(normalizedRoot, item.backupPath).split(path.sep).join("/");
+          if (!matchesFileIdentity(item.backupPath, item.sourceIdentity) || sha256Hex(requireSafeSourceFile(normalizedRoot, backupRelativePath)) !== item.expected.sha256) throw new Error("pilot rollback backup changed");
+        }
+        if (hasFilesystemEntry(item.sourcePath)) {
+          if (!applied.includes(item) || !matchesFileIdentity(item.sourcePath, item.temporaryIdentity) || !requireSafeSourceFile(normalizedRoot, item.relativePath).equals(item.content)) throw new Error("pilot rollback target changed");
+          fs.unlinkSync(item.sourcePath);
+        }
+        if (item.existed) {
+          fs.linkSync(item.backupPath, item.sourcePath);
+          fs.unlinkSync(item.backupPath);
+        }
       } catch {
         rollbackFailed = true;
       }

@@ -20,10 +20,47 @@ const runtime = createBridgeRuntime({ configuration, adapters: { codex: adapter 
 const handlers = createMcpToolHandlers({ runtime, trustedWorkspace: root, configuration });
 const prepared = await handlers.prepareP2AcceptanceEdit({});
 if (crashPoint === "promotion") {
+  const originalUnlink = fs.unlinkSync;
+  const expectedTarget = path.join(root, ...p2PreparedEditPolicy.relativePath.split("/"));
+  fs.unlinkSync = function (target) {
+    originalUnlink(target);
+    if (target === expectedTarget) process.exit(75);
+  };
+  const approved = await handlers.approvePreparedEdit({ approvalRequestId: prepared.structuredContent.approvalRequestId });
+  process.stdout.write(JSON.stringify({ status: approved.structuredContent?.status, applied: approved.structuredContent?.applied, failureClass: approved.structuredContent?.failureClass }));
+}
+if (crashPoint === "promotion-target-linked") {
+  const originalLink = fs.linkSync;
+  const expectedTarget = path.join(root, ...p2PreparedEditPolicy.relativePath.split("/"));
+  fs.linkSync = function (source, target) {
+    originalLink(source, target);
+    if (target === expectedTarget) process.exit(77);
+  };
+  await handlers.approvePreparedEdit({ approvalRequestId: prepared.structuredContent.approvalRequestId });
+}
+if (crashPoint === "promotion-stage-removed") {
+  const originalUnlink = fs.unlinkSync;
+  fs.unlinkSync = function (target) {
+    originalUnlink(target);
+    if (String(target).endsWith(".tmp")) process.exit(79);
+  };
+  await handlers.approvePreparedEdit({ approvalRequestId: prepared.structuredContent.approvalRequestId });
+}
+if (crashPoint === "promotion-journal-update") {
   const originalRename = fs.renameSync;
+  const expectedTarget = path.join(root, ...p2PreparedEditPolicy.relativePath.split("/"));
   fs.renameSync = function (source, target) {
-    originalRename(source, target);
-    if (String(target).endsWith(".backup")) process.exit(75);
+    if (String(source).endsWith(".next") && String(target).endsWith(".json") && !fs.existsSync(expectedTarget)) process.exit(80);
+    return originalRename(source, target);
+  };
+  await handlers.approvePreparedEdit({ approvalRequestId: prepared.structuredContent.approvalRequestId });
+}
+if (crashPoint === "promotion-initial-journal") {
+  const originalRename = fs.renameSync;
+  const expectedTarget = path.join(root, ...p2PreparedEditPolicy.relativePath.split("/"));
+  fs.renameSync = function (source, target) {
+    if (String(source).endsWith(".next") && String(target).endsWith(".json") && fs.existsSync(expectedTarget)) process.exit(81);
+    return originalRename(source, target);
   };
   await handlers.approvePreparedEdit({ approvalRequestId: prepared.structuredContent.approvalRequestId });
 }

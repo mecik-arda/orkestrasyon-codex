@@ -1,5 +1,11 @@
 # P2 prepared-edit host yolu — 2026-10-27
 
+## 2026-11-01: Canlı P2 red alt kapısının kapanışı
+
+P2 opt-in sıfırlandıktan sonraki Hades restart'ından sonra salt okunur araç kataloğunda `prepare_p2_acceptance_edit` sunulmadı. Önceki tek hazırlık çağrısı `approval_required` ve `applied=false` döndürdü; yalnız o çağrının kaydı için yapılan tek `reject_prepared_edit` çağrısı `status=rejected` ve `outcome=prepared_edit_rejected` döndürdü. Approval veya promotion çağrısı yapılmadı. Kaynak fixture absent kaldı ve repository `main` dalında `7d7dff2ed27d48ca57e175ae3dcee2e1f4bbfbea` HEAD'inde temiz kaldı. Etkin config'te `orchestration.acceptancePilots.p2PreparedEdit` yeniden unset; runtime şeması geçerli.
+
+Canlı P2 red alt kapısı ve daha önce tamamlanan sabit hazırlık ile ayrı onaylı uygulama pilotu kaydedildi; pilot kapalıdır. Canlı stale kaynak ve recovery alt kapıları, bağımsız diff denetimi ve diğer P1b/P2/P3/P6 kapıları açık kalır. Çağrının gerçek maliyeti ve CLI içi inference sayısı bilinmiyor. Genel geçiş tamamlanmış değildir.
+
 ## 2026-11-01: Canlı P2 sabit pilotunun kapanışı
 
 Kullanıcının tek çağrı yetkisiyle `prepare_p2_acceptance_edit({})` bir kez çalıştı. `gpt-5.6-luna` için `approval_required` sonucu exact tek dosya diff'i, `applied=false`, `approvalRequestId=e0d9e0a754179865f07059126d407a54f3653297986d8c224ec1e2e076697924` ve `changeSetHash=e753a94e2ad7c72c170d4bd78d86405d9e5d428e7a0d09a8c67aec33ae1bf3f1` döndürdü. Kullanıcı bu diff için ayrı onay verdi; tek `approve_prepared_edit` çağrısı `completed`/`applied=true`, `fallbacks=0` ve `cleanupCompleted=true` döndürdü. Çalışma ağacı uygulama öncesinde temiz ve hedef yoktu; sonrasında yalnız onaylı hedef dosya untracked olarak oluştu. Dosya 18 bayt ve beklenen içeriğe byte-byte eşleşiyor; tam bir sondaki LF var. HEAD değişmedi ve commit/push yapılmadı.

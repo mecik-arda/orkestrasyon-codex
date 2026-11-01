@@ -1,5 +1,9 @@
 # Codex batch P2/P3 kabul yolu
 
+## Güncel canlı P2 red alt kapısı — 2026-11-01
+
+P2 opt-in reseti sonrası Hades restart'ında salt okunur katalog `prepare_p2_acceptance_edit` aracını sunmadı. Önceki tek hazırlık `approval_required`/`applied=false` üretti; yalnız bu kayda yapılan tek red `rejected`/`prepared_edit_rejected` oldu. Kaynak dosya oluşmadı, repository temiz kaldı ve P2 opt-in etkin config'te unset, şema geçerli. Sabit P2 pilotu kapalıdır. Bu kanıt daha önceki ayrı onaylı uygulamayı korur; canlı stale/recovery ve diğer P1b/P2/P3/P6 kapılarını kapatmaz. Gerçek maliyet ve CLI içi inference sayısı bilinmiyor. Ayrıntı [P2 raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).
+
 ## Güncel canlı P2 sabit pilot kapanışı — 2026-11-01
 
 Tek `prepare_p2_acceptance_edit({})` çağrısı `approval_required` ile exact diff ve `applied=false` üretti; kullanıcı ayrı diff onayını verdi ve tek `approve_prepared_edit` çağrısı `completed`/`applied=true` döndürdü. Yalnız sabit fixture hedefi uygulandı; dosya 18 bayt ve beklenen içerikle byte-byte eşleşti, ardından onaylı bakımda kaldırıldı. Son Hades restart'ından sonra salt okunur katalogda `prepare_p2_acceptance_edit` yok; P2 opt-in önceki tanımsız disk config durumuna döndürüldü. Sabit canlı pilot kapalıdır. Canlı red/stale/recovery, genel P2 entegrasyonu, bağımsız son diff denetimi ve P1b/P2 diğer alt kapıları/P3/P6 açık kalır. Gerçek maliyet ve CLI içi inference sayısı bilinmiyor. Ayrıntı [P2 raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).

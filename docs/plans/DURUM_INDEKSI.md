@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+P2 canlı red alt kapısı — 2026-11-01: Yeni hazırlık kaydı açıkça reddedildi; opt-in önceki unset durumuna döndü ve Hades restart'ı sonrası hazırlık aracı salt okunur katalogda yoktu. Sabit P2 hazırlık ve ayrı onaylı uygulama pilotu korunur; canlı stale/recovery ve diğer P1b/P2/P3/P6 kapıları açık kalır. [P2 uygulama raporu](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) ve [kabul handoff'u](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md).
+
 P2 canlı sabit pilot kapanışı — 2026-11-01: Tek `prepare_p2_acceptance_edit({})` hazırlığına verilen ayrı onaylı `approve_prepared_edit` uygulaması `completed`/`applied=true` döndürdü. Sabit fixture kontrollü bakımda kaldırıldı; P2 opt-in önceki tanımsız disk config durumuna döndürüldü. Hades restart'ından sonra araç salt okunur katalogda sunulmuyor. Bu, yalnız sabit pilotu kapatır; red/stale/recovery, genel P2 entegrasyonu, bağımsız diff denetimi ve diğer P1b/P2/P3/P6 kapıları açık. [P2 uygulama raporu](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) ve [kabul handoff'u](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md).
 
 P2 host prepared-edit yolu — 2026-10-27: Varsayılanı kapalı, sabit kapsamlı yol disposable alanda diff hazırlar ve düşük etkili değişiklikler dahil ayrı onay ister. Yerel test, denetim ve canlı kabul sınırları [uygulama raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) ayrı tutulur. P2 canlı kabulü açık kalır.

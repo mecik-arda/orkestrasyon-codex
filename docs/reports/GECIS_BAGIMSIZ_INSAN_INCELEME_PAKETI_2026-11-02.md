@@ -1,11 +1,11 @@
-# Codex/Hades gecisi bagimsiz yerel insan inceleme paketi
+# Codex/Hades gecisi bagimsiz model inceleme paketi
 
 Tarih: 2026-11-02
-Durum: reviewer atamasi, inceleme ve bulgu karari bekliyor
+Durum: GPT-6.1-Sol ve Gemini Flash incelemesi kaynak teslim engeli nedeniyle yapilmadi
 
 ## Amac ve sinir
 
-Bu paket, repository icinde yetkili bir insanin guncel diff'i yerel olarak incelemesi icindir. Kaynak kopyasi veya disariya gonderilecek bundle degildir. Bu gorevde insan incelemesi yapilmadi; reviewer, tarih, bulgu, onay veya karar uydurulmadi. Platform guvenlik preflight'i tarafindan reddedilmis icerigin baska kanala tasinmasi ya da kapsam bolerek yeniden sunulmasi istenmiyor.
+Bu paket, yerel repository icin bagimsiz model inceleme kapsam haritasidir; kaynak kopyasi veya disariya gonderilecek bundle degildir. Kullanici GPT-6.1-Sol ana reviewer ve Gemini Flash karsi gorusu istemistir. Onceki kaynak teslimi ve auto-review retleri devam ettiginden Sol istegi tekrarlanmadi. Gemini Antigravity araci source-bundle reviewScope tasimaz; ayni reddedilmis kaynagi workspace yoluyla vermek yasaktir. Bu nedenle iki model de cagrilmadi; bulgu, karar veya basarili inceleme uydurulmadi.
 
 ## Kaynak ve karsilastirma baglari
 
@@ -95,8 +95,7 @@ Commit aileleri kapsam sinirlarini aciklar; tek baslarina inceleme kaniti degild
 
 ## Inceleme kaydi
 
-- Reviewer: bekliyor.
-- Incelenen commit, diff tabani ve tam path manifesti: bekliyor.
-- Bulgular, onem dereceleri ve duzeltme dogrulamasi: bekliyor.
-- Kalan risk ve inceleme karari: bekliyor.
-- Bu paket hazirlanirken bagimsiz insan incelemesi yapilmadi.
+- Ana reviewer GPT-6.1-Sol: kaynak teslimi onceki preflight/auto-review engeli nedeniyle cagrilmadi.
+- Gemini Flash karsi gorusu: source-bundle reviewScope destegi olmadigi ve reddedilen kaynagi alternatif yoldan tasima yasagi nedeniyle cagrilmadi.
+- Model metadata, teslim edilen kapsam, bulgular ve karar: inceleme yapilmadigi icin yok.
+- Onceki P2 yedi dosya incelemesi ve takip sonucu yalniz paket kapsaminda anlatildigi sinirlarla gecerli kalir; tam manifest ve commit bagi bilinmiyor.

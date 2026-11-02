@@ -1,17 +1,17 @@
 # Codex batch P2/P3 kabul yolu
 
 
-## 2026-11-02 gecis kapsam karari ve insan incelemesi
+## 2026-11-02 gecis kapsam karari ve bagimsiz model incelemesi
 
 Claude Sonnet 4.6 kabulini kullanici bu gecisten erteledi. Basarisiz task_json_parse_invalid pilot kaydi korunur; Claude veya baska surum dogrulanmis destek degildir. Etkin config'te yalniz Claude pilot opt-in'i kapalidir; sema gecerlidir. Hades restart'i sonrasi salt okunur katalogda run_claude_sonnet_acceptance_pilot sunulmadi. P2/P3 plan kapsamindaki islevsel kabul kapanmistir ve yeniden acilmiyor.
 
-Bagimsiz inceleme acigi risk kabuluyle kapatilmadi. Yerel reviewer icin kaynak commit'i, karsilastirma tabani, bilinen onceki incelemeler, dosya/call-chain kapsami, test kaniti ve sorular [insan inceleme paketi](../reports/GECIS_BAGIMSIZ_INSAN_INCELEME_PAKETI_2026-11-02.md) icindedir. Reviewer atamasi ve gercek inceleme sonucu bekliyor; paket inceleme yapilmis sayilmaz.
+Kullanici GPT-6.1-Sol ana reviewer ve Gemini Flash karsi gorusu secmistir; ancak onceki preflight/auto-review retleri nedeniyle kaynak teslim edilmedi, model cagrisi yapilmadi. Paket inceleme yapilmis sayilmaz.
 
 ## P6 kalan karar kapıları — 2026-11-02
 
 P2/P3 işlevsel kabulü tamamlandı; P1b ve bağımsız inceleme sonucu bu kabulleri geriye dönük değiştirmez. P1b planı model profillerini yalnız exact kimlik/erişim ve strict read-only kabulinden sonra açar. Claude Sonnet için seçilmiş tek JSON/`result=42` görevi başarısız (`task_json_parse_invalid`) kalır; ham cevap bulunmadığından yeni tekrara teknik gerekçe yoktur. Claude'u zorunlu tutmak açık P1b model kapısını korur; profili ertelemek yalnız kullanıcının açık kapsam kararıyla ve Claude'u desteklenmiş saymadan yapılabilir. Planın Claude Sonnet 4.6 emeklilik tarihi 2026-11-02'dir; resmî [Antigravity katalogu](https://antigravity.google/docs/models) bugün bu tarihi kaldırılma günü olarak gösterse de fiilî kaldırılma/hesap erişimi kanıtlanmış değildir.
 
-Bağımsız Sol inceleme kanıtı P2 journal/recovery için gerçek model metadata'sı doğrulanmış yedi dosyalı review ve düzeltme sonrası takip ile sınırlıdır; dosya listesi/commit sınırları saklı değil, approval registry içi ve sonraki benchmark/test kapsamı dışarıda kalmıştır. P1b reviewer sonucu kesik, son P2 kapsam isteği preflight'ta kaynak tesliminden önce reddedilmiş, Option B isteği de secret preflight'tan geçmemiştir. Batch worker modelinin metadata'sı bağımsız denetim değildir. Bu platform kararını repo istisnasıyla aşma yolu yoktur. Yerel insan incelemesi veya kapsamı kesin bu review boşluğuyla sınırlı kullanıcı risk kararı seçenek olabilir; ikisi de platform reddini değiştirmez ve risk kabulü review sonucu sayılmaz. Genel P6 kapanış durumu ve gerekçeler [güncel karar özetindedir](../reports/CODEX_DESKTOP_GECIS_UYGULAMA_DURUMU_2026-10-18.md).
+Kullanici bagimsiz model incelemesini secmistir; ancak mevcut teslim yolu onceki platform reddi nedeniyle kapali kalmistir. Risk kabulu veya Gemini workspace yolu bu reddi asmak icin kullanilamaz.
 
 ## P3 plan kapsamındaki işlevsel kabul — 2026-11-02
 

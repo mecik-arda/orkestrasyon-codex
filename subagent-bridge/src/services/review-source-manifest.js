@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { classifySecretLikeContent } from "../memory.js";
+import { classifyJavaScriptOrTypeScriptSource } from "./review-source-syntax-classifier.js";
 
 export const REVIEW_SOURCE_MANIFEST_VERSION = 1;
 export const REVIEW_SOURCE_MAX_FILES = 50;
@@ -120,7 +121,7 @@ function assertSafeComponents(rootPath, filePath) {
   }
 }
 
-function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex) {
+function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex, syntaxAwareJavaScriptEnabled) {
   let descriptor;
   try {
     assertCanonicalRootUnchanged(rootPath, rootStatus);
@@ -165,13 +166,26 @@ function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex) {
     if (!Buffer.from(text, "utf8").equals(content) || text.includes("\u0000")) {
       throw new ReviewSourceManifestError("review_scope_invalid_encoding");
     }
-    const secretClassification = classifySecretLikeContent(text);
-    if (secretClassification.matches) {
-      throw new ReviewSourceManifestError("review_scope_secret_detected", {
-        sortedScopeIndex,
-        signal: secretClassification.signal,
-        highEntropyCandidateCount: secretClassification.highEntropyCandidateCount
-      });
+    if (syntaxAwareJavaScriptEnabled) {
+      const syntaxClassification = classifyJavaScriptOrTypeScriptSource({ fileName: relativePath, source: text });
+      if (syntaxClassification.status !== "complete") {
+        throw new ReviewSourceManifestError("review_scope_syntax_analysis_blocked");
+      }
+      if (syntaxClassification.findings.length > 0) {
+        throw new ReviewSourceManifestError("review_scope_syntax_review_required", {
+          sortedScopeIndex,
+          findingCount: syntaxClassification.findings.length
+        });
+      }
+    } else {
+      const secretClassification = classifySecretLikeContent(text);
+      if (secretClassification.matches) {
+        throw new ReviewSourceManifestError("review_scope_secret_detected", {
+          sortedScopeIndex,
+          signal: secretClassification.signal,
+          highEntropyCandidateCount: secretClassification.highEntropyCandidateCount
+        });
+      }
     }
     return {
       relativePath,
@@ -194,7 +208,7 @@ function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex) {
   }
 }
 
-export function createReviewSourceManifest(trustedWorkspace, requestedPaths) {
+export function createReviewSourceManifest(trustedWorkspace, requestedPaths, options = {}) {
   if (typeof trustedWorkspace !== "string" || !path.isAbsolute(trustedWorkspace) || !Array.isArray(requestedPaths)) {
     throw new ReviewSourceManifestError("review_scope_invalid");
   }
@@ -223,7 +237,7 @@ export function createReviewSourceManifest(trustedWorkspace, requestedPaths) {
   let totalBytes = 0;
   for (let index = 0; index < paths.length; index += 1) {
     const relativePath = paths[index];
-    const entry = readSourceFile(rootPath, rootStatus, relativePath, index + 1);
+    const entry = readSourceFile(rootPath, rootStatus, relativePath, index + 1, options?.syntaxAwareJavaScriptEnabled === true);
     const canonicalPathKey = process.platform === "win32" || process.platform === "darwin"
       ? entry.relativePath.toLocaleLowerCase("en-US")
       : entry.relativePath;

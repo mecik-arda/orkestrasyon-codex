@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+Kaynak inceleme AST sınıflandırıcı adayı — 2026-11-02: Mevcut AST uygulaması `subagent-bridge/src/services/review-source-syntax-classifier.js` hizmetine taşındı ve gerçek runtime → review-source manifest zincirine yalnız `orchestration.reviewSourceSyntaxAwareClassifierEnabled` host ayarıyla bağlandı. Repository policy varsayılanı `false`; etkin kişisel config, Hades ve kaynak teslimi değiştirilmedi. Sahte adapter kullanan 47 hedefli test, tam `npm test`, `verify` ve `verify:ci` geçti. Identifier içine konmuş bilinmeyen credential biçimleri için yeni yanlış-negatif riski sürüyor; üretim etkinleştirme ve bağımsız inceleme kararı açık. Ayrıntı [prototip ve entegrasyon raporunda](../reports/SYNTAX_AWARE_SECRET_CLASSIFIER_PROTOTIPI_2026-10-27.md).
+
 
 P6 kapsam karari - 2026-11-02: P2/P3 plan kapsamindaki islevsel kabul tamamlandi. Claude Sonnet 4.6'nin basarisiz task_json_parse_invalid kabul kaydi korunarak bu gecisten ertelendi; opt-in disk config'te kapali ve restart sonrasi salt okunur katalogda run_claude_sonnet_acceptance_pilot sunulmadi. Bagimsiz inceleme genel risk kabuluyle kapatilmadi; Sol ve Gemini incelemesi onceki kaynak teslim retleri nedeniyle yapilmadi. [model inceleme paketi](../reports/GECIS_BAGIMSIZ_INSAN_INCELEME_PAKETI_2026-11-02.md) hazir. P6 belge uzlastirmasi guncel, genel kapanis yapilmadi.
 

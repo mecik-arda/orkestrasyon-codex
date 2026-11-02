@@ -123,6 +123,7 @@
     "maxMetricRetentionDays": 45
   },
   "orchestration": {
+    "reviewSourceSyntaxAwareClassifierEnabled": false,
     "acceptancePilots": {
       "claudeSonnet": {
         "enabled": false

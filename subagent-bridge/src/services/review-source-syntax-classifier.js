@@ -1,18 +1,20 @@
-import ts from "typescript";
-import { classifySecretLikeContent } from "../subagent-bridge/src/memory.js";
+import { createRequire } from "node:module";
+import { classifySecretLikeContent } from "../memory.js";
 
 export const SYNTAX_AWARE_SOURCE_LIMIT_BYTES = 256 * 1024;
 export const SYNTAX_AWARE_NODE_LIMIT = 100000;
 
+let ts;
+
 const sourceKinds = new Map([
-  [".js", ts.ScriptKind.JS],
-  [".jsx", ts.ScriptKind.JSX],
-  [".mjs", ts.ScriptKind.JS],
-  [".cjs", ts.ScriptKind.JS],
-  [".ts", ts.ScriptKind.TS],
-  [".tsx", ts.ScriptKind.TSX],
-  [".mts", ts.ScriptKind.TS],
-  [".cts", ts.ScriptKind.TS]
+  [".js", "JS"],
+  [".jsx", "JSX"],
+  [".mjs", "JS"],
+  [".cjs", "JS"],
+  [".ts", "TS"],
+  [".tsx", "TSX"],
+  [".mts", "TS"],
+  [".cts", "TS"]
 ]);
 
 const sensitiveNamePattern = /^(?:api[_-]?key|token|password|secret|client_secret|private_key)$/i;
@@ -172,9 +174,17 @@ function parseSource(source, fileName, scriptKind) {
 
 export function classifyJavaScriptOrTypeScriptSource({ fileName, source }) {
   if (typeof fileName !== "string" || typeof source !== "string") return blockedResult("invalid_input");
+  if (!ts) {
+    try {
+      ts = createRequire(import.meta.url)("typescript");
+    } catch {
+      return blockedResult("parser_unavailable");
+    }
+  }
   const extension = fileName.slice(fileName.lastIndexOf(".")).toLocaleLowerCase("en-US");
-  const scriptKind = sourceKinds.get(extension);
-  if (scriptKind === undefined) return blockedResult("unsupported_language");
+  const scriptKindName = sourceKinds.get(extension);
+  if (scriptKindName === undefined) return blockedResult("unsupported_language");
+  const scriptKind = ts.ScriptKind[scriptKindName];
   if (Buffer.byteLength(source, "utf8") > SYNTAX_AWARE_SOURCE_LIMIT_BYTES) return blockedResult("source_too_large");
   if (source.includes("\u0000") || Buffer.from(source, "utf8").toString("utf8") !== source) return blockedResult("invalid_source_text");
 
@@ -193,8 +203,12 @@ export function classifyJavaScriptOrTypeScriptSource({ fileName, source }) {
     if (visitedNodeCount > SYNTAX_AWARE_NODE_LIMIT) return blockedResult("node_limit_exceeded");
 
     if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
-      const identifierClassification = classifySecretLikeContent(node.getText(sourceFile));
-      if (identifierClassification.signal === "known_signature" || identifierClassification.signal === "mixed") {
+      const identifierClassifications = [
+        classifySecretLikeContent(node.text),
+        classifySecretLikeContent(node.getText(sourceFile))
+      ];
+      if (identifierClassifications.some((classification) =>
+        classification.signal === "known_signature" || classification.signal === "mixed")) {
         addFinding(findingsByKey, lineStarts, "known_signature", node, sourceFile);
       }
     } else if (ts.isStringLiteralLike(node)) {

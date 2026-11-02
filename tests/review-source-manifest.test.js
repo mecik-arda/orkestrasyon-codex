@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createDeepSeekCheckpoint } from "../subagent-bridge/src/deepseek.js";
+import { classifySecretLikeContent } from "../subagent-bridge/src/memory.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createFailureSubagentResult, createSuccessSubagentResult, requiredSourceReviewResultSchema } from "../subagent-bridge/src/schemas/core-schemas.js";
 import {
@@ -54,6 +55,50 @@ function successfulReviewAdapterResult(request, result = structuredReviewResult(
       } : {})
     }
   });
+}
+
+function createSyntaxAwareReviewRuntime(root, syntaxAwareJavaScriptEnabled) {
+  const configuration = {
+    allowedRoots: [root],
+    statePaths: { logs: path.join(root, "logs"), state: path.join(root, "state"), cache: path.join(root, "cache") },
+    codex: { timeoutMs: 30000, maxRetries: 1 },
+    reliability: { maxAttempts: 1, maxTotalDurationMs: 30000, maxRetryCostUsd: 1, maxRetryCostReserveUsd: 0.1, maxUnknownAttemptCostUsd: 0.1 },
+    orchestration: {
+      scheduler: { maxQueuedPerWorkspace: 10, staleLockMs: 60000, leaseHeartbeatMs: 1000 },
+      readOnlyCache: { enabled: false, ttlMs: 1000, maxEntryBytes: 1024 },
+      reviewSourceSyntaxAwareClassifierEnabled: syntaxAwareJavaScriptEnabled,
+      taskProfiles: {}
+    },
+    observability: { maxMetricFileBytes: 1048576, maxMetricRetentionDays: 30 }
+  };
+  const adapter = createAdapter("codex", { canRead: true, canWrite: false, supportsSandbox: true, supportsModelSelection: true });
+  let adapterCalls = 0;
+  let observedRequest = null;
+  adapter.execute = async (request) => {
+    adapterCalls += 1;
+    observedRequest = request;
+    return successfulReviewAdapterResult(request);
+  };
+  return {
+    runtime: createBridgeRuntime({ configuration, adapters: { codex: adapter }, sleep: async () => {} }),
+    get adapterCalls() { return adapterCalls; },
+    get observedRequest() { return observedRequest; }
+  };
+}
+
+function createReviewRequest(root, reviewScope, additions = {}) {
+  return {
+    target: "codex",
+    prompt: "Review the selected source.",
+    model: "gpt-6.1-sol",
+    mode: "read_only",
+    trustedWorkspace: root,
+    caller: "test_review",
+    delegationDepth: 0,
+    reviewEvidenceRequirement: "required",
+    reviewScope,
+    ...additions
+  };
 }
 
 test("RSM-01: manifest sorts selected paths and hashes exact host-read bytes", (t) => {
@@ -635,4 +680,63 @@ test("RSM-09: secret-like preflight returns only sorted scope index and detector
   assert.equal(result.metrics.adapterAttempts, 0);
   assert.equal(result.metrics.diagnostics.failureStage, "mcp_preflight");
   assert.equal(adapterCalls, 0);
+});
+
+test("RSM-SYNTAX-01: host-selected AST policy separates identifiers only in the source-review manifest chain", async (t) => {
+  const root = createWorkspace(t);
+  const identifier = ["applyAuthorized", "ParallelIntegration", "RequestSchema"].join("");
+  const source = `export const ${identifier} = 1;\n`;
+  fs.writeFileSync(path.join(root, "review.js"), source, "utf8");
+
+  const defaultRuntime = createSyntaxAwareReviewRuntime(root, false);
+  const defaultResult = await defaultRuntime.runtime.run(createReviewRequest(root, ["review.js"]));
+  assert.equal(defaultResult.ok, false);
+  assert.equal(defaultResult.reason, "review_scope_secret_detected");
+  assert.equal(defaultResult.metrics.adapterAttempts, 0);
+  assert.equal(defaultRuntime.adapterCalls, 0);
+
+  const selectedRuntime = createSyntaxAwareReviewRuntime(root, true);
+  const selectedResult = await selectedRuntime.runtime.run(createReviewRequest(root, ["review.js"]));
+  assert.equal(selectedResult.ok, true);
+  assert.equal(selectedRuntime.adapterCalls, 1);
+  assert.match(selectedRuntime.observedRequest.reviewSourcePayload, new RegExp(identifier, "u"));
+  assert.equal(classifySecretLikeContent(source).signal, "high_entropy");
+});
+
+test("RSM-SYNTAX-02: selected AST policy blocks signatures, literals, dynamic values, malformed sources, and unsupported files before adapter execution", async (t) => {
+  const root = createWorkspace(t);
+  const credentialSignature = ["AKIA", "0".repeat(16)].join("");
+  const cases = [
+    { path: "credential.js", source: `const ${credentialSignature} = 1;`, reason: "review_scope_syntax_review_required" },
+    { path: "private-credential.js", source: `class Example { #${credentialSignature} = 1; }`, reason: "review_scope_syntax_review_required" },
+    { path: "literal.js", source: `const value = ${JSON.stringify(credentialSignature)};`, reason: "review_scope_syntax_review_required" },
+    { path: "dynamic.js", source: "const settings = { token: resolveToken() };", reason: "review_scope_syntax_review_required" },
+    { path: "malformed.js", source: "const = ;", reason: "review_scope_syntax_analysis_blocked" },
+    { path: "node-limit.js", source: "a;".repeat(50001), reason: "review_scope_syntax_analysis_blocked" },
+    { path: "unsupported.md", source: "ordinary source note", reason: "review_scope_syntax_analysis_blocked" }
+  ];
+  const selectedRuntime = createSyntaxAwareReviewRuntime(root, true);
+  for (const currentCase of cases) {
+    fs.writeFileSync(path.join(root, currentCase.path), currentCase.source, "utf8");
+    const result = await selectedRuntime.runtime.run(createReviewRequest(root, [currentCase.path]));
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, currentCase.reason);
+    assert.equal(result.metrics.adapterAttempts, 0);
+  }
+  const traversalResult = await selectedRuntime.runtime.run(createReviewRequest(root, ["../outside.js"]));
+  assert.equal(traversalResult.ok, false);
+  assert.equal(traversalResult.reason, "review_scope_invalid");
+  assert.equal(traversalResult.metrics.adapterAttempts, 0);
+  assert.equal(selectedRuntime.adapterCalls, 0);
+});
+
+test("RSM-SYNTAX-03: runtime requests cannot select the host classifier policy", async (t) => {
+  const root = createWorkspace(t);
+  fs.writeFileSync(path.join(root, "review.js"), "export const value = 1;\n", "utf8");
+  const runtimeHarness = createSyntaxAwareReviewRuntime(root, false);
+  await assert.rejects(
+    runtimeHarness.runtime.run(createReviewRequest(root, ["review.js"], { syntaxAwareJavaScriptEnabled: true })),
+    /invalid runtime request/u
+  );
+  assert.equal(runtimeHarness.adapterCalls, 0);
 });

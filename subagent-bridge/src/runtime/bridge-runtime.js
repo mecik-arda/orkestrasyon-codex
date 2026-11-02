@@ -320,7 +320,7 @@ function createFailureDiagnostics(result) {
     else if (reason === "workspace_read_failure") failureStage = "workspace_read";
     else if (["schema_invalid", "output_parse_invalid", "empty_output"].includes(reason)) failureStage = "result_parse";
     else if (reason === "web_evidence_invalid") failureStage = "evidence_invalid";
-    else if (["invalid_model", "mode_not_allowed", "review_source_transport_unsupported", "review_scope_invalid", "review_scope_denied", "review_scope_unsafe_file", "review_scope_not_found", "review_scope_unreadable", "review_scope_invalid_encoding", "review_scope_secret_detected", "review_scope_too_large", "review_scope_unavailable", "review_scope_read_failed", "review_scope_changed"].includes(reason)) failureStage = "mcp_preflight";
+    else if (["invalid_model", "mode_not_allowed", "review_source_transport_unsupported", "review_scope_invalid", "review_scope_denied", "review_scope_unsafe_file", "review_scope_not_found", "review_scope_unreadable", "review_scope_invalid_encoding", "review_scope_secret_detected", "review_scope_syntax_analysis_blocked", "review_scope_syntax_review_required", "review_scope_too_large", "review_scope_unavailable", "review_scope_read_failed", "review_scope_changed"].includes(reason)) failureStage = "mcp_preflight";
     else failureStage = "provider_execution";
   }
   const providerCode = existing.providerCode || ({
@@ -907,7 +907,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     let reviewSourceManifest = null;
     if (input.reviewScope?.length) {
       try {
-        reviewSourceManifest = createReviewSourceManifest(trustedWorkspace, input.reviewScope);
+        reviewSourceManifest = createReviewSourceManifest(trustedWorkspace, input.reviewScope, {
+          syntaxAwareJavaScriptEnabled: runtimeConfiguration.orchestration?.reviewSourceSyntaxAwareClassifierEnabled === true
+        });
       } catch (error) {
         const failureCode = error instanceof ReviewSourceManifestError ? error.code : "review_scope_read_failed";
         const diagnostic = error instanceof ReviewSourceManifestError && error.diagnostic ? error.diagnostic : null;

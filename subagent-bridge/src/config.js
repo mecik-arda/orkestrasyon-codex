@@ -209,6 +209,7 @@ const configurationSchema = z.object({
       codexProfileEdit: z.object({ enabled: z.boolean() }).strict().optional(),
       p2PreparedEdit: z.object({ enabled: z.boolean() }).strict().optional()
     }).strict().optional(),
+    reviewSourceSyntaxAwareClassifierEnabled: z.boolean().optional(),
     slo: z.object({
       windowDays: z.number().int().positive().max(90),
       minimumRuns: z.number().int().positive(),
@@ -322,6 +323,7 @@ export function loadConfiguration(options = {}) {
     observability: configuration.observability,
     orchestration: {
       ...(configuration.orchestration || {}),
+      reviewSourceSyntaxAwareClassifierEnabled: configuration.orchestration?.reviewSourceSyntaxAwareClassifierEnabled === true,
       acceptancePilots: {
         ...(configuration.orchestration?.acceptancePilots || {}),
         claudeSonnet: {

@@ -6,7 +6,7 @@ import {
   classifyJavaScriptOrTypeScriptSource,
   SYNTAX_AWARE_NODE_LIMIT,
   SYNTAX_AWARE_SOURCE_LIMIT_BYTES
-} from "../experiments/syntax-aware-secret-classifier.js";
+} from "../subagent-bridge/src/services/review-source-syntax-classifier.js";
 
 function createSyntheticHighEntropyText() {
   return crypto.randomBytes(36).toString("base64url");
@@ -66,6 +66,15 @@ test("SASC-03: known credential signatures remain findings in strings, comments,
 test("SASC-11: known credential signatures remain findings in identifiers", () => {
   const credentialSignature = createSyntheticCredentialSignature();
   const source = `const ${credentialSignature} = 1; class Example { #${credentialSignature} = 1; }`;
+  const result = classifyJavaScriptOrTypeScriptSource({ fileName: "review.js", source });
+  assert.equal(result.findings.filter((finding) => finding.kind === "known_signature").length, 2);
+});
+
+test("SASC-12: escaped known credential signatures remain findings in identifiers", () => {
+  const escapedIdentifier = [...createSyntheticCredentialSignature()]
+    .map((character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)
+    .join("");
+  const source = `const ${escapedIdentifier} = 1; class Example { #${escapedIdentifier} = 1; }`;
   const result = classifyJavaScriptOrTypeScriptSource({ fileName: "review.js", source });
   assert.equal(result.findings.filter((finding) => finding.kind === "known_signature").length, 2);
 });

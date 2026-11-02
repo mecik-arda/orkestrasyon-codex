@@ -1,5 +1,7 @@
 # Plan Dizin ve Durum İndeksi (2026-09-28)
 
+2026-11-03 runProfile review-mode takip notu: GPT-6.1-Sol'un onceki 10 dosyali incelemesi tamamlandi; bulgudaki public sema/host profil modu uyusmazligi yerel kaynakta dogrulandi. Host edit profili reviewScope veya required evidence istegini artik runtime dispatch'inden once reddeder. Hedefli regresyon 37 gecti, 4 Windows kosullu atlama, 0 basarisiz. Yeni duzeltme bagimsiz model incelemesinde degildir; tam dogrulama gecti: npm test 1061 gecti/4 Windows kosullu atlama/0 basarisiz, verify, smoke, verify:ci ve diff-check basarili. AST secenegi disk config'te unset/loader'da false; Hades restart kapanisi ayridir. Genel bagimsiz denetim ve P6 nihai kapanis tamamlanmadi.
+
 Kaynak inceleme AST sınıflandırıcı adayı — 2026-11-02: Mevcut AST uygulaması `subagent-bridge/src/services/review-source-syntax-classifier.js` hizmetine taşındı ve gerçek runtime → review-source manifest zincirine yalnız `orchestration.reviewSourceSyntaxAwareClassifierEnabled` host ayarıyla bağlandı. Repository policy varsayılanı `false`; etkin kişisel config, Hades ve kaynak teslimi değiştirilmedi. Sahte adapter kullanan 47 hedefli test, tam `npm test`, `verify` ve `verify:ci` geçti. Identifier içine konmuş bilinmeyen credential biçimleri için yeni yanlış-negatif riski sürüyor; üretim etkinleştirme ve bağımsız inceleme kararı açık. Ayrıntı [prototip ve entegrasyon raporunda](../reports/SYNTAX_AWARE_SECRET_CLASSIFIER_PROTOTIPI_2026-10-27.md).
 
 

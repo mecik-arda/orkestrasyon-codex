@@ -27,9 +27,6 @@ const refineDirectReviewScope = (value, context) => {
   if (value.reviewEvidenceRequirement === "required" && (!value.reviewScope || value.reviewScope.length === 0)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["reviewScope"], message: "required review evidence needs an explicit non-empty reviewScope" });
   }
-  if (value.mode === "edit" && value.reviewScope?.length) {
-    context.addIssue({ code: z.ZodIssueCode.custom, path: ["reviewScope"], message: "reviewScope is only available for read-only tasks" });
-  }
 };
 const refineAntigravityReviewScope = (value, context) => {
   if (value.reviewEvidenceRequirement === "required" || value.reviewScope?.length) {
@@ -337,6 +334,9 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
       const profile = configuration.orchestration?.taskProfiles?.[parsed.profile];
       if (!profile) throw new Error(`unsupported task profile: ${parsed.profile}`);
       if (profile.mode === "edit") {
+        if (parsed.reviewScope?.length || parsed.reviewEvidenceRequirement === "required") {
+          throw new Error("reviewScope is only available for read-only tasks");
+        }
         requireImplementerEdit({ ...parsed, mode: "edit", role: "implementer" });
         const result = await runtime.runProfileEdit({ ...parsed, objective: parsed.prompt, role: "implementer", mode: "edit", model: profile.model }, trustedWorkspace, context.signal);
         return { isError: result.status !== "completed", content: [{ type: "text", text: JSON.stringify(result, null, 2) }], structuredContent: result };

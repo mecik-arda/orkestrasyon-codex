@@ -1,5 +1,11 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-11-03 yerel runProfile doğrulaması
+
+`4d21a7e` düzeltmesi public `runProfile` şemasında olmayan `mode` varsayımını kaldırır ve host tarafından edit çözümlenen profilde `reviewScope`/`required` talebini runtime/provider dispatch'inden önce reddeder. Read-only review bilgisi runtime'a taşınır; normal edit yolu değişmez. Gerçek MCP handler/runtime ile sahte-adapter regresyonu 5/5 geçti. Son kaynakta `npm.cmd test` 1066/1062/4 Windows koşullu atlama/0 başarısız; 5000-not benchmark'ı 9.7 saniye. `verify` ve `verify:ci` geçti. Tam koşu standart kullanıcı TEMP/TMP'sinde sandbox dışında çalıştı; sandbox içi worktree hatalarının nedeni Git for Windows `sh.exe` named-object erişim reddiydi (`0xC0000022`). Verify'da DeepSeek health kullanılamadı; provider inference/probe yapılmadı, memory kontrolü not içeriği okumadan yalnız erişim durumuna baktı. MCP şeması değişmediğinden smoke gerekmedi.
+
+Önceki GPT-6.1-Sol sonucu yalnız kendi 10 dosyalı snapshot'ına aittir. Son `4d21a7e` handler değişikliği ve bu takipteki test bağımsız incelenmemiştir; yeni doğal scope yerel `review_scope_secret_detected/high_entropy` preflight'ında durduğu için teslim edilmemiştir. AST ayarı diskte unset ve loader'da false; kullanıcı Hades restart'ını bildirmiştir, ancak bu bağımsız kod/config attestation'ı değildir. P2/P3 plan kapsamındaki işlevsel kabuller tamamdır; Claude P1b başarısız kaydı korunarak ertelenmiştir. Genel bağımsız denetim ve P6 koşulsuz kapanışı açık kalır.
+
 
 ## 2026-11-02 kapsam karari uygulandi
 

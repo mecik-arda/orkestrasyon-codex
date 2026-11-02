@@ -63,6 +63,13 @@ test("SASC-03: known credential signatures remain findings in strings, comments,
   assert.equal(hasFinding(result, "known_signature"), true);
 });
 
+test("SASC-11: known credential signatures remain findings in identifiers", () => {
+  const credentialSignature = createSyntheticCredentialSignature();
+  const source = `const ${credentialSignature} = 1; class Example { #${credentialSignature} = 1; }`;
+  const result = classifyJavaScriptOrTypeScriptSource({ fileName: "review.js", source });
+  assert.equal(result.findings.filter((finding) => finding.kind === "known_signature").length, 2);
+});
+
 test("SASC-04: sensitive fields distinguish literal values from dynamic calls and scan call arguments", () => {
   const dynamicSource = ["const settings = { token:", "crypto.randomUUID()", "};"].join(" ");
   assert.equal(classifySecretLikeContent(dynamicSource).signal, "known_signature");

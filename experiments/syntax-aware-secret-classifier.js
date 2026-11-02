@@ -192,7 +192,12 @@ export function classifyJavaScriptOrTypeScriptSource({ fileName, source }) {
     visitedNodeCount += 1;
     if (visitedNodeCount > SYNTAX_AWARE_NODE_LIMIT) return blockedResult("node_limit_exceeded");
 
-    if (ts.isStringLiteralLike(node)) {
+    if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) {
+      const identifierClassification = classifySecretLikeContent(node.getText(sourceFile));
+      if (identifierClassification.signal === "known_signature" || identifierClassification.signal === "mixed") {
+        addFinding(findingsByKey, lineStarts, "known_signature", node, sourceFile);
+      }
+    } else if (ts.isStringLiteralLike(node)) {
       classifyTextValue(findingsByKey, lineStarts, node.text, node, sourceFile);
       classifyTextValue(findingsByKey, lineStarts, node.getText(sourceFile), node, sourceFile);
     } else if (ts.isRegularExpressionLiteral(node)) {

@@ -1,5 +1,15 @@
 # Codex batch P2/P3 kabul yolu
 
+## P2 işlevsel kabul durumu — 2026-11-02
+
+Canlı sabit hazırlık/ayrı onaylı uygulama, red ve stale reddi ile ayrı süreçli Windows disposable üretim recovery testleri planın P2 işlevsel koşullarını karşılıyor. Hades üzerinden canlı recovery çağrısı plan gereği değildir ve yapılmadı. Bağımsız son diff denetimi açık; provider'sız operatör recovery girişi ayrı ürün adayıdır. POSIX, güç kaybı ve kilit dışı yazıcı kapsamı doğrulanmadı.
+
+## P2 recovery kabulü ve operatör ihtiyacı — 2026-11-01
+
+Planın açık P2 ölçütü, disposable onay/red yollarını ve çatışma/yarım promosyonda fail-closed davranışı ister; Hades üzerinden canlı recovery çağrısı şartı yoktur. Üretim P2 journal/recovery fonksiyonlarıyla ayrı süreçte yapılan Windows disposable test paketi gerçek promotion çöküşünden sonra yeni süreçte elle dosya taşımadan recovery'yi, farklı kimlikli hedefin korunmasını, eşzamanlı recovery ve replay'i doğruladı; standart kullanıcı TEMP'sinde 30/30 geçti. Bu, yerel recovery kabul kanıtıdır; canlı Hades recovery değildir ve bu kanıt için yeni MCP aracı gerekmiyor.
+
+Ayrı provider'sız operatör girişi mevcut değil. Bu, yazılı kabul ölçütünden ayrı ürün ihtiyacıdır: P2 opt-in kapalıyken kurtarma gerekirse güvenilir workspace bağını hosttan alan, path/journal girdisi kabul etmeyen, mevcut coordinator kilidi ve `recoverP2PreparedEdits` yolunu çağıran, provider başlatmayan dar bir yerel giriş değerlendirilebilir. Böyle bir ihtiyaç doğrulanmadan kod/araç eklenmez. Canlı P2 recovery çağrısı yapılmadı; POSIX ve güç kaybı kapsamı açık.
+
 ## Güncel canlı P2 stale kaynak alt kapısı — 2026-11-01
 
 Bir prepared-edit kaydı üretildikten sonra yalnız sabit hedefe exclusive sentinel yazıldı. Son kullanım zamanından önce aynı approval ID ile yapılan tek uygulama girişimi `approval_invalid` / kaynak bağı uyuşmazlığı ve `applied=false` döndürdü; sentinel'in byte/hash/dosya kimliği korundu. Registry kaynak snapshot uyuşmazlığında kaydı geçersizleştirir; ayrıca reject veya provider çağrısı yapılmadı. Yalnız bu sentinel temizlendi, hedef absent ve Git temiz kaldı. P2 opt-in unset'e döndürüldü; restart sonrasında hazırlık aracı katalogda yoktu. Canlı stale alt kapısı kapalıdır; canlı recovery ile diğer açık kabul kapıları sürer. Ayrıntı [P2 raporunda](../reports/P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md).

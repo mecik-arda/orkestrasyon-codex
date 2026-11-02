@@ -1,5 +1,15 @@
 # P2 prepared-edit host yolu — 2026-10-27
 
+## 2026-11-02: P2 işlevsel kabul durumu
+
+Canlı sabit hazırlık ve ayrı onaylı uygulama, red/kaynak koruması ve stale kaynak reddi alt kanıtları; ayrıca gerçek üretim promotion/recovery yolunu kullanan ayrı süreçli Windows disposable testleri planın P2 işlevsel kabulini karşılıyor. Plan recovery için Hades üzerinden canlı çağrı istemiyor; böyle bir çağrı yapılmadı. Bağımsız son diff denetimi açık. Provider'sız operatör recovery girişi ayrı ürün adayıdır ve bu raporda zorunlu geçiş koşulu sayılmaz. POSIX, güç kaybı ve kilit dışı yazıcı sınırları değişmemiştir.
+
+## 2026-11-01: Recovery kabulü ve operatör ihtiyacı ayrımı
+
+Planın P2 kabul ölçütü disposable pilotun başarılı olmasını, onay/red yollarının ayrı sınanmasını ve çatışma veya yarım promosyonun fail-closed kalmasını ister. Hades üzerinden ayrı bir canlı recovery çağrısı istemez. Sürümlü P2 journal kullanan üretim promotion/recovery zinciri ayrı süreçli Windows disposable testlerinde kaynak yedeğe taşındıktan sonraki gerçek süreç çöküşü, yeni süreçten elle dosya taşımadan recovery, farklı kimlikli hedefin korunması, recovery çöküşü, eşzamanlı çağrı ve replay ile doğrulanmıştır. Hedefli P2 paketi standart kullanıcı TEMP'sinde 30/30 geçti; aynı paket sandbox sanal TEMP'sinde rename/link işlemlerinde EPERM verdiğinden o koşu kabul kanıtı olarak kullanılmadı.
+
+Bu nedenle yazılı yerel recovery kabul koşulu Windows disposable kapsamı için karşılanmıştır; canlı Hades recovery işlemi yapılmadı ve plan bunu gerektirmiyor. Kaynakta `recoverP2PreparedEdits` iç runtime girişi vardır, fakat ayrı provider'sız operatör MCP/CLI girişi yoktur. `prepare_p2_acceptance_edit` bu recovery'yi içten çağırdıktan sonra normal hazırlık/provider akışına devam edebilir. Opt-in kapalıyken operatörün yalnız recovery çalıştırma ihtiyacı ayrı bir ürün kararıdır; gerekirse güvenilir workspace bağlamını mevcut hosttan alan, keyfi path/journal kabul etmeyen, mevcut coordinator ve recovery fonksiyonunu çağıran, provider başlatmayan dar bir operatör girişi tasarlanmalıdır. Bu görevde böyle bir giriş eklenmedi.
+
 ## 2026-11-01: Canlı P2 stale kaynak alt kapısının kapanışı
 
 P2 opt-in başlangıçtaki unset durumundan yalnız bu sınama için true yapıldı ve config runtime şemasıyla doğrulandı. Restart sonrası hedef absent, repository temiz ve launcher aynı repository sunucu girişini seçiyordu. Tek `prepare_p2_acceptance_edit({})` çağrısı sabit `gpt-5.6-luna` hedefinde yalnız izinli dosya için `approval_required`, `applied=false` ve geçerli onay kaydı döndürdü. Hazırlıktan sonra hedef exclusive oluşturmayla 25 baytlık `P2 stale source sentinel` içeriğine getirildi; SHA-256 `1e0a44a6896b7d4ef01be81bdec67038c709976e9e0667f672829889a8330d43` ve Windows dosya kimliği kaydedildi.

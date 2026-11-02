@@ -3,7 +3,7 @@
 
 ## 2026-11-02 gecis kapsam karari ve insan incelemesi
 
-Claude Sonnet 4.6 kabulini kullanici bu gecisten erteledi. Basarisiz task_json_parse_invalid pilot kaydi korunur; Claude veya baska surum dogrulanmis destek degildir. Etkin config'te yalniz Claude pilot opt-in'i kapalidir; sema gecerlidir. Hades restart sonrasi katalogda pilot aracinin kaybolmasi henuz dogrulanmadi. P2/P3 plan kapsamindaki islevsel kabul kapanmistir ve yeniden acilmiyor.
+Claude Sonnet 4.6 kabulini kullanici bu gecisten erteledi. Basarisiz task_json_parse_invalid pilot kaydi korunur; Claude veya baska surum dogrulanmis destek degildir. Etkin config'te yalniz Claude pilot opt-in'i kapalidir; sema gecerlidir. Hades restart'i sonrasi salt okunur katalogda run_claude_sonnet_acceptance_pilot sunulmadi. P2/P3 plan kapsamindaki islevsel kabul kapanmistir ve yeniden acilmiyor.
 
 Bagimsiz inceleme acigi risk kabuluyle kapatilmadi. Yerel reviewer icin kaynak commit'i, karsilastirma tabani, bilinen onceki incelemeler, dosya/call-chain kapsami, test kaniti ve sorular [insan inceleme paketi](../reports/GECIS_BAGIMSIZ_INSAN_INCELEME_PAKETI_2026-11-02.md) icindedir. Reviewer atamasi ve gercek inceleme sonucu bekliyor; paket inceleme yapilmis sayilmaz.
 

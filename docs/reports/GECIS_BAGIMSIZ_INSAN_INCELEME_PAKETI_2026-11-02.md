@@ -13,7 +13,7 @@ Bu paket, repository icinde yetkili bir insanin guncel diff'i yerel olarak incel
 - Son uretim kaynak degisikligi: b5975cee42c093c75ebeef621f4f1dc541af3262. b5975ce ile 68e03e0 arasinda subagent-bridge/src, tests, package.json ve config/policy.json icin Git diff'i yok; sonraki commit'ler belge durum notlaridir.
 - Karsilastirma tabani: 192df375bc2b18154a3b221e762cfe3c5b4b1739, OpenCode rotalarinin kaldirildigi gecis commit'i. Bu yalniz diff'i sinirlayan Git noktasi; denetlenmis baseline, remote guncelligi veya onceki reviewer siniri degildir.
 - Tam kaynak farki su yerel komutla tekrar uretilebilir: git diff 192df375bc2b18154a3b221e762cfe3c5b4b1739 68e03e02a51d2e4835e046f3220a47cac655282c -- subagent-bridge/src tests package.json config/policy.json. Fark 66 yol icerir. Reviewer gercek git diff --name-only ciktisini ve inceledigi alt kume manifestini sonuc kaydina eklemelidir.
-- Uretim kaynak kodu bu snapshot'ta b5975ce ile sabitlenmistir. Kisisel runtime config bu repository diff'inin parcasi degildir; Claude kabul opt-in'i ayrica kapatilmis ve runtime semasi dogrulanmistir.
+- Uretim kaynak kodu bu snapshot'ta b5975ce ile sabitlenmistir. Kisisel runtime config bu repository diff'inin parcasi degildir; Claude kabul opt-in'i ayrica kapatilmis, runtime semasi dogrulanmis ve Hades restart'i sonrasi katalogda run_claude_sonnet_acceptance_pilot sunulmamistir.
 
 Commit aileleri kapsam sinirlarini aciklar; tek baslarina inceleme kaniti degildir:
 

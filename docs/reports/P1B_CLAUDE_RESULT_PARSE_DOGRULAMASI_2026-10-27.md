@@ -3,7 +3,7 @@
 
 ## 2026-11-02 kapsam karari
 
-Kullanici Claude Sonnet 4.6 kabulini bu geciste erteledi. Son kayit task_json_parse_invalid ile basarisizdir; ham model cevabi bulunmadigindan reddin kesin icerik nedeni bilinmez. Model kimliginin cozulmesi ve surec exitCode=0 sonucu gorev kabulu degildir. Yeni ucretli deneme veya baska model/surum cagrisi yapilmadi; Claude desteklenmis sayilmaz ve basarisiz kayit korunur. Etkin config'teki yalniz Claude kabul opt-in'i kapatildi ve loader/schema ile diger alanlarin semantik esitligi dogrulandi. Canli tool katalog degisimi Hades restart sonrasinda salt okunur dogrulanmayi bekler.
+Kullanici Claude Sonnet 4.6 kabulini bu geciste erteledi. Son kayit task_json_parse_invalid ile basarisizdir; ham model cevabi bulunmadigindan reddin kesin icerik nedeni bilinmez. Model kimliginin cozulmesi ve surec exitCode=0 sonucu gorev kabulu degildir. Yeni ucretli deneme veya baska model/surum cagrisi yapilmadi; Claude desteklenmis sayilmaz ve basarisiz kayit korunur. Etkin config'teki yalniz Claude kabul opt-in'i kapatildi ve loader/schema ile diger alanlarin semantik esitligi dogrulandi. Hades restart'i sonrasi salt okunur katalogda run_claude_sonnet_acceptance_pilot sunulmadi.
 
 Tarih: 2026-10-27 Türkiye
 

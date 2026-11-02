@@ -93,6 +93,36 @@ Commit aileleri kapsam sinirlarini aciklar; tek baslarina inceleme kaniti degild
 12. Benchmark her npm test kosusunda zorunlu mu, 30 saniye siniri ve failure propagation korunmus mu?
 13. Testler gercek handler/runtime/recovery ve gercek dosya sonuclarini mi siniyor?
 
+## Ret kararlarinin sahibi ve mevcut destek yolu
+
+Ayrim:
+
+- Repository secret preflight'i `review_scope_secret_detected` kararini manifest/source bundle olusmadan verir; `adapterAttempts=0` ve `sourceDeliveryStatus=not_attempted` bu katmanin kanitidir. Mevcut production kodunda false-positive override yoktur. Bu siniflandirmanin degisip degismeyecegi repository kod sahiplerinin ayri politika karari olur; OpenAI Support bu yerel kod kararini veremez.
+- Platform auto-review reddi repository preflight'indan ayri veto katmanidir. Option B exact review istegi source/secret preflight'ta kalmis, kapsam daraltma girisimi platform auto-review tarafindan engellenmistir. Modelin calistigi veya kaynagi aldigi kanitlanmamistir.
+- Hades/adapter/model calismasi bu retlerde baslamamistir; yeniden model cagrisi yapilmadi.
+
+OpenAI Help Center, acikca benign veya yetkili siber guvenlik istegi tekrar tekrar engellenirse Support'a basvurulabilecegini ve tam guvenlik mesajini, urun/modeli, tarih-saat/zaman dilimini, varsa request ID'yi, redakte gorev ozetini ve uygulanabiliyorsa workspace/organization bilgisini eklemeyi soyluyor. Hassas veya proprietary icerik gonderilmemeli. Iletisim yolu Help Center sag-alt chat bubble'dir. Kaynaklar: [Additional safety checks for cybersecurity requests](https://help.openai.com/en/articles/20001326-additional-safety-checks-for-biological-and-cybersecurity-requests-in-chatgpt-codex-and-the-api) ve [How can I contact support?](https://help.openai.com/en/articles/6614161-how-can-i-contact-support). Erisim tarihi: 2026-11-02.
+
+Bu kanal platform auto-review kararinin degerlendirilmesini istemek icin mevcut yetkili yoldur; repository preflight istisnasi veya kaynak teslim onayi degildir. Support olumlu yanit verse bile iki katman ayri kalir. Resmi guvenlik rehberinde Daybreak programina basvuru da yetkili siber guvenlik calismasi icin belirtilir; ancak bu, mevcut review reddine itiraz mekanizmasi veya safeguard kaldirma garantisi olarak sunulmaz ve bu gorevde basvuru yapilmamistir.
+
+### Gonderilmeyen Support taslagi
+
+Kanal: help.openai.com sag-alt destek chat bubble.
+
+Baslik: Codex'te yetkili salt-okunur kaynak incelemesi icin tekrarlayan auto-review reddi.
+
+Mesaj:
+
+> Kurum/hesap kapsaminda yetkili, salt-okunur bir yerel kod guvenlik incelemesi icin GPT-6.1-Sol reviewer ve ayri Gemini Flash karsi gorusu planlandi. Model cagrisi baslatilmadi; onceki Codex inceleme isteklerinde kaynak teslimi/review kapisi reddedildi. Kaynak, prompt, secret veya bundle eklemiyorum. Bu bir auto-review reddini dolanma istegi degil. Platform kararinin bu yetkili inceleme turu icin degerlendirilmesini ve uygunsa, mevcut korumalari koruyarak hangi resmi inceleme/itiraz yolunun izlenebileceginin bildirilmesini rica ediyorum. Repository'nin kendi secret preflight'ini degistirme veya otomatik asma talebim yok.
+>
+> Urun/istemci: Codex Desktop / Hades MCP `run_codex_subagent` yolu. Istenen ana reviewer modeli: gpt-6.1-sol. Model gercekten calismadi, kaynak teslim edilmedi.
+>
+> Tam guvenlik mesaji: [onceki reddin kullanici arayuzunde gorunen tam metnini ekle; mevcut raporda sakli degil]. Tarih-saat/zaman dilimi: [orijinal kayittan ekle]. Request/completion ID: [varsa orijinal kayittan ekle]. Workspace/organization: [yalniz gerekiyorsa ve kullanici guvenle eklemek isterse].
+>
+> Redakte gorev ozeti: lokal bir repository'deki P2 prepared-edit/recovery, P3 ref-integrity ve ilgili approval/test zincirinin bagimsiz, salt-okunur guvenlik incelemesi. Inceleme paketi dosya/commit haritasi hazir, ancak kaynak gonderilmedi. Yerel classifier'in eski sinyalleri `high_entropy`, `known_signature` ve `mixed` olarak kaydedilmistir; tam tarihsel reviewScope/path eslemesi mevcut degil ve false positive sonucu cikarilmiyor.
+
+Taslak gonderilmemistir. Orijinal tam mesaj, timestamp veya request ID raporlarda bulunmadigindan tahminle doldurulmamalidir. Support'tan cevap gelmesi repository preflight'i veya auto-review vetosunu kendiliginden kaldirmaz. Yeni kaynak teslimi ancak repository politika karari ve platformun acik, yetkili yonlendirmesi ayri ayri netlesirse degerlendirilebilir; mevcut gorevde teslim baslatilmaz.
+
 ## Inceleme kaydi
 
 - Ana reviewer GPT-6.1-Sol: kaynak teslimi onceki preflight/auto-review engeli nedeniyle cagrilmadi.

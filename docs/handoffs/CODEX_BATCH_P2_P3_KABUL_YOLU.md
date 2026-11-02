@@ -1,5 +1,12 @@
 # Codex batch P2/P3 kabul yolu
 
+
+## 2026-11-02 gecis kapsam karari ve insan incelemesi
+
+Claude Sonnet 4.6 kabulini kullanici bu gecisten erteledi. Basarisiz task_json_parse_invalid pilot kaydi korunur; Claude veya baska surum dogrulanmis destek degildir. Etkin config'te yalniz Claude pilot opt-in'i kapalidir; sema gecerlidir. Hades restart sonrasi katalogda pilot aracinin kaybolmasi henuz dogrulanmadi. P2/P3 plan kapsamindaki islevsel kabul kapanmistir ve yeniden acilmiyor.
+
+Bagimsiz inceleme acigi risk kabuluyle kapatilmadi. Yerel reviewer icin kaynak commit'i, karsilastirma tabani, bilinen onceki incelemeler, dosya/call-chain kapsami, test kaniti ve sorular [insan inceleme paketi](../reports/GECIS_BAGIMSIZ_INSAN_INCELEME_PAKETI_2026-11-02.md) icindedir. Reviewer atamasi ve gercek inceleme sonucu bekliyor; paket inceleme yapilmis sayilmaz.
+
 ## P6 kalan karar kapıları — 2026-11-02
 
 P2/P3 işlevsel kabulü tamamlandı; P1b ve bağımsız inceleme sonucu bu kabulleri geriye dönük değiştirmez. P1b planı model profillerini yalnız exact kimlik/erişim ve strict read-only kabulinden sonra açar. Claude Sonnet için seçilmiş tek JSON/`result=42` görevi başarısız (`task_json_parse_invalid`) kalır; ham cevap bulunmadığından yeni tekrara teknik gerekçe yoktur. Claude'u zorunlu tutmak açık P1b model kapısını korur; profili ertelemek yalnız kullanıcının açık kapsam kararıyla ve Claude'u desteklenmiş saymadan yapılabilir. Planın Claude Sonnet 4.6 emeklilik tarihi 2026-11-02'dir; resmî [Antigravity katalogu](https://antigravity.google/docs/models) bugün bu tarihi kaldırılma günü olarak gösterse de fiilî kaldırılma/hesap erişimi kanıtlanmış değildir.

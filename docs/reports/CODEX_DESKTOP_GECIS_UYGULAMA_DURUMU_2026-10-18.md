@@ -1,5 +1,12 @@
 # Codex Desktop geçiş uygulama durumu
 
+
+## 2026-11-02 kapsam karari uygulandi
+
+Kullanici Claude Sonnet 4.6 kabulini bu gecisten erteledi. Son canli kabul basarisizdir: requestedModel=claude_sonnet, resolvedModel=claude-sonnet-4-6, exitCode=0, task_json_parse_invalid; ham cevap olmadigi icin kesin icerik/bicim bilinmiyor. Basarisizlik kaydi korunur; Claude veya baska surum desteklenmis sayilmaz ve otomatik model degisimi yapilmaz. Yeni pilot yoktur. Etkin kisisel config'te yalniz orchestration.acceptancePilots.claudeSonnet.enabled kapatildi; runtime semasi ve diger alanlarin semantik esitligi dogrulandi. Baslangicta true idi; Hades yeniden baslatilmadigi icin katalogdan kalktigi henuz dogrulanmadi. Proje task-profile/fallback ayarlarinda Claude/Sonnet hedefi bulunmadi.
+
+P2/P3 islevsel kabulu onceki kanitlariyla tamamlanmis kabul edilir. Bagimsiz inceleme acigi genel risk kabuluyle kapatilmadi. Yerel insan incelemesi icin mevcut kaynak/commit sinirlarini ve risk sorularini iceren [inceleme paketi](GECIS_BAGIMSIZ_INSAN_INCELEME_PAKETI_2026-11-02.md) hazirlandi; bu gorevde insan incelemesi yapilmadi. P6 belge uzlastirmasi guncel, kosulsuz genel kapanis yapilmadi.
+
 ## 2026-11-02 P1b, bağımsız inceleme ve P6 karar özeti
 
 P2 ve P3'ün özgün plan kapsamındaki işlevsel kabulleri tamamlandı. P2'nin canlı hazırlık/ayrı onaylı uygulama, red ve stale kaynak reddi ile üretim recovery yolunu kullanan ayrı süreçli Windows testleri [P2 raporunda](P2_PREPARED_EDIT_HOST_YOLU_2026-10-27.md) kayıtlıdır. P3 read-only DAG, iptal, restart/unknown, yerel expiry/recovery ve normal kaynak entegrasyonu [batch handoff'unda](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md) eşleştirilmiştir. P3'ün başarılı normal entegrasyonu tarihsel `source_ref_changed` retlerinin nedenini açıklamaz. POSIX, güç kaybı ve kilit protokolüne uymayan dış yazıcı garantisi çıkarılmamıştır.

@@ -105,6 +105,12 @@ OpenAI Help Center, acikca benign veya yetkili siber guvenlik istegi tekrar tekr
 
 Bu kanal platform auto-review kararinin degerlendirilmesini istemek icin mevcut yetkili yoldur; repository preflight istisnasi veya kaynak teslim onayi degildir. Support olumlu yanit verse bile iki katman ayri kalir. Resmi guvenlik rehberinde Daybreak programina basvuru da yetkili siber guvenlik calismasi icin belirtilir; ancak bu, mevcut review reddine itiraz mekanizmasi veya safeguard kaldirma garantisi olarak sunulmaz ve bu gorevde basvuru yapilmamistir.
 
+### Codex TUI exact-denial retry yolu
+
+Resmi [Codex Auto-review kilavuzu](https://learn.chatgpt.com/docs/sandboxing/auto-review), mevcut open-source TUI'de `/approve` komutunun Auto-review Denials picker'ini actigini ve ayni task'taki son retlerden yalniz bir exact eylem icin bir yeniden deneme izni verdigini acikliyor. Ret kaydi task basina en fazla 10 oge tutar. Yeniden deneme ayni context'te yapilir ve yine Auto-review'dan gecer; reviewer, kullanici override'inin izin verilemeyecegi bir ret sinifinda tekrar reddedebilir. Bu bir genel izin, repo `review_scope_secret_detected` override'i veya onay garantisi degildir. Erisim tarihi: 2026-11-02.
+
+Bu calisma ortami interaktif Codex TUI slash-command kontrolu sunmadigindan `/approve` calistirilmadi ve picker'daki retler incelenmedi. Kullanici ayni TUI'de komutu acarsa yalniz tam bagimsiz kaynak incelemesi eylemini secmeli; o kayit listede yoksa ret uretmek veya baska islemi secmek yerine durmalidir. Bu yol kullanilsa bile yerel Hades preflight'i ayri kalir.
+
 ### Gonderilmeyen Support taslagi
 
 Kanal: help.openai.com sag-alt destek chat bubble.

@@ -40,6 +40,10 @@ test("DeepSeek structured output çalışma zamanında sıkı doğrulanır", () 
   assert.equal(wrapped.ok, true);
   const invalidSchema = parseDeepSeekEnvelope(JSON.stringify({ structured_output: { status: "completed" } }));
   assert.equal(invalidSchema.errorClass, "schema_invalid");
+  for (const status of ["approval_required", "preview"]) {
+    const invalidStatus = parseDeepSeekEnvelope(JSON.stringify(createStructuredResult({ status })));
+    assert.equal(invalidStatus.errorClass, "schema_invalid");
+  }
 });
 
 test("reliability-budget eksik config'te sonlu maxAttempts üretir", () => {

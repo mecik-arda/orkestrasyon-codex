@@ -350,7 +350,7 @@ export function createMcpToolHandlers({ runtime, trustedWorkspace, caller = "cod
       const reviewScope = parsed.role === "reviewer" ? [...new Set([...parsed.files, ...parsed.contextFiles])] : undefined;
       const result = await runtime.runDeepSeek({ ...parsed, reviewScope, reviewEvidenceRequirement: parsed.role === "reviewer" ? "required" : "best_effort" }, trustedWorkspace, context.signal);
       return {
-        isError: result.status ? result.status !== "completed" : result.ok === false,
+        isError: result.exitCode !== 0 || result.failureClass !== null || result.result?.status !== "completed",
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
         structuredContent: result
       };

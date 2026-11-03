@@ -937,6 +937,30 @@ test("P0-DEEPSEEK: public workspace ignored ve canonical runtime kullanılır", 
   assert.equal(checkpointEntry.includes("legacy-workspace-test"), false);
 });
 
+test("P0-DEEPSEEK-MCP: runtime başarısızlığı MCP taşıyıcısında hata olarak kalır", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-deepseek-mcp-failure-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const deepseek = createFakeAdapter("deepseek", async (request) => failureResult("deepseek", request.model, "DeepSeek authentication unavailable", "authentication_failure"));
+  const runtime = createBridgeRuntime({ configuration: createConfiguration(root, root), adapters: { deepseek }, sleep: async () => {} });
+  const handlers = createMcpToolHandlers({ runtime, trustedWorkspace: root, caller: "test" });
+  const response = await handlers.runDeepSeek({
+    taskId: "deepseek-mcp-failure",
+    role: "analyst",
+    model: "deepseek_flash",
+    mode: "read_only",
+    objective: "Sadece sentetik bir hata sınıfını doğrula.",
+    workspace: "unused",
+    files: [],
+    contextFiles: [],
+    skills: [],
+    acceptanceCriteria: ["Provider başarısızlığı taşıyıcıda hata olarak işaretlenir."]
+  });
+  assert.equal(response.isError, true);
+  assert.equal(response.structuredContent.exitCode, 1);
+  assert.equal(response.structuredContent.failureClass, "authentication_failure");
+  assert.equal(response.structuredContent.result.status, "failed");
+});
+
 test("P0-DEEPSEEK-SCHEMA: geçersiz çıktı canonical runtime tarafından onarılır", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-p0-deepseek-schema-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));

@@ -1,5 +1,19 @@
 # Codex/Hades gecisi bagimsiz model inceleme paketi
 
+## 2026-11-03 son yerel kapsam uzlaştırması
+
+Bu not yerel kaynak denetimi ve doğrulama kaydıdır; bağımsız model incelemesi değildir. Başlangıç HEAD `e6688347dc7c04607757c5d82ee6e57e778b0376`, dal `main`, temiz çalışma ağacı ve `origin/main` yerel referansına göre 5 commit ilerilik doğrulandı. Uzak ref güncelliği fetch yapılmadığından bilinmiyor.
+
+Önceki doğrulanmış GPT-6.1-Sol incelemesi requested/resolved `gpt-6.1-sol`, 10 dosya/152.283 bayt, manifest SHA-256 `dbd7ca846d7d7e9df23a2908f9364732c328f320d96ae3b68908a29201df45f8`, `complete_to_cli`, strict sonuç completed/complete, exit 0, 1 adapter attempt ve 0 retry metadata'sını taşır. Tam kaynak commit bağı review kaydında korunmadığından manifest özeti commit attestation'ı değildir. Önceki istekte listelenen 10 dosyanın snapshot'ı dışındaki güncel dosya sürümleri veya dosyalar bu başarıya dahil edilemez.
+
+Sonraki doğrulanmış üretim değişiklikleri arasında `4d21a7e`/`2dfa762` ile `subagent-bridge/src/frontends/mcp/tools.js` runProfile host-modu sınırı ve gerçek handler/runtime testi; `71481a8` ile aynı handler'ın DeepSeek MCP hata eşlemesi ve client taşıyıcı regresyonları; `501c193` ile `subagent-bridge/src/services/disposable-workspace.js` diff satır sonu sadakati ve sentetik regresyonları vardır. `bridge-runtime.js` önceki 10 dosyalık Sol kapsamının dışındaydı. P2 için önceki yedi dosyalık review/follow-up kaydının exact manifesti ve commit sınırı korunmadı; P3'teki daha dar Sol kapsamının da güncel snapshot sınırı bilinmiyor. Bu nedenle bu kayıtlar bütün ilgili dosyaların bugünkü içeriğine genişletilemez.
+
+Bu turda `tools.js` → `bridge-runtime.js` → DeepSeek adapter ve `runDeepSeekEditPilot` disposable yolunun status/error/cleanup bağları, source snapshot ve diff render akışı, P4 host-result regressions ve runProfile review dispatch sınırı yerel olarak incelendi. Yeni doğrulanmış kusur bulunmadı; kod değişmedi. Tam `npm test` Node v24.17.0 ile standart kullanıcı TEMP/TMP'sinde 1.073 testte 1.069 başarı, 4 Windows koşullu atlama ve 0 başarısız verdi; zorunlu benchmark 12,17 saniyede geçti. `verify` ve `verify:ci` başarılıdır. İlk hedefli testte sandbox TEMP nedeniyle üç circuit testinin beklenen fail-fast state'i alamaması ve Git init'in EPERM ile başarısız olması görüldü; `tests/faz-p0-runtime.test.js` standart kullanıcı TEMP/TMP'sinde 42/42 geçti.
+
+`smoke` exit 0 ile tamamlandı; sonradan script kaynak incelemesinde bu komutun memory search/read akışından bir seçili Vault notunu okuduğu belirlendi. Bu erişim bu görevde izinli değildi. Not içeriği çıktılanmadı, yazım veya Vault mutasyonu yapılmadı; smoke sonucu bu görev için yetkili geçiş kanıtı sayılmıyor. Bu husus saklama/işleme devam etmeme sınırıdır; nota ilişkin içerik veya kimlik bu pakete eklenmemiştir.
+
+Yeni Sol çağrısı yapılmadı: daha geniş repository kaynak teslimi için kayıtlı repository `review_scope_secret_detected` ve platform Auto-review retleri çözülmemiştir. Bu nedenle doğal alt kapsamı yeniden göndermek veya önceki kapsamı parçalamak güvenli mevcut yol değildir. Yerel inceleme, önceki model incelemesinin yerine geçmez. P2/P3/P4 işlevsel kabulleri tamam; Claude P1b başarısız geçmişiyle ertelenmiş; AST ayarı kapalı/unset; P6 koşulsuz kapanışı bağımsız inceleme kararına bağlıdır.
+
 Tarih: 2026-11-02
 Durum: GPT-6.1-Sol ve Gemini Flash incelemesi kaynak teslim engeli nedeniyle yapilmadi
 

@@ -178,11 +178,9 @@ test("P2-EDIT-02: MCP hazirligi low impact degisikligi kaynakta uygulamadan ayri
     assert.equal(prepared.structuredContent.diff, [
       `--- a/${p2PreparedEditPolicy.relativePath}`,
       `+++ b/${p2PreparedEditPolicy.relativePath}`,
-      "@@ -1,2 +1,2 @@",
+      "@@ -1,1 +1,1 @@",
       "-P2 approval probe baseline",
-      "-",
-      "+P2 approval probe",
-      "+"
+      "+P2 approval probe"
     ].join("\n"));
     assert.equal(fs.readFileSync(harness.targetPath, "utf8"), p2PreparedEditPolicy.baselineContent);
     assert.equal(harness.requests.length, 1);

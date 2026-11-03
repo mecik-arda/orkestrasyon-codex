@@ -216,14 +216,36 @@ function readWorkspaceFiles(workspace) {
 }
 
 function createUnifiedDiff(relativePath, before, after) {
-  const beforeLines = before === null ? [] : before.replace(/\r\n/g, "\n").split("\n");
-  const afterLines = after === null ? [] : after.replace(/\r\n/g, "\n").split("\n");
+  const splitSourceLines = (content) => {
+    if (content === null || content.length === 0) return [];
+    const lines = [];
+    const lineEndingPattern = /\r\n|\n|\r/gu;
+    let previousIndex = 0;
+    for (const match of content.matchAll(lineEndingPattern)) {
+      lines.push({ content: content.slice(previousIndex, match.index), lineEnding: match[0] });
+      previousIndex = match.index + match[0].length;
+    }
+    if (previousIndex < content.length) lines.push({ content: content.slice(previousIndex), lineEnding: "" });
+    return lines;
+  };
+  const beforeLines = splitSourceLines(before);
+  const afterLines = splitSourceLines(after);
+  const renderLine = (prefix, line) => {
+    const lineEndingMarker = line.lineEnding === "\r\n" ? "\\r\\n" : line.lineEnding === "\r" ? "\\r" : "";
+    return `${prefix}${line.content}${lineEndingMarker}`;
+  };
+  const renderLines = (prefix, lines) => lines.flatMap((line) => [
+    renderLine(prefix, line),
+    ...(line.lineEnding === "" ? ["\\ No newline at end of file"] : [])
+  ]);
+  const beforeStart = beforeLines.length === 0 ? 0 : 1;
+  const afterStart = afterLines.length === 0 ? 0 : 1;
   return [
     `--- ${before === null ? "/dev/null" : `a/${relativePath}`}`,
     `+++ ${after === null ? "/dev/null" : `b/${relativePath}`}`,
-    `@@ -1,${beforeLines.length} +1,${afterLines.length} @@`,
-    ...beforeLines.map((line) => `-${line}`),
-    ...afterLines.map((line) => `+${line}`)
+    `@@ -${beforeStart},${beforeLines.length} +${afterStart},${afterLines.length} @@`,
+    ...renderLines("-", beforeLines),
+    ...renderLines("+", afterLines)
   ].join("\n");
 }
 

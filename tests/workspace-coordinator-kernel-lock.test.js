@@ -81,6 +81,24 @@ function waitForExit(child) {
   });
 }
 
+test("guard fixture retries after lock contention before reporting entry", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-coordinator-guard-retry-"));
+  const markers = path.join(root, "markers");
+  fs.mkdirSync(markers);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const blocker = openKernelFileLock(path.join(root, "guard.lock"));
+  assert.ok(blocker);
+  const worker = spawnWorker("guard-hold", root, markers, "retry");
+  t.after(async () => { if (worker.exitCode === null) { worker.kill(); await waitForExit(worker); } });
+  await waitForMarker(markers, "retry-contended", [worker]);
+  assert.equal(worker.exitCode, null);
+  assert.equal(blocker.release(), true);
+  await waitForMarker(markers, "retry-entered", [worker]);
+  fs.writeFileSync(path.join(markers, "retry-release"), "1");
+  assert.equal(await waitForExit(worker), 0, worker.output());
+  assert.equal(fs.readFileSync(path.join(markers, "retry-result"), "utf8"), "true");
+});
+
 async function waitForResults(workspace, names, children) {
   const deadline = Date.now() + 10000;
   while (!names.every((name) => fs.existsSync(path.join(workspace, `${name}-result`)))) {

@@ -67,7 +67,6 @@ Bu projede ana orkestratör ve son karar verici, Hades Orchestrator MCP sunucusu
 - Tamamlanmış video/transcript analiz raporları `docs/plans/videolar` altında tutulur ve `docs/plans/DURUM_INDEKSI.md` içinde listelenir; plan durum klasörleriyle karıştırılmaz.
 - Planda sabit test veya araç sayısı verme; güncel doğrulamaya (`npm test`, `npm run verify:ci`) atıf yap. Sabit sayılar zamanla bayatlar.
 - Uygulama denetimleri `docs/reports` altında tutulur ve planları geriye dönük değiştirmez; açık maddeler `karar kapısı`, `dış-bağımlı`, `reddedildi` veya `opt-in` olarak etiketlenir.
-- Public dışa aktarımda `docs/plans` yalnız seçili mimari dokümanları `docs/architecture` altına taşır; private rapor referansları temizlenir.
 
 ## Güvenilirlik ve gözlemlenebilirlik
 

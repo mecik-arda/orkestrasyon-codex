@@ -30,11 +30,20 @@ async function waitForMarker(name) {
 }
 
 if (mode === "guard-hold") {
-  const result = withGuard(root, 5, () => {
-    mark(`${identity}-entered`);
-    waitForMarkerSync(`${identity}-release`);
-    return true;
-  });
+  const deadline = Date.now() + 15000;
+  let result = null;
+  while (result === null && Date.now() < deadline) {
+    result = withGuard(root, 5, () => {
+      mark(`${identity}-entered`);
+      waitForMarkerSync(`${identity}-release`);
+      return true;
+    });
+    if (result === null) {
+      mark(`${identity}-contended`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+    }
+  }
+  if (result !== true) throw new Error("guard owner could not acquire the lock");
   mark(`${identity}-result`, JSON.stringify(result));
 } else if (mode === "guard-close-failure") {
   const originalCloseSync = fs.closeSync;

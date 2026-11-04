@@ -1,4 +1,6 @@
 # Codex batch P2/P3 kabul yolu
+2026-11-05 güncel kabul durumu: P2/P3/P4 özgün plan kapsamındaki işlevsel kabuller tamamlandı. P2 recovery ayrı süreçli Windows testlerinde gerçek üretim recovery zinciriyle doğrulandı; bu canlı Hades recovery çağrısı değildir. Claude P1b task_json_parse_invalid ile başarısız ve ertelenmiştir. Son GPT-6.1-Sol incelemesi kendi exact 10 dosyalı snapshot’ıyla sınırlı; sonraki üç düzeltme yerel testlerle doğrulandı fakat bağımsız follow-up incelemesi yapılmadı. Güncel doğal kaynak kapsamı preflight’ta engellidir, payload teslim edilmedi. Son tam yerel doğrulama ve kapsam kaydı inceleme paketindedir; bu kayıtlar genel bağımsız denetim veya koşulsuz geçiş kapanışı değildir.
+
 
 2026-11-04 smoke siniri duzeltildi: Varsayilan `npm run smoke` sentetik config/Vault ile calisir, child environment'ina yalniz gerekli isletim sistemi degiskenlerini aktarir ve MCP stdio uzerinden sentetik fixture'i dogrular. Gercek Vault arama/tekil okuma yalniz ayri `npm run smoke:vault` opt-in'iyle yapilir; bu mod provider health ve tum-Vault review cagrilarini yapmaz. 2026-11-03 izinsiz Vault okuma kaydi tarihsel kalir ve yetkili smoke kaniti sayilmaz. Bu degisiklik P2/P3 kabul durumunu degistirmez.
 

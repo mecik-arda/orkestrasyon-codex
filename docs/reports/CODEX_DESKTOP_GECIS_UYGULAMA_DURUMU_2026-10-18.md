@@ -1,4 +1,8 @@
 # Codex Desktop geçiş uygulama durumu
+## 2026-11-05 Yerel teslim ve kalan denetim
+
+Bu not önceki P4 kabul kaydını değiştirmez. P2/P3/P4 özgün plan kapsamındaki işlevsel kabuller tamamlanmıştır; P2 recovery kanıtı Windows ayrı süreçli üretim recovery testleridir, canlı Hades recovery olarak adlandırılmaz. Claude Sonnet 4.6 P1b görevi task_json_parse_invalid ile başarısız olmuş ve kullanıcı kararıyla ertelenmiştir. Son GPT-6.1-Sol incelemesi yalnız kendi 10 dosyalı snapshot’ı için geçerlidir. Üç sonraki düzeltme yerel test ve sentetik smoke/config doğrulamasından geçti, bağımsız follow-up incelemesi yapılmadı. Güncel doğal sekiz dosyalı kaynak kapsamı yerel preflight’ta engelli kaldı; teslim payload’ı oluşturulmadı, provider çağrısı yapılmadı. Son tam test 1.079/1.083, dört Windows koşullu atlama, sıfır başarısızlık ve 11,4 saniyelik zorunlu benchmark verdi. AST ayarı unset/kapalıdır. P6 durum belgeleri tutarlıdır; genel koşulsuz geçiş kapanışı bağımsız inceleme tamamlanmadığı için yapılmamıştır.
+
 
 ## 2026-11-03 P4 nihai kabul uzlaştırması
 

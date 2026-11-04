@@ -8,11 +8,11 @@ Hades Orchestrator is a provider-neutral orchestration system in which Codex Des
 
 Smoke Vault boundary (2026-11-04): `npm run smoke` creates a temporary policy, runtime profile and synthetic Vault, then runs MCP health, catalog and memory checks only against that fixture. The synthetic child environment keeps only required operating-system variables and does not inherit provider credentials, the personal runtime configuration, or personal profile paths. Passing this smoke verifies the synthetic stdio setup; it does not establish personal Vault health or the state of an already-running Desktop Hades process. `npm run smoke:vault` is a separate explicit opt-in that uses the active personal configuration for MCP catalog and memory-health checks, then searches for and reads one matching Vault note. It skips provider health calls and whole-Vault review. Run it only when that access is specifically needed and authorized. The earlier 2026-11-03 smoke invocation that read a real Vault note was unauthorized; its record is retained in the independent review package and is not treated as valid smoke evidence.
 
-Current runtime status (2026-10-24): The latest recorded Desktop Hades workspace identity matches the expected checkout, but the identity resource does not attest the loaded source revision. Commit `eeb352f` makes Antigravity health checks read-only by disabling stale-settings recovery on health calls; the local targeted suite, `npm test`, `npm run verify`, `npm run smoke`, and `npm run verify:ci` passed. The smoke used a local stdio MCP process and did not run inference or a batch. Restart or reload Hades before relying on the health fix in the active server. The Codex disposable fixture pilot returned `completed` with `applied=false`; that is not source integration, and CLI-internal inference count and actual cost are unknown. The previous read-only DAG acceptance remains valid and is not repeated. Live P3 cancellation, timeout and in-flight restart-recovery evidence is recorded; the restart case ended `unknown`, not with a successful task result. OpenCode setup, plugin, pilot and route material retained below is historical evidence, not supported operational guidance. P1b Claude task acceptance, P2 live approval/recovery and separately approved source integration, P3 edit-batch integration, and final documentation closeout remain open. `npm run canary:parallel` is an opt-in live Codex provider check and may consume usage; each new batch requires an immutable plan hash and separate start approval.
+Current transition status (2026-11-05): P2, P3 and P4 original-plan functional acceptance is complete. Claude P1b failed strict acceptance and was deferred; it is not supported. The prior GPT-6.1-Sol review covers only its exact 10-file snapshot. Three later findings were fixed and locally validated, but follow-up review was not completed. The current natural source-review scope is blocked by local preflight; no source payload was delivered. The AST setting remains unset/off. P6 status is reconciled, but unconditional project closure remains open pending independent review.
 
-The current checkout has changed Hades runtime code since the last live identity check. Restart the Hades MCP process before relying on the Antigravity health fix, then verify the live identity and tool inventory. Identity verifies workspace binding, not the loaded code revision. This restart does not authorize a provider call, batch start, or source integration.
+Operational note (2026-11-05): The user reported an Hades restart after the AST setting was returned to unset; the configured launch chain and workspace identity were checked. Identity does not attest the loaded source revision or active AST setting.
 
-Local P3 resilience tests also cover artifact-store failure before provider dispatch, cleanup errors during worktree setup, transient batch `result_ready` polling and an actual fake runtime entry before terminating the bridge child. Live cancellation, timeout and in-flight restart-recovery evidence is recorded separately; fixture tests and those read-only lifecycle checks do not replace edit-batch or integration acceptance.
+Local P3 resilience tests cover artifact-store failure before provider dispatch, cleanup errors during worktree setup, transient result polling and a fake runtime entry before bridge termination. Live cancellation, timeout and restart-recovery observations are recorded separately. P3 normal edit-batch integration was accepted under its separate exact-diff approval; resilience tests alone would not replace that acceptance.
 
 ## What it offers
 
@@ -60,7 +60,7 @@ The runtime policy is loaded from `~/.config/subagent-bridge/config.json`; execu
 
 ## Verified baseline
 
-The package is `hades-orchestrator@2.2.0`, the runtime is Node.js 20.9+ and ESM; CI uses Node.js 22/24. The canonical record lives under `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, with the optional view at `<workspace>/.hades/runs.jsonl`. Last full local validation: 2026-10-12. Run `npm test` for the current regression; `npm run verify`, `npm run verify:ci` and `npm run smoke` succeed. The Codex CLI version check in `verify` does not probe a model: it reports `model: null` and `modelAccess: "not_probed"`.
+The package is hades-orchestrator 2.2.0, the runtime is Node.js 20.9+ and ESM; CI uses Node.js 22/24. The canonical record is under `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, with an optional view at `<workspace>/.hades/runs.jsonl`. Latest recorded full local validation: 2026-11-05, with 1,079 of 1,083 tests passing, four Windows-conditional skips and zero failures; the required benchmark completed in 11.4 seconds. Synthetic smoke, synthetic-config verify, and verify:ci passed on that source state. These are dated local results.
 
 ## Quick start
 
@@ -181,7 +181,7 @@ The OpenCode batch-progress plugin and its installation path are retired.
 
 ### Canonical routing
 
-DeepSeek uses the separate official API adapter; its local stdio read-only and disposable edit pilots passed on 2026-10-19. OpenCode production runtime registration and its provider routes are retired; legacy targets fail closed.
+DeepSeek uses the separate official API adapter. Its 2026-10-19 local stdio pilots and 2026-11-03 P4 live Hades read-only and disposable-edit acceptances passed under their exact bounded scopes. The live edit remained a disposable preview and did not change the source workspace. These acceptances do not establish a general DeepSeek edit route or source integration; actual provider cost and CLI-internal inference count remain unknown. OpenCode production runtime registration and provider routes are retired; legacy targets fail closed.
 
 ```text
 Gemini 3.8 Flash / Antigravity Claude Sonnet → AntigravityAdapter → AGY
@@ -253,9 +253,9 @@ Backups are created under `~/.config/subagent-bridge/backups/`; use `npm run con
 
 ### Verified provider matrix
 
-Antigravity Gemini 3.8 Flash and Codex have historical route validation. DeepSeek Flash is configured through the official API adapter; its 2026-10-19 local stdio read-only and disposable edit pilots passed strict result validation. These pilots are not evidence that the active Desktop Hades process loaded a later runtime build. Gemini Pro (`gemini-3.1-pro-high`) and Gemini 3.7 Flash (`gemini-3.7-flash-high`) returned `modelAccess=unavailable` in live probes on 2026-10-14 and are disabled from normal execution; the current Antigravity plan matrix lists those models for Enterprise, while Gemini 3.8 Flash is available across plans. GPT-6 Luna, GPT-6 Sol and GPT-6 Astra are verified Codex identities (live capability probe, 2026-09-22); GPT-6 Luna/Sol are preferred for the Luna/Sol roles and the GPT-5.6 counterparts remain as compatibility profiles. Codex Luna is the fast performance/cost implementer, Terra the balanced editor and Sol the model for hard debugging and review. Claude Code requires an active subscription and its native acceptance phase is closed here. Claude Code health combines `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` with the CLI `claude auth status` result; when neither reports an active session the call fails fast with `auth_invalid`.
+Antigravity Gemini 3.8 Flash and Codex have historical route validation. DeepSeek Flash is configured through the official API adapter; its local stdio pilots and 2026-11-03 bounded live Hades read-only and disposable-edit acceptances passed strict result validation. The live edit remained a disposable preview and did not promote to the source workspace; these results do not prove a general edit capability or current Desktop process revision. Gemini Pro and Gemini 3.7 Flash returned modelAccess unavailable in live probes on 2026-10-14 and are disabled from normal execution. GPT-6 Luna, GPT-6 Sol and GPT-6 Astra are verified Codex identities; GPT-6 Luna/Sol are preferred for those roles. Claude Code requires an active subscription and its native acceptance phase is closed here.
 
-The independent DeepSeek route uses the official `https://api.deepseek.com` API and canonical `deepseek-flash` model ID. `DEEPSEEK_API_KEY` is read from the process environment and can be configured for the Windows user with `scripts/set-deepseek-api-key.ps1`; never place the key in repository files. The adapter uses JSON mode, host-side result validation and an atomic pilot admission ledger capped at 1 USD, including a conservative reservation for the earlier direct smoke call. Only `read_only` execution is available through the general tool; the separately gated disposable edit pilot does not promote changes into the source workspace. The 2026-10-19 local stdio read-only and edit pilots passed; their usage-based cost estimates are not provider invoices.
+The independent DeepSeek route uses the official `https://api.deepseek.com` API and canonical `deepseek-flash` model ID. `DEEPSEEK_API_KEY` is read from the process environment and can be configured for the Windows user with `scripts/set-deepseek-api-key.ps1`; never place the key in repository files. The adapter uses JSON mode, host-side result validation and an atomic pilot admission ledger capped at 1 USD, including a conservative reservation for the earlier direct smoke call. Only `read_only` execution is available through the general tool; the separately gated disposable edit pilot does not promote changes into the source workspace. The 2026-10-19 local stdio pilots passed. In the separate 2026-11-03 P4 live Hades acceptance, bounded read-only and disposable-edit tasks passed; the edit remained a preview and did not change the source workspace. These results do not establish general edit or source promotion, and usage-based cost estimates are not provider invoices.
 
 ### Antigravity contract
 
@@ -292,7 +292,7 @@ The adapter consumes Codex's JSONL event stream, returns only the last completed
 
 Read-only `parallel_batch` calls to Codex reduce JSONL incrementally. Tool and reasoning payloads are discarded; only the bounded final response, terminal/error state, and allowlisted usage fields are retained. The combined process output remains capped at the host limit (8 MiB by default), each JSONL record is capped at 8 MiB, and the final response is capped at 128 KiB. Diagnostics distinguish `process`, `jsonl_record` and `final_result` limits and report raw accepted stdout/stderr bytes separately from retained output bytes. Reasoning is never substituted for a missing final answer. Other call modes keep their existing buffered parsing path.
 
-The normal flow contains no sandbox or approval bypass. Edit tools apply only selected files in a disposable workspace with hash checks, secret scanning and rollback-supported promotion; test, build, script, package manager and mutating shell commands are forbidden. High-impact promotions stay fail-closed until the orchestrator approves the stored prepared edit; multi-file application provides handled-error rollback. Interrupted promotion artifacts block new applications. Preserve the `.tmp` and `.tmp.backup` artifacts and any existing target until their ownership and recovery can be established; matching content alone does not establish file identity. The prepared-edit path has no durable recovery journal or verified automatic recovery procedure.
+The normal flow contains no sandbox or approval bypass. Edit tools apply only selected files in a disposable workspace with hash checks, secret scanning and rollback-supported promotion; test, build, script, package manager and mutating shell commands are forbidden. High-impact promotions stay fail-closed until the orchestrator approves the stored prepared edit; multi-file application provides handled-error rollback. Interrupted promotion artifacts block new applications. Preserve temporary promotion artifacts and any existing target until ownership and recovery can be established; matching content alone does not establish file identity. The P2 prepared-edit recovery path has a durable journal and separate-process Windows crash/recovery tests. This does not establish POSIX, power-loss or non-cooperating external-writer guarantees.
 
 ### Shared invariants
 
@@ -306,7 +306,7 @@ Retry is limited to transient read-only failures within `maxRetries`. The worksp
 
 ### Final acceptance evidence
 
-Gemini Pro and Codex were invoked with real file-backed results; timeout override, retry, fallback, repository mutation and orphan process were `0`; AGY settings restore `YES`, stale sentinel `NO`; acceptance `3x 143/143 PASS`.
+Historical acceptance evidence (2026-10-14): timeout override, retry, fallback, repository mutation and orphan process were zero; AGY settings restore succeeded, stale sentinel was absent, and acceptance passed 3x 143/143. This is historical evidence, not the current transition status.
 
 ### Test baseline
 
@@ -314,7 +314,7 @@ The current regression baseline is verified with `npm test`; timing-sensitive he
 
 ### Known non-blocking items
 
-The Codex `%TMPDIR` isolation evaluation, the non-reproducible historical AGY nested `ENOENT` and the closed native Claude acceptance phase (no Claude Code subscription) are not blockers. Controlled Codex/Antigravity edits and separately approved batch acceptance remain open migration gates.
+The historical Codex TMPDIR isolation evaluation and non-reproducible AGY nested ENOENT remain non-blocking items. Original-plan P2/P3/P4 functional acceptance is complete. Claude Sonnet 4.6 P1b acceptance remains failed and user-deferred, not supported. Independent review of later source changes is the remaining condition for unconditional P6 closure; see the independent review package.
 
 ### Verified baseline freeze
 
@@ -322,7 +322,7 @@ The shared core is re-opened only for a confirmed production bug, a new provider
 
 ## Model roles
 
-Codex defines scope and architecture, runs code and tests, and verifies results. Gemini 3.8 Flash is the active Antigravity route for web research and file auditing; Gemini Pro and Gemini 3.7 Flash remain disabled in this configuration after unavailable access probes. Second opinions use an active Codex model or Antigravity Claude Sonnet; native Claude Code stays disabled without a subscription. DeepSeek has a separate official API adapter with successful local read-only and disposable-edit pilots; no retired OpenCode-backed provider route is callable.
+Codex defines scope and architecture, runs code and tests, and verifies results. Gemini 3.8 Flash is the active Antigravity route for web research; Gemini Pro and Gemini 3.7 Flash remain disabled after unavailable access probes. Use an explicitly authorized active Codex model for second opinions; Claude Sonnet 4.6 P1b acceptance is deferred and unverified, and native Claude Code stays disabled without a subscription. DeepSeek has a separate official API adapter; bounded P4 read-only and disposable-edit acceptance passed, but no general DeepSeek edit route is enabled and no retired OpenCode-backed provider route is callable.
 
 ## Security separation
 
@@ -338,7 +338,7 @@ Planning selects web research and delegation only when needed. The orchestrator 
 
 ## Installation
 
-Requirements: Node.js 20.9+ (22/24 recommended), the official standalone Codex CLI and Git. Active Antigravity routes require the Antigravity CLI. The retired OpenCode backend is not used by the production runtime. The independent DeepSeek API route requires `DEEPSEEK_API_KEY` in the process environment; its local read-only and disposable edit pilots passed, while source-workspace promotion remains separately gated. The optional native Claude Code backend requires a Claude Code subscription and stays disabled without one.
+Requirements: Node.js 20.9+ (22/24 recommended), the official standalone Codex CLI and Git. Active Antigravity routes require the Antigravity CLI. The retired OpenCode backend is not used by the production runtime. The independent DeepSeek API route requires `DEEPSEEK_API_KEY` in the process environment; its local read-only and disposable-edit pilots passed, and the 2026-11-03 P4 live Hades read-only and disposable-edit acceptances passed for their bounded tasks. The live edit did not promote to the source workspace; general source promotion remains separately gated. The optional native Claude Code backend requires a Claude Code subscription and stays disabled without one.
 
 ```powershell
 npm ci
@@ -395,7 +395,7 @@ npm run config:backup         Personal policy backup
 
 ## Hard limits
 
-The DeepSeek edit pilot is restricted to a disposable workspace and never promotes its diff to the source workspace; general DeepSeek edit remains unavailable. Local pilot acceptance is not live Desktop MCP verification. Codex does not consider a task complete without verification. Irreversible operations, production access, writes to external systems and secret transfer require human approval.
+The DeepSeek edit pilot is restricted to a disposable workspace and never promotes its diff to the source workspace; general DeepSeek edit remains unavailable. Local pilot acceptance is not live Desktop MCP verification by itself. The separate P4 live read-only and disposable-edit acceptances passed only their bounded tasks and do not enable general edit or source promotion.
 
 ## Persistent memory
 
@@ -417,7 +417,7 @@ Legacy outcome labels remain `legacy_unattributed` in the canonical M2 view. The
 
 ## Reliability and metrics
 
-DeepSeek results are validated with Zod; transient read-only failures use bounded retry, circuit breaker and a separate atomic pilot budget capped at 1 USD. The local 2026-10-19 stdio read-only pilot passed strict result validation; usage-based estimates are not provider invoices and local stdio acceptance does not establish the active Desktop Hades process state.
+DeepSeek results are validated with Zod; transient read-only failures use bounded retry, circuit breaker and a separate atomic pilot budget capped at 1 USD. The local 2026-10-19 stdio read-only pilot passed strict result validation. The separate 2026-11-03 P4 live Hades read-only and disposable-edit acceptances passed only their bounded tasks; the edit did not change the source workspace. Usage-based estimates are not provider invoices, and these acceptances do not attest the current Desktop Hades source revision.
 
 ```text
 %LOCALAPPDATA%\subagent-bridge\logs\metrics\
@@ -435,12 +435,12 @@ Execution metrics are written with the `execution_metric_v2` explicit allowlist;
 
 ## Architecture documents
 
-Key decisions live under [`docs/architecture`](docs/architecture):
+This private source checkout keeps the four plan documents in their source locations below. The public release plan maps curated copies to docs/architecture; that export directory is not materialized in this checkout. See the [public release plan](docs/plans/yapilanlar/PUBLIC_YAYIN_PLANI.md).
 
-- [`CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md`](docs/architecture/CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md)
-- [`MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md`](docs/architecture/MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md)
-- [`DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md`](docs/architecture/DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md)
-- [`RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md`](docs/architecture/RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md)
+- [CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md](docs/plans/yarim-kalanlar/CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md)
+- [MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md](docs/plans/yapilanlar/MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md)
+- [DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md](docs/plans/yapilanlar/DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md)
+- [RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md](docs/plans/yapilanlar/RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md)
 
 These documents are historical plans. Each audited plan starts with a dated status note; current verification is `npm test` and CI rather than the fixed test or tool counts captured at plan creation time.
 
@@ -462,7 +462,7 @@ The architectural approach is inspired by [Avenox](https://avenox.lol/) projects
 
 Hades Orchestrator, Codex Desktop ana orkestratörünün yerel MCP sunucusu üzerinden bağımsız subagent backend’lerini çağırdığı sağlayıcıdan bağımsız bir orkestrasyon sistemidir. Çalışma zamanı bileşeni `subagent-bridge`’dir; Codex host modeli ile subagent backend’leri ayrıdır.
 
-Güncel çalışma zamanı durumu (2026-10-24): Son kaydedilen etkin Hades workspace identity'si beklenen checkout ile eşleşti; resource yüklenmiş kaynak revision'ını kanıtlamaz. `eeb352f` commit'i Antigravity health çağrılarında stale-settings recovery'yi kapatarak health yolunu salt okunur yaptı. Hedefli suite, `npm test`, `npm run verify`, `npm run smoke` ve `npm run verify:ci` geçti; smoke yerel stdio MCP süreci kullandı, inference veya batch çalıştırmadı. Bu runtime düzeltmesine güvenmeden önce Hades MCP restart/reload edilmeli ve identity/araç envanteri tekrar okunmalı. Codex disposable fixture pilotu `completed`/`applied=false` döndü; bu kaynak entegrasyonu değildir ve CLI içi inference sayısı ile gerçek maliyet bilinmiyor. Önceki salt-okunur DAG kabulü geçerlidir ve tekrarlanmaz. P3 canlı iptal, timeout ve çalışan batch restart-recovery kanıtı kaydedildi; restart vakası başarılı task sonucu değil `unknown` verdi. OpenCode runtime rotaları emeklidir; aşağıdaki OpenCode kurulum, eklenti, pilot, metrik ve rota kayıtları tarihsel kanıttır, güncel işletim yönergesi değildir. P1b Claude görev kabulü, P2 canlı onay/recovery ve ayrıca onaylanan kaynak entegrasyonu, P3 edit batch entegrasyonu ve P6 dokümantasyon kapanışı açık kalır. `npm run canary:parallel` opt-in canlı Codex sağlayıcı kontrolüdür ve kullanım tüketebilir; her yeni batch değişmez plan hash'i ve ayrı başlatma onayı gerektirir.
+Güncel geçiş durumu (2026-11-05): Özgün plan kapsamındaki P2/P3/P4 işlevsel kabulleri tamamlandı. P2 recovery kanıtı ayrı süreçli Windows testlerinde gerçek üretim recovery yolunu kullanır; canlı Hades recovery çağrısı değildir. Claude P1b strict görev kabulü task_json_parse_invalid ile başarısız oldu ve kullanıcı kararıyla ertelendi. Son GPT-6.1-Sol incelemesi yalnız kendi 10 dosyalı snapshot’ını kapsar; üç sonraki yerel düzeltme bağımsız incelenmedi. Güncel doğal kaynak kapsamı local preflight’ta engelli; payload teslim edilmedi ve provider çağrısı yapılmadı. Son tam yerel doğrulama 1.083 testte 1.079 başarı, dört Windows koşullu atlama ve sıfır başarısızlık verdi; zorunlu benchmark 11,4 saniye sürdü. Smoke ve verify sentetik Vault/config ile, verify:ci başarılı çalıştı. AST ayarı unset/kapalıdır. P6 durum belgeleri uzlaştırıldı, fakat bağımsız inceleme beklediğinden geçiş koşulsuz kapatılmış değildir.
 
 ## Ne sunar
 
@@ -510,7 +510,7 @@ Runtime policy’si `~/.config/subagent-bridge/config.json`, executable ve adapt
 
 ## Doğrulanmış taban
 
-Paket `hades-orchestrator@2.2.0`, çalışma zamanı Node.js 20.9+ ve ESM’dir; CI Node.js 22/24 kullanır. Kanonik kayıt `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, isteğe bağlı görünüm `<workspace>/.hades/runs.jsonl` altındadır. Son tam yerel doğrulama: 2026-10-12. Güncel regresyon için `npm test` çalıştırılır; `npm run verify`, `npm run verify:ci` ve `npm run smoke` başarılıdır. Verify içindeki Codex CLI sürüm kontrolü model probe'u yapmaz; `model: null` ve `modelAccess: "not_probed"` raporlar.
+Paket hades-orchestrator 2.2.0, çalışma zamanı Node.js 20.9+ ve ESM’dir; CI Node.js 22/24 kullanır. Kanonik kayıt `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, isteğe bağlı görünüm `<workspace>/.hades/runs.jsonl` altındadır. Kaydedilen son tam yerel doğrulama 2026-11-05: 1.083 testten 1.079 başarılı, dört Windows koşullu atlama ve sıfır başarısızlık; benchmark 11,4 saniye. Sentetik smoke, sentetik config/Vault verify ve verify:ci aynı kaynak durumunda geçti. Bunlar tarihli yerel kanıttır.
 
 ## Hızlı başlangıç
 
@@ -630,7 +630,7 @@ OpenCode batch ilerleme eklentisi ve kurulum yolu emekliye ayrılmıştır; tari
 
 ### Kanonik yönlendirme
 
-DeepSeek, OpenCode'dan bağımsız resmi API adapter'ı üzerinden çalışır. 2026-10-19 yerel stdio read-only ve disposable edit kabul pilotları `deepseek_flash` → `deepseek-flash` canonical kimliğiyle geçti. Read-only pilot 355 giriş/46 çıkış tokenı için kullanım-tabanlı 0.0001617 USD, disposable edit pilotu 0.00021 USD maliyet hesapladı (provider faturası değildir); edit `applied=false` ile döndü ve ana workspace değişmedi. Desktop yeniden başlatma sonrasında Hades `check_deepseek_subagent` aynı canonical kimlik için `available=true`, `authenticated=true`, `modelAvailable=true` döndürdü; `gpt-6.1-sol` salt-okunur Hades çağrısı da geçti. OpenCode production adapter'ı ve yürütme rotaları yerel koddan emekliye ayrıldı; yerel test kabulü geçmiştir. Canlı Desktop MCP envanterinin aynı build'i yüklediği restart sonrası ayrıca doğrulanmalıdır.
+DeepSeek, OpenCode'dan bağımsız resmi API adapter'ı üzerinden çalışır. 2026-10-19 yerel stdio read-only ve disposable edit kabul pilotları `deepseek_flash` → `deepseek-flash` canonical kimliğiyle geçti. Read-only pilot 355 giriş/46 çıkış tokenı için kullanım-tabanlı 0.0001617 USD, disposable edit pilotu 0.00021 USD maliyet hesapladı (provider faturası değildir); edit `applied=false` ile döndü ve ana workspace değişmedi. Ayrıca 2026-11-03 tarihinde P4 kapsamında canlı Hades read-only ve disposable-edit kabulleri kendi sınırlı görevlerinde geçti; canlı edit kaynak workspace'e uygulanmadı. Bu sonuçlar genel edit veya kaynak terfisi değildir. OpenCode production adapter'ı ve yürütme rotaları yerel koddan emekliye ayrıldı.
 
 ```text
 Gemini 3.8 Flash / Antigravity Claude Sonnet → AntigravityAdapter → AGY
@@ -684,7 +684,7 @@ Backup `~/.config/subagent-bridge/backups/` altında oluşturulur; rollback içi
 
 ### Doğrulanmış sağlayıcı matrisi
 
-Antigravity Gemini 3.8 Flash ve Codex rotaları geçmişte doğrulanmıştır. DeepSeek Flash resmi API adapter'ında yerel stdio read-only ve disposable edit pilotlarını geçti; bu, mevcut Desktop Hades runtime'ının güncelliğini tek başına kanıtlamaz. Gemini Pro (`gemini-3.1-pro-high`) ve Gemini 3.7 Flash (`gemini-3.7-flash-high`) 2026-10-14 canlı probe'larında `modelAccess=unavailable` döndürdü ve normal çalıştırmadan devre dışı bırakıldı; güncel Antigravity plan matrisi bu iki modeli Enterprise için, Gemini 3.8 Flash'ı tüm planlar için listeliyor. GPT-6 Luna, GPT-6 Sol ve GPT-6 Astra doğrulanmış Codex kimlikleridir (canlı capability probe, 2026-09-22); Luna/Sol rollerinde GPT-6 sürümleri tercih edilir, GPT-5.6 karşılıkları uyumluluk profili olarak korunur. Codex Luna hızlı fiyat/performans uygulayıcı, Terra dengeli edit, Sol zor hata ayıklama ve denetim modelidir. Claude Code etkin abonelik gerektirir ve native Claude acceptance fazı bu kurulumda kapalıdır. Claude Code health kontrolü `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` ile CLI'ın `claude auth status` sonucunu birleştirir; iki kaynak da etkin oturum bildirmezse çağrı `auth_invalid` ile erken reddedilir.
+Antigravity Gemini 3.8 Flash ve Codex rotaları geçmişte doğrulanmıştır. DeepSeek Flash resmi API adapter'ında yerel stdio pilotlarını geçti; 2026-11-03 P4 canlı Hades read-only ve disposable-edit kabulleri de kendi sınırlı görevlerinde geçti. Canlı edit kaynak workspace'e terfi etmedi ve bu sonuçlar güncel Desktop Hades kaynak revision'ını veya genel edit yeteneğini kanıtlamaz. Gemini Pro ve Gemini 3.7 Flash 2026-10-14 canlı probe'larında erişilemez döndü ve normal çalıştırmadan devre dışı bırakıldı. GPT-6 Luna, GPT-6 Sol ve GPT-6 Astra doğrulanmış Codex kimlikleridir; Luna/Sol rollerinde GPT-6 sürümleri tercih edilir. Codex Luna hızlı uygulayıcı, Terra dengeli editör, Sol zor hata ayıklama ve denetim modelidir. Claude Code etkin abonelik gerektirir ve native Claude kabul fazı kapalıdır.
 
 ### Antigravity sözleşmesi
 
@@ -751,7 +751,7 @@ Shared core yalnız confirmed production bug, yeni provider, security vulnerabil
 
 ## Model rolleri
 
-Codex kapsamı ve mimariyi belirler, kodu ve testleri yürütür, sonuçları doğrular. Web araştırması ve dosya denetiminde etkin Antigravity rotası Gemini 3.8 Flash'tır; Gemini Pro ve Gemini 3.7 Flash erişim probu unavailable verdiğinden bu kurulumda devre dışıdır. İkinci görüş için etkin bir Codex modeli veya Antigravity Claude Sonnet kullanılır; native Claude Code abonelik olmadan kapalı kalır. DeepSeek bağımsız resmi API adaptörünü kullanır; emekliye ayrılan OpenCode rotaları kullanılamaz.
+Codex kapsamı ve mimariyi belirler, kodu ve testleri yürütür, sonuçları doğrular. Web araştırmasında etkin Antigravity rotası Gemini 3.8 Flash'tır; Gemini Pro ve Gemini 3.7 Flash erişim probu unavailable verdiğinden devre dışıdır. İkinci görüş için ayrıca yetkilendirilmiş etkin bir Codex modeli kullanılır. Claude Sonnet 4.6 P1b kabulü başarısız ve ertelenmiştir; doğrulanmış destek veya reviewer kabulü değildir. DeepSeek bağımsız resmi API adaptörünü kullanır; P4 canlı kabulleri kendi sınırlı görevlerine aittir. Emekliye ayrılan OpenCode rotaları kullanılamaz.
 
 ## Güvenlik ayrımı
 
@@ -767,7 +767,7 @@ Planlama, web araştırmasını ve delegasyonu yalnız ihtiyaç varsa seçer. Ye
 
 ## Kurulum
 
-Gereksinimler: Node.js 20.9+ (22/24 önerilir), resmi standalone Codex CLI ve Git. Etkin Antigravity rotaları için Antigravity CLI gerekir. DeepSeek pilotları için resmi API anahtarı gerekir; disposable edit pilotu kaynak workspace'e terfi etmez. OpenCode'a bağlı eski yürütme rotaları emekliye ayrılmıştır. İsteğe bağlı native Claude Code backend'i Claude Code aboneliği gerektirir ve abonelik yokken kapalı kalır.
+Gereksinimler: Node.js 20.9+ (22/24 önerilir), resmi standalone Codex CLI ve Git. Etkin Antigravity rotaları için Antigravity CLI gerekir. DeepSeek pilotları için resmi API anahtarı gerekir; disposable edit pilotu kaynak workspace'e terfi etmez. P4 canlı read-only ve disposable-edit kabulleri yalnız kendi sınırlı görevlerini doğrular; genel edit veya kaynak terfisi sağlamaz. OpenCode'a bağlı eski yürütme rotaları emekliye ayrılmıştır. İsteğe bağlı native Claude Code backend'i Claude Code aboneliği gerektirir ve abonelik yokken kapalı kalır.
 
 ```powershell
 npm ci
@@ -851,7 +851,7 @@ npm run config:backup         Kişisel policy backup'ı
 
 ## Kalıcı sınırlar
 
-DeepSeek edit kabulü yalnız `deepseek_edit_pilot` caller'ı için strict patch yanıtını bridge-owned disposable kopyaya uygular; ana workspace'e edit terfisi ve genel DeepSeek edit çağrısı fail-closed kalır. 2026-10-19 disposable edit pilotu geçti, ancak Codex/Antigravity kaynak edit ve batch edit entegrasyonu henüz kabul edilmedi. Codex doğrulamasız görevi tamamlanmış saymaz. Geri alınamaz işlem, üretim erişimi, dış sistemde yazma ve secret aktarımı insan onayı gerektirir.
+DeepSeek edit kabulü yalnız deepseek_edit_pilot caller'ı için strict patch yanıtını bridge-owned disposable kopyaya uygular; ana workspace'e edit terfisi ve genel DeepSeek edit çağrısı fail-closed kalır. P2 prepared-edit uygulaması, P3 normal edit-batch entegrasyonu ve P4 doğrudan API disposable pilotu kendi ayrı kapsamlarında kabul edilmiştir; bu sonuçlar genel edit yetkisi vermez. Geri alınamaz işlem, üretim erişimi, dış sistemde yazma ve secret aktarımı insan onayı gerektirir.
 
 ## Kalıcı hafıza
 
@@ -891,12 +891,12 @@ Execution metrikleri `execution_metric_v2` explicit allowlist’i ile yazılır;
 
 ## Mimari dokümanlar
 
-Temel kararlar [`docs/architecture`](docs/architecture) altındadır:
+Bu private kaynak checkout’unda dört plan kendi kaynak konumlarındadır. Public yayın planı seçilmiş kopyaları docs/architecture altına eşler; bu dışa aktarım dizini burada üretilmez. Ayrıntı [public yayın planındadır](docs/plans/yapilanlar/PUBLIC_YAYIN_PLANI.md).
 
-- [`CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md`](docs/architecture/CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md)
-- [`MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md`](docs/architecture/MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md)
-- [`DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md`](docs/architecture/DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md)
-- [`RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md`](docs/architecture/RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md)
+- [CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md](docs/plans/yarim-kalanlar/CONTEXT_ORKESTRASYONU_VE_GUVENLI_SECOND_BRAIN_PLANI_2026-08-21.md)
+- [MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md](docs/plans/yapilanlar/MODEL_KIMLIGI_VE_ERISIM_MODU_PLANI.md)
+- [DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md](docs/plans/yapilanlar/DEEPSEEK_EDIT_PILOT_VE_MIRROR_KARARLILIK_PLANI.md)
+- [RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md](docs/plans/yapilanlar/RECENT_RUNS_GOZLEMLENEBILIRLIK_PLANI.md)
 
 Bu dokümanlar tarihsel planlardır. Denetlenen her planın başında tarihli durum notu bulunur; güncel doğrulama, plan oluşturma anındaki sabit test veya araç sayıları yerine `npm test` ve CI ile yapılır.
 

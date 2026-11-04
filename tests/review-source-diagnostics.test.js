@@ -7,6 +7,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   createReviewSourceManifest,
+  diagnoseReviewSourceScope,
   REVIEW_SOURCE_MAX_FILE_BYTES,
   REVIEW_SOURCE_MAX_FILES,
   REVIEW_SOURCE_MAX_TOTAL_BYTES
@@ -123,6 +124,17 @@ test("RSD-02: blocked source is redacted and production fail-fast reach is separ
   assert.equal(run.result.execution.sourcePayloadCreated, false);
   assert.equal(run.stdout.includes(syntheticCredential), false);
   assert.equal(run.stdout.includes("const token"), false);
+
+  const entropyWorkspace = createWorkspace(t);
+  const syntheticEntropy = "A9mX2qT7vB4nC8sD1eF5hJ0kL3pR6wY9zQ2cN7mK";
+  fs.writeFileSync(path.join(entropyWorkspace, "entropy.js"), `const sample = "${syntheticEntropy}";\n`, "utf8");
+  const entropyRun = executeDiagnostic(entropyWorkspace, ["entropy.js"]);
+  assert.equal(entropyRun.exitCode, 2);
+  assert.equal(entropyRun.result.failureClass, "review_scope_secret_detected");
+  assert.equal(entropyRun.result.files[0].signal, "high_entropy");
+  assert.equal(entropyRun.result.files[0].highEntropyCandidateCount, 1);
+  assert.equal(entropyRun.stdout.includes(syntheticEntropy), false);
+  assert.equal(entropyRun.stdout.includes("const sample"), false);
 });
 
 test("RSD-03: unsafe paths and caller policy overrides fail without echoing input paths", (t) => {
@@ -181,4 +193,27 @@ test("RSD-04: file count, per-file, total-source, and serialized-bundle limits r
   assert.equal(overBundle.result.checks.totalSourceBytes, "passed");
   assert.equal(overBundle.result.checks.bundleBytes, "blocked");
   assert.ok(overBundle.result.request.bundleBytes > 256 * 1024);
+});
+
+test("RSD-05: host-selected syntax diagnostics fail closed for malformed and unsupported source", (t) => {
+  const workspace = createWorkspace(t);
+  const cases = [
+    { path: "malformed.js", content: "const = ;\n" },
+    { path: "unsupported.md", content: "ordinary selected text\n" }
+  ];
+
+  for (const currentCase of cases) {
+    fs.writeFileSync(path.join(workspace, currentCase.path), currentCase.content, "utf8");
+    const result = diagnoseReviewSourceScope(workspace, [currentCase.path], { syntaxAwareJavaScriptEnabled: true });
+    assert.equal(result.decision, "blocked");
+    assert.equal(result.failureClass, "review_scope_syntax_analysis_blocked");
+    assert.equal(result.firstProductionFailure.path, currentCase.path);
+    assert.equal(result.firstProductionFailure.stage, "syntax_aware_classifier");
+    assert.equal(result.files[0].productionReached, true);
+    assert.equal(result.files[0].unrunChecks.length, 0);
+    assert.equal(result.completeness, "complete");
+    assert.equal(result.request.sourceBytesComplete, true);
+    assert.equal(result.execution.sourcePayloadCreated, false);
+    assert.equal(result.execution.providerStarted, false);
+  }
 });

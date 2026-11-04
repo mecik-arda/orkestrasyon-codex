@@ -14,7 +14,8 @@ import {
   REVIEW_SOURCE_MAX_BUNDLE_BYTES,
   REVIEW_SOURCE_MAX_FILE_BYTES,
   REVIEW_SOURCE_MAX_FILES,
-  REVIEW_SOURCE_MAX_TOTAL_BYTES
+  REVIEW_SOURCE_MAX_TOTAL_BYTES,
+  REVIEW_SOURCE_PAYLOAD_HEADER
 } from "../subagent-bridge/src/services/review-source-manifest.js";
 
 function createWorkspace(t) {
@@ -129,6 +130,21 @@ test("RSM-01: manifest sorts selected paths and hashes exact host-read bytes", (
   assert.ok(manifest.sourcePayload.indexOf("src/alpha.js") < manifest.sourcePayload.indexOf("src/beta.js"));
   assert.match(manifest.sourcePayload, /const alpha = 1;/u);
   assert.match(manifest.sourcePayload, /const beta = 2;/u);
+  assert.equal(manifest.sourcePayload, [
+    REVIEW_SOURCE_PAYLOAD_HEADER,
+    JSON.stringify({
+      version: 1,
+      hashAlgorithm: "sha256",
+      entries: [
+        { path: "src/alpha.js", sizeBytes: alpha.length, sha256: sha256(alpha) },
+        { path: "src/beta.js", sizeBytes: beta.length, sha256: sha256(beta) }
+      ],
+      files: [
+        { path: "src/alpha.js", sizeBytes: alpha.length, sha256: sha256(alpha), content: "const alpha = 1;\n" },
+        { path: "src/beta.js", sizeBytes: beta.length, sha256: sha256(beta), content: "const beta = 2;\n" }
+      ]
+    })
+  ].join("\n"));
   assert.ok(manifest.sourcePayloadBytes <= REVIEW_SOURCE_MAX_BUNDLE_BYTES);
 });
 

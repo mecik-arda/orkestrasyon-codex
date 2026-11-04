@@ -814,12 +814,39 @@ npm run hook:classify         Hafıza hook oturumunu geri bildirim öncesi sın�
 npm run hook:attribute-history Ayrı historical view için onaylı legacy atıf
 npm run memory:review         Kalıcı hafıza yaşam döngüsü denetimi
 npm run memory:doctor         Salt-okunur Vault sağlık, sürüm ve audit teşhisi
+npm run review:diagnose -- --workspace . --file src/example.js
 npm run memory:repair         Açık Vault onarımı (varsayılan dry-run, yazmak için --apply)
 npm run state:migrate         Explicit runtime state migrasyonu (varsayılan dry-run)
 npm run video:collect         Herkese açık YouTube altyazısını güvenilmeyen, hashlı zarf olarak toplar (--url=, opsiyonel --out=)
 npm run hook:install          Opt-in salt-okunur hafıza hook'u üretir (--client=codex|claude; opsiyonel --project-root= ve --cohort=)
 npm run memory:evaluate       Retrieval kalite değerlendirmesi
 npm run config:backup         Kişisel policy backup'ı
+```
+
+`review:diagnose` yalnız açıkça seçilen review dosyalarını yerel `review-source-manifest` kontrolleriyle inceler. Birden çok dosya için `--file` tekrarlanır. Komut provider, MCP review, kişisel runtime config veya Vault yüklemez; source payload üretmez ve hiçbir ret kararını değiştirmez. JSON sonucu güvenli göreli path, dosya boyutu/hash'i, kapalı hata sınıfı, çalıştırılan/çalıştırılmayan kontroller, tamamlık, policy-source fingerprint'i ve seçili kapsam snapshot hash'ini verir. Hash'ler gizlilik garantisi veya host attestation değildir.
+
+Çıkış kodu `0` seçilen kapsamın mevcut yerel kontrollerden geçtiğini, `2` yerel preflight engelini, `3` beklenen snapshot veya policy hash'inin değiştiğini, `64` argüman hatasını, `1` tanı politikasının veya çalıştırmanın güvenli biçimde tamamlanamadığını gösterir. Önceki `snapshotSha256` değerini `--expected-snapshot`, `policy.sha256` değerini `--expected-policy` ile karşılaştırabilirsiniz. Eksik snapshot, karşılaştırılamaz olarak raporlanır. Komut repository'deki policy varsayılanını kullanır; etkin Hades kişisel config'ini okumadığı için `policy.mayDifferFromActiveRuntime` sınırı korunur. `clean` yalnız seçili scope için yerel preflight sonucudur; kaynak gönderme izni veya bütün repository için güvenlik onayı değildir.
+
+Örnek redakte sonuç:
+
+```json
+{
+  "decision": "blocked",
+  "failureClass": "review_scope_secret_detected",
+  "completeness": "complete",
+  "firstProductionFailure": {
+    "inputIndex": 1,
+    "path": "src/example.js",
+    "failureClass": "review_scope_secret_detected",
+    "stage": "legacy_secret_classifier"
+  },
+  "execution": {
+    "providerStarted": false,
+    "sourcePayloadCreated": false,
+    "sourceDelivery": "not_attempted",
+    "sourceDeliveryAuthorized": false
+  }
+}
 ```
 
 ## Kalıcı sınırlar

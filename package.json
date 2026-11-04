@@ -18,6 +18,7 @@
     "parallel:watch": "node scripts/watch-parallel-batch.js",
     "smoke": "node scripts/smoke-mcp.js",
     "smoke:vault": "node scripts/smoke-mcp.js --real-vault --confirm-real-vault-read",
+    "review:diagnose": "node scripts/diagnose-review-source.js",
     "metrics": "node scripts/report-metrics.js",
     "budget": "node scripts/report-metrics.js --budget-only",
     "replay": "node scripts/replay-run.js",

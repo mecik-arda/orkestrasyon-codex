@@ -1,5 +1,9 @@
 # Codex/Hades gecisi bagimsiz model inceleme paketi
 
+## 2026-11-04 smoke Vault erisimi duzeltmesi
+
+2026-11-03 kaydindaki yetkisiz gercek Vault notu okuma olayi tarihsel olarak korunur; icerik, not yolu ve kimlik bilgisi bu kayda eklenmez. Varsayilan `npm run smoke` artik gecici sentetik config/Vault kullanir, sentetik child process environment'ina yalniz gerekli isletim sistemi degiskenlerini aktarir ve kullanici config/profilini veya provider credential'larini miras almaz. Smoke regression'i trap Vault arama sonucunun bos oldugunu, sentetik notun gercek MCP stdio yolunda bulunup okunabildigini ve fixture hash'inin eslestigini dogrular. `npm run smoke:vault` ayri acik opt-in'dir; yalniz MCP catalog/memory health, arama ve secilen tek notun okunmasini yapar. Provider health ve tum Vault'u tarayan `review_persistent_memory` cagrisi sentetik modla sinirlidir. Smoke kodu ve testlerinde bu ayrim uygulandi; bu degisiklik bagimsiz incelenmis degildir. Eski real-Vault okuma sonucu yetkili dogrulama sayilmaz.
+
 ## 2026-11-03 son yerel kapsam uzlaştırması
 
 Bu not yerel kaynak denetimi ve doğrulama kaydıdır; bağımsız model incelemesi değildir. Başlangıç HEAD `e6688347dc7c04607757c5d82ee6e57e778b0376`, dal `main`, temiz çalışma ağacı ve `origin/main` yerel referansına göre 5 commit ilerilik doğrulandı. Uzak ref güncelliği fetch yapılmadığından bilinmiyor.

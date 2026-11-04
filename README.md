@@ -6,6 +6,8 @@
 
 Hades Orchestrator is a provider-neutral orchestration system in which Codex Desktop acts as the host and lead orchestrator and invokes independent subagent backends over the local MCP server in `subagent-bridge`. The Codex host/orchestrator model and the subagent backends are separate.
 
+Smoke Vault boundary (2026-11-04): `npm run smoke` creates a temporary policy, runtime profile and synthetic Vault, then runs MCP health, catalog and memory checks only against that fixture. The synthetic child environment keeps only required operating-system variables and does not inherit provider credentials, the personal runtime configuration, or personal profile paths. `npm run smoke:vault` is a separate explicit opt-in that uses the active personal configuration for MCP catalog and memory-health checks, then searches for and reads one matching Vault note. It skips provider health calls and whole-Vault review. Run it only when that access is specifically needed and authorized. The earlier 2026-11-03 smoke invocation that read a real Vault note was unauthorized; its record is retained in the independent review package and is not treated as valid smoke evidence.
+
 Current runtime status (2026-10-24): The latest recorded Desktop Hades workspace identity matches the expected checkout, but the identity resource does not attest the loaded source revision. Commit `eeb352f` makes Antigravity health checks read-only by disabling stale-settings recovery on health calls; the local targeted suite, `npm test`, `npm run verify`, `npm run smoke`, and `npm run verify:ci` passed. The smoke used a local stdio MCP process and did not run inference or a batch. Restart or reload Hades before relying on the health fix in the active server. The Codex disposable fixture pilot returned `completed` with `applied=false`; that is not source integration, and CLI-internal inference count and actual cost are unknown. The previous read-only DAG acceptance remains valid and is not repeated. Live P3 cancellation, timeout and in-flight restart-recovery evidence is recorded; the restart case ended `unknown`, not with a successful task result. OpenCode setup, plugin, pilot and route material retained below is historical evidence, not supported operational guidance. P1b Claude task acceptance, P2 live approval/recovery and separately approved source integration, P3 edit-batch integration, and final documentation closeout remain open. `npm run canary:parallel` is an opt-in live Codex provider check and may consume usage; each new batch requires an immutable plan hash and separate start approval.
 
 The current checkout has changed Hades runtime code since the last live identity check. Restart the Hades MCP process before relying on the Antigravity health fix, then verify the live identity and tool inventory. Identity verifies workspace binding, not the loaded code revision. This restart does not authorize a provider call, batch start, or source integration.
@@ -362,7 +364,8 @@ npm run pilot                 DeepSeek Flash synthetic pilot
 npm run pilot:flash           DeepSeek Flash synthetic pilot
 npm run pilot:edit:deepseek   Disabled until structured patch validation is implemented
 npm run accept:edit:deepseek  Re-run the separately gated disposable DeepSeek edit acceptance
-npm run smoke                 MCP tool schema and runtime health smoke test
+npm run smoke                 MCP tools, resources and runtime health with a temporary synthetic Vault
+npm run smoke:vault           Explicit real-Vault search/read opt-in
 npm run budget                Budget accounting totals (not invoice), observed/estimated cost, coverage and enforcement mode
 npm run p0:e2e                Trusted workspace portability acceptance
 npm test                      All Node.js regression tests
@@ -790,7 +793,8 @@ npm run pilot                 DeepSeek Flash sentetik pilotu
 npm run pilot:flash           DeepSeek Flash sentetik pilotu
 npm run pilot:edit:deepseek   Yapılandırılmış patch doğrulaması tamamlanana dek kapalı
 npm run accept:edit:deepseek  Disposable DeepSeek edit kabul adımını yeniden çalıştırır
-npm run smoke                 MCP araç şeması ve runtime health smoke testi
+npm run smoke                 Geçici sentetik Vault ile MCP araç, resource ve runtime health kontrolleri
+npm run smoke:vault           Gerçek Vault arama/okuma için açık opt-in
 npm run budget                Fatura olmayan muhasebe toplamı, gözlenen/tahmini maliyet, kapsama ve uygulama modu
 npm run p0:e2e                Trusted workspace portability kabulü
 npm test                      Tüm Node.js regresyon testleri

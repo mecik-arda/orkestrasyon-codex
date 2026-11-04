@@ -143,23 +143,43 @@ function addSensitiveDestructuringFindings(findingsByKey, lineStarts, pattern, s
 
 function scanComments(source, sourceFile, findingsByKey, lineStarts) {
   const languageVariant = sourceFile.languageVariant;
-  const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, languageVariant, source);
-  let tokenKind = scanner.scan();
-  while (tokenKind !== ts.SyntaxKind.EndOfFileToken) {
-    if (tokenKind === ts.SyntaxKind.SingleLineCommentTrivia
-      || tokenKind === ts.SyntaxKind.MultiLineCommentTrivia
-      || tokenKind === ts.SyntaxKind.ShebangTrivia) {
-      const classification = classifySecretLikeContent(scanner.getTokenText());
-      const start = scanner.getTokenPos();
-      const end = scanner.getTextPos();
-      const locationNode = {
-        getStart: () => start,
-        getEnd: () => end
-      };
-      addClassificationFindings(findingsByKey, lineStarts, classification, locationNode, sourceFile);
+  const scannedCommentRanges = new Set();
+  const scanTriviaRange = (start, end) => {
+    if (end <= start) return;
+    const trivia = source.slice(start, end);
+    const scanner = ts.createScanner(ts.ScriptTarget.Latest, false, languageVariant, trivia);
+    let tokenKind = scanner.scan();
+    while (tokenKind !== ts.SyntaxKind.EndOfFileToken) {
+      if (tokenKind === ts.SyntaxKind.SingleLineCommentTrivia
+        || tokenKind === ts.SyntaxKind.MultiLineCommentTrivia
+        || tokenKind === ts.SyntaxKind.ShebangTrivia) {
+        const commentStart = start + scanner.getTokenPos();
+        const commentEnd = start + scanner.getTextPos();
+        const rangeKey = `${commentStart}:${commentEnd}`;
+        if (!scannedCommentRanges.has(rangeKey)) {
+          scannedCommentRanges.add(rangeKey);
+          const classification = classifySecretLikeContent(scanner.getTokenText());
+          const locationNode = {
+            getStart: () => commentStart,
+            getEnd: () => commentEnd
+          };
+          addClassificationFindings(findingsByKey, lineStarts, classification, locationNode, sourceFile);
+        }
+      }
+      tokenKind = scanner.scan();
     }
-    tokenKind = scanner.scan();
+  };
+  const pendingNodes = [sourceFile];
+  while (pendingNodes.length > 0) {
+    const node = pendingNodes.pop();
+    scanTriviaRange(node.getFullStart(), node.getStart(sourceFile, false));
+    ts.forEachChild(node, (child) => {
+      pendingNodes.push(child);
+    });
   }
+  const lastStatement = sourceFile.statements[sourceFile.statements.length - 1];
+  const trailingComments = ts.getTrailingCommentRanges(source, lastStatement?.end ?? 0) ?? [];
+  for (const comment of trailingComments) scanTriviaRange(comment.pos, comment.end);
 }
 
 function parseSource(source, fileName, scriptKind) {
@@ -241,6 +261,9 @@ export function classifyJavaScriptOrTypeScriptSource({ fileName, source }) {
       } else if (propertyName !== null) {
         classifySensitiveStaticValue(findingsByKey, lineStarts, propertyName, node.initializer, node.initializer, sourceFile);
       }
+    } else if (ts.isShorthandPropertyAssignment(node) && ts.isObjectLiteralExpression(node.parent)
+      && sensitiveNamePattern.test(node.name.text)) {
+      addFinding(findingsByKey, lineStarts, "sensitive_dynamic_value", node.name, sourceFile);
     } else if (ts.isPropertyDeclaration(node)) {
       const propertyName = propertyNameText(node.name, sourceFile);
       if (propertyName === null && ts.isComputedPropertyName(node.name)) {

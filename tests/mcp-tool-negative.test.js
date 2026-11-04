@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { createSubagentMcpServer } from "../subagent-bridge/src/frontends/mcp/server.js";
 import { publicToolSchemas, storeMemorySchema } from "../subagent-bridge/src/frontends/mcp/tools.js";
 
 const wrongTypePayloads = {
@@ -37,12 +40,100 @@ const wrongTypePayloads = {
   checkProviderCapability: { provider: 42 }
 };
 
+const validPublicToolInputs = {
+  runClaudeSonnetAcceptancePilot: {},
+  runCodexProfileEditPilot: {},
+  prepareP2AcceptanceEdit: {},
+  runAntigravity: { prompt: "Inspect", model: "gemini_flash_3_8" },
+  runClaudeCode: { prompt: "Inspect" },
+  runCodex: { prompt: "Inspect" },
+  runProfile: { prompt: "Inspect", profile: "reader" },
+  runDeepSeek: {
+    taskId: "task-one",
+    role: "analyst",
+    objective: "Inspect",
+    workspace: ".",
+    acceptanceCriteria: ["Return a result"]
+  },
+  runDeepSeekEditPilot: {
+    taskId: "task-one",
+    objective: "Inspect",
+    files: ["src/value.js"],
+    acceptanceCriteria: ["Return a result"]
+  },
+  approvePreparedEdit: { approvalRequestId: "a".repeat(64) },
+  rejectPreparedEdit: { approvalRequestId: "a".repeat(64) },
+  prepareParallelBatch: {
+    objective: "Inspect",
+    batchMaxReservedCostUsd: 1,
+    tasks: [{ taskId: "task-one", role: "analyst", target: "codex", objective: "Inspect", readablePaths: ["src/value.js"] }]
+  },
+  startParallelBatch: { planId: "a".repeat(32), planHash: "b".repeat(64) },
+  getParallelBatch: { batchId: "a".repeat(32) },
+  getParallelTaskDetail: { batchId: "a".repeat(32), taskId: "task-one", detailRef: "b".repeat(64) },
+  cancelParallelBatch: { batchId: "a".repeat(32) },
+  approveParallelIntegration: { batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: "c".repeat(64) },
+  applyAuthorizedParallelIntegration: {
+    batchId: "a".repeat(32),
+    expectedDiffHash: "b".repeat(64),
+    expectedDiffPreviewHash: "c".repeat(64),
+    expectedChangePayloadHash: "d".repeat(64),
+    expectedDetailRef: "e".repeat(64),
+    expectedArtifactExpiresAt: "2026-11-05T12:00:00.000Z",
+    expectedBaseCommit: "f".repeat(40),
+    expectedSourceRefHash: "1".repeat(64),
+    expectedSourceFileStatesHash: "2".repeat(64),
+    expectedSourceFileIdentityHash: "4".repeat(64),
+    authorizationNonce: "3".repeat(64)
+  },
+  revalidateParallelIntegration: { batchId: "a".repeat(32), approvalRef: "b".repeat(64), expectedDiffHash: "c".repeat(64) },
+  checkProviderCapability: { provider: "codex" }
+};
+
 test("MCP-NEG-01: her public MCP şeması bilinmeyen alanı reddeder", () => {
   const names = Object.keys(publicToolSchemas);
   assert.ok(names.length >= 12, `beklenen araç sayısı, bulunan: ${names.length}`);
   for (const name of names) {
-    const result = publicToolSchemas[name].safeParse({ unexpected_field_for_test: true });
+    const validInput = validPublicToolInputs[name];
+    assert.ok(validInput, `${name} için geçerli temel girdi eksik`);
+    assert.equal(publicToolSchemas[name].safeParse(validInput).success, true, `${name} temel girdisi geçersiz`);
+    const result = publicToolSchemas[name].safeParse({ ...validInput, unexpected_field_for_test: true });
     assert.equal(result.success, false, `${name} bilinmeyen alanı kabul etti`);
+    assert.ok(result.error.issues.some((issue) => issue.code === "unrecognized_keys" && issue.keys.includes("unexpected_field_for_test")), `${name} reddi bilinmeyen alana bağlı değil`);
+  }
+});
+
+test("MCP-NEG-01: bilinmeyen alan gerçek MCP çağrısında runtime dispatch öncesi reddedilir", async () => {
+  let runtimeCalls = 0;
+  const runtime = {
+    async run() {
+      runtimeCalls += 1;
+      return { ok: true };
+    }
+  };
+  const server = createSubagentMcpServer({
+    runtime,
+    configuration: {},
+    trustedWorkspace: process.cwd()
+  });
+  const client = new Client({ name: "mcp-negative-contract-test", version: "1.0.0" });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const validInput = validPublicToolInputs.runCodex;
+  assert.equal(publicToolSchemas.runCodex.safeParse(validInput).success, true);
+  try {
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const validResult = await client.callTool({ name: "run_codex_subagent", arguments: validInput });
+    assert.equal(validResult.isError, false);
+    assert.equal(runtimeCalls, 1);
+    const invalidResult = await client.callTool({
+      name: "run_codex_subagent",
+      arguments: { ...validInput, unexpected_field_for_test: true }
+    });
+    assert.equal(invalidResult.isError, true);
+    assert.match(invalidResult.content[0].text, /unexpected_field_for_test/u);
+    assert.equal(runtimeCalls, 1);
+  } finally {
+    await Promise.allSettled([client.close(), server.close()]);
   }
 });
 

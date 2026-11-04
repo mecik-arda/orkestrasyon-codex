@@ -38,10 +38,10 @@ function errorResponse(error) {
   };
 }
 
-function publicToolInputShape(schema) {
+function publicToolInputSchema(schema) {
   let current = schema;
   while (current instanceof z.ZodEffects) current = current.innerType();
-  return current.shape;
+  return current.strict();
 }
 
 function safe(handler) {
@@ -254,14 +254,14 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
   server.registerTool("run_deepseek_subagent", {
     title: "DeepSeek Flash subagent çalıştır",
     description: "Resmî DeepSeek API üzerinden canonical deepseek-flash modelini salt-okunur modda çalıştırır. İstekler strict JSON ve Zod sonuç doğrulamasından, model kimliği kontrolünden ve ayrı 1 USD pilot admission sınırından geçer.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runDeepSeek),
+    inputSchema: publicToolInputSchema(publicToolSchemas.runDeepSeek),
     annotations: executionAnnotations
   }, safe(handlers.runDeepSeek));
 
   server.registerTool("run_deepseek_edit_pilot", {
     title: "DeepSeek disposable edit pilotu çalıştır",
     description: "DeepSeek Flash'tan yapılandırılmış dosya içeriği ister, yalnız seçilmiş dosyalara path/secret doğrulamalı patch'i bridge-owned disposable workspace içinde yazar ve değişiklikleri ana workspace'e terfi ettirmeden raporlar.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runDeepSeekEditPilot),
+    inputSchema: publicToolInputSchema(publicToolSchemas.runDeepSeekEditPilot),
     annotations: executionAnnotations
   }, safe(handlers.runDeepSeekEditPilot));
 
@@ -294,7 +294,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
   server.registerTool("run_antigravity_subagent", {
     title: "Antigravity subagent çalıştır",
     description: "Antigravity CLI üzerinden yalnızca erişilebilir Gemini Flash 3.8 veya Claude Sonnet modelleriyle görev devreder. Erişilemeyen Gemini Pro ve Gemini Flash 3.7 çalıştırma şemasında devre dışıdır; erişim durumu check_antigravity_subagent ile ayrıca probe edilebilir. İsteğe bağlı workspace yalnızca salt okunur modda ve izinli kökler altında kullanılabilir. Host source-bundle reviewScope transport'u desteklenmez.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runAntigravity),
+    inputSchema: publicToolInputSchema(publicToolSchemas.runAntigravity),
     annotations: executionAnnotations
   }, safe(handlers.runAntigravity));
 
@@ -319,21 +319,21 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
   server.registerTool("run_claude_code_subagent", {
     title: "Claude Code subagent çalıştır",
     description: "Claude Code CLI üzerinden salt okunur veya düzenleme modunda görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runClaudeCode),
+    inputSchema: publicToolInputSchema(publicToolSchemas.runClaudeCode),
     annotations: executionAnnotations
   }, safe(handlers.runClaudeCode));
 
   server.registerTool("run_codex_subagent", {
     title: "OpenAI Codex subagent çalıştır",
     description: "OpenAI Codex CLI üzerinden salt okunur veya düzenleme modunda görev devreder. Required source review için açık reviewScope gerekir; sonuç strict JSON review şeması ve host manifest path/line aralıklarıyla doğrulanır.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runCodex),
+    inputSchema: publicToolInputSchema(publicToolSchemas.runCodex),
     annotations: executionAnnotations
   }, safe(handlers.runCodex));
 
   server.registerTool("run_task_profile", {
     title: "Görev profiliyle subagent çalıştır",
     description: "Açıkça seçilen görev profiline ait canonical provider ve modla çalışır; yalnız policy'de tanımlı read-only fallback hedeflerini kullanabilir. Required source review için açık reviewScope, strict JSON sonucu ve host manifestine göre doğrulanmış path/line atıfları gerekir.",
-    inputSchema: publicToolInputShape(publicToolSchemas.runProfile),
+    inputSchema: publicToolInputSchema(publicToolSchemas.runProfile),
     annotations: executionAnnotations
   }, safe(handlers.runProfile));
 
@@ -341,7 +341,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     server.registerTool("prepare_p2_acceptance_edit", {
       title: "P2 prepared edit",
       description: "Prepare the fixed P2 edit in a disposable workspace. Source changes require a separate approve_prepared_edit call.",
-      inputSchema: publicToolInputShape(publicToolSchemas.prepareP2AcceptanceEdit),
+      inputSchema: publicToolInputSchema(publicToolSchemas.prepareP2AcceptanceEdit),
       annotations: executionAnnotations
     }, safe(handlers.prepareP2AcceptanceEdit));
   }
@@ -369,7 +369,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
   server.registerTool("check_provider_capability", {
     title: "Sağlayıcı capability probe çalıştır",
     description: "Seçilen sağlayıcı ve model için opt-in, salt-okunur capability probu çalıştırır; probeWorkspaceRead=true ek bir sağlayıcı çağrısıyla yalnız trusted workspace altında host tarafından oluşturulmuş kısa ömürlü sentinel'i okumayı dener. Maliyet modele göre değişebilir; sonucu redacted live_observation metriği olarak kaydeder.",
-    inputSchema: publicToolInputShape(publicToolSchemas.checkProviderCapability),
+    inputSchema: publicToolInputSchema(publicToolSchemas.checkProviderCapability),
     annotations: externalReadOnlyExecutionAnnotations
   }, safe(handlers.checkProviderCapability));
 
@@ -392,51 +392,51 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
     server.registerTool("prepare_parallel_batch", {
       title: "Paralel batch planı hazırla",
       description: "Ana orkestratörün task DAG'ını doğrular; worker başlatmadan plan/hash, batch-local admission tahmini ve süreç çıktı sınırlarını gösterir. maxOutputBytes ham stdout+stderr toplam UTF-8 byte sınırıdır; JSONL/araç olaylarını da sayar, nihai cevap veya public özet sınırı değildir. Atlanırsa host süreç sınırı kullanılır. Kısa cevap talimatı süreç çıktısını sınırlamaz; output_limit sonrası scope/byte tanılarını inceleyip yeni plan için ayrı onay alın. Edit task'ları tek wave'dir. Plan gösterildikten sonra ayrı açık onayla start_parallel_batch çağrılmalıdır.",
-      inputSchema: publicToolInputShape(publicToolSchemas.prepareParallelBatch),
+      inputSchema: publicToolInputSchema(publicToolSchemas.prepareParallelBatch),
       annotations: executionAnnotations
     }, safe(handlers.prepareParallelBatch));
     server.registerTool("start_parallel_batch", {
       title: "Onaylanmış paralel batch'i başlat",
       description: "Yalnız kullanıcıya gösterilmiş değişmez plan hash'i ve ayrı kullanıcı onayından sonra tek kullanımlık planı tüketir; manifesti atomik kaydedip batchId ile hemen döner. Worker'lar arka planda çalışır. autoOpenTerminalDashboard opt-in ise session penceresinden bağımsız, Windows ekranının sağında küçük Windows Terminal penceresi açılır; aksi halde watcher komutu npm run parallel:watch -- <batchId> ile ikinci terminalde başlatılabilir.",
-      inputSchema: publicToolInputShape(publicToolSchemas.startParallelBatch),
+      inputSchema: publicToolInputSchema(publicToolSchemas.startParallelBatch),
       annotations: executionAnnotations
     }, safe(handlers.startParallelBatch));
     server.registerTool("get_parallel_batch", {
       title: "Paralel batch durumunu sorgula",
       description: "Batch durumu, çözümlenmiş task'lardan hesaplanan ilerleme yüzdesi, per-task statü, batch-local admission bütçesi ve blocked batch'ler için yalnız güvenli blockedReason ile doğrulama aşaması, hata sınıfı, exit code ve byte sayısı gibi içeriksiz tanılama metadata'sı içeren sınırlı yapılandırılmış özet döndürür. Ham doğrulama çıktısı açıklanmaz. Task içi token ilerlemesi ölçülmez. Tam worker çıktısı yalnız get_parallel_task_detail ile alınır; admission tutarı sağlayıcı faturası değildir.",
-      inputSchema: publicToolInputShape(publicToolSchemas.getParallelBatch),
+      inputSchema: publicToolInputSchema(publicToolSchemas.getParallelBatch),
       annotations: readOnlyAnnotations
     }, safe(handlers.getParallelBatch));
     server.registerTool("get_parallel_task_detail", {
       title: "Paralel task ayrıntısını oku",
       description: "Yalnız aynı batch, task, caller ve trusted workspace yetkisiyle opak detail_ref artefaktının sınırlı sayfasını döndürür; taskId=integration birleşik edit diff önizlemesidir. Süresi dolan veya yetkisiz artefakt için fail-closed hata verir.",
-      inputSchema: publicToolInputShape(publicToolSchemas.getParallelTaskDetail),
+      inputSchema: publicToolInputSchema(publicToolSchemas.getParallelTaskDetail),
       annotations: readOnlyAnnotations
     }, safe(handlers.getParallelTaskDetail));
     server.registerTool("cancel_parallel_batch", {
       title: "Paralel batch'i iptal et",
       description: "Açık iptal isteğini manifeste yazar, çalışan child execution'ları iptal eder; belirsiz child durumu unknown kalır ve otomatik tekrar veya entegrasyon yapılmaz.",
-      inputSchema: publicToolInputShape(publicToolSchemas.cancelParallelBatch),
+      inputSchema: publicToolInputSchema(publicToolSchemas.cancelParallelBatch),
       annotations: executionAnnotations
     }, safe(handlers.cancelParallelBatch));
     if (enableOrchestratorApproval === true) {
       server.registerTool("revalidate_parallel_integration", {
         title: "Paralel entegrasyon kaynağını yeniden doğrula",
         description: "Yalnız source_ref_changed nedeniyle eski onayı reddedilmiş edit batch payload'unu güncel, temiz ve özgün baseCommit'in devamı olan kaynak üzerinde sağlayıcı çağrısı ve kaynak dosyalarına uygulama yapmadan yeniden doğrular. Tüm Git ref'leri, hedef dosyaların tarihsel SHA-256/modu ve Git blob kimliği, dosya sahipliği ve host doğrulaması korunur. Başarı yeni kaynak bağına bağlı yeni approvalRef üretir; ayrıca kullanıcı entegrasyon onayı gerekir.",
-        inputSchema: publicToolInputShape(publicToolSchemas.revalidateParallelIntegration),
+        inputSchema: publicToolInputSchema(publicToolSchemas.revalidateParallelIntegration),
         annotations: executionAnnotations
       }, safe(handlers.revalidateParallelIntegration));
       server.registerTool("approve_parallel_integration", {
         title: "Paralel entegrasyon diff'ini onayla ve uygula",
         description: "Yalnız edit batch'i ready_for_approval durumundayken, kaynak HEAD ve dosya durumu doğrulandıktan sonra saklanan birleşik diff'i atomik dosya promosyonuyla kaynak workspace'e uygular; Git commit veya push yapmaz.",
-        inputSchema: publicToolInputShape(publicToolSchemas.approveParallelIntegration),
+        inputSchema: publicToolInputSchema(publicToolSchemas.approveParallelIntegration),
         annotations: executionAnnotations
       }, safe(handlers.approveParallelIntegration));
       if (configuration.parallelBatch?.atomicIntegrationEnabled === true) {
         server.registerTool("apply_authorized_parallel_integration", {
           title: "Önceden incelenen paralel diff'i tek işlemde uygula",
           description: "Önceden görülen exact diff/payload, artefakt süresi ve açık HEAD, tüm-ref kümesi hash'i ve kaynak dosya durumları eşleşirse kalıcı tek-kullanımlık yetki kaydı oluşturup aynı kilit altında yeniden doğrular ve uygular. Her kaynak veya ref değişimi işlemi reddeder. Varsayılan olarak kapalıdır; approvalRef yetki değildir. Git commit veya push yapmaz.",
-          inputSchema: publicToolInputShape(publicToolSchemas.applyAuthorizedParallelIntegration),
+          inputSchema: publicToolInputSchema(publicToolSchemas.applyAuthorizedParallelIntegration),
           annotations: executionAnnotations
         }, safe(handlers.applyAuthorizedParallelIntegration));
       }

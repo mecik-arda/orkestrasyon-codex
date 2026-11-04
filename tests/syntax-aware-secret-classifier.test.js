@@ -79,6 +79,49 @@ test("SASC-12: escaped known credential signatures remain findings in identifier
   assert.equal(result.findings.filter((finding) => finding.kind === "known_signature").length, 2);
 });
 
+test("SASC-13: sensitive shorthand object properties require review without blocking ordinary shorthand", () => {
+  const cases = [
+    { fileName: "review.js", source: "const settings = { token };", expectedFindings: ["sensitive_dynamic_value"] },
+    { fileName: "review.ts", source: "const settings: Settings = { token };", expectedFindings: ["sensitive_dynamic_value"] },
+    { fileName: "review.js", source: "const settings = { outer: { password } };", expectedFindings: ["sensitive_dynamic_value"] },
+    { fileName: "review.js", source: "const settings = { token: resolveToken() };", expectedFindings: ["sensitive_dynamic_value"] },
+    { fileName: "review.js", source: "const settings = { label };", expectedFindings: [] },
+    { fileName: "review.js", source: "const settings = { [key]: label, ...defaults };", expectedFindings: ["computed_property_unresolved"] }
+  ];
+
+  for (const currentCase of cases) {
+    const result = classifyJavaScriptOrTypeScriptSource(currentCase);
+    assert.equal(result.status, "complete");
+    assert.deepEqual(result.findings.map((finding) => finding.kind), currentCase.expectedFindings);
+  }
+});
+
+test("SASC-14: known signatures in comments after interpolated templates remain findings", () => {
+  const credentialSignature = createSyntheticCredentialSignature();
+  const tick = String.fromCharCode(96);
+  const interpolation = ["$", "{value}"].join("");
+  const nestedTemplate = tick + "nested " + interpolation + tick;
+  const cases = [
+    "const value = " + tick + "prefix " + interpolation + tick + "; // " + credentialSignature,
+    "const value = " + tick + "prefix " + interpolation + tick + "; /* " + credentialSignature + " */",
+    "const value = " + tick + "prefix ${" + nestedTemplate + "}" + tick + "; /* " + credentialSignature + " */",
+    "const value = " + tick + "prefix " + interpolation + tick + ";\nconst next = 1; // " + credentialSignature
+  ];
+
+  for (const source of cases) {
+    const result = classifyJavaScriptOrTypeScriptSource({ fileName: "review.js", source });
+    assert.equal(result.status, "complete");
+    assert.equal(hasFinding(result, "known_signature"), true);
+  }
+
+  const cleanControl = classifyJavaScriptOrTypeScriptSource({
+    fileName: "review.js",
+    source: "const value = " + tick + "prefix " + interpolation + tick + "; /* harmless note */"
+  });
+  assert.equal(cleanControl.status, "complete");
+  assert.equal(cleanControl.decision, "no_static_literal_findings");
+});
+
 test("SASC-04: sensitive fields distinguish literal values from dynamic calls and scan call arguments", () => {
   const dynamicSource = ["const settings = { token:", "crypto.randomUUID()", "};"].join(" ");
   assert.equal(classifySecretLikeContent(dynamicSource).signal, "known_signature");

@@ -701,7 +701,7 @@ test("RSM-09: secret-like preflight returns only sorted scope index and detector
 test("RSM-SYNTAX-01: host-selected AST policy separates identifiers only in the source-review manifest chain", async (t) => {
   const root = createWorkspace(t);
   const identifier = ["applyAuthorized", "ParallelIntegration", "RequestSchema"].join("");
-  const source = `export const ${identifier} = 1;\n`;
+  const source = `export const ${identifier} = 1;\nexport const settings = { label };\n`;
   fs.writeFileSync(path.join(root, "review.js"), source, "utf8");
 
   const defaultRuntime = createSyntaxAwareReviewRuntime(root, false);
@@ -722,11 +722,15 @@ test("RSM-SYNTAX-01: host-selected AST policy separates identifiers only in the 
 test("RSM-SYNTAX-02: selected AST policy blocks signatures, literals, dynamic values, malformed sources, and unsupported files before adapter execution", async (t) => {
   const root = createWorkspace(t);
   const credentialSignature = ["AKIA", "0".repeat(16)].join("");
+  const templateTick = String.fromCharCode(96);
+  const templateInterpolation = ["$", "{value}"].join("");
   const cases = [
     { path: "credential.js", source: `const ${credentialSignature} = 1;`, reason: "review_scope_syntax_review_required" },
     { path: "private-credential.js", source: `class Example { #${credentialSignature} = 1; }`, reason: "review_scope_syntax_review_required" },
     { path: "literal.js", source: `const value = ${JSON.stringify(credentialSignature)};`, reason: "review_scope_syntax_review_required" },
     { path: "dynamic.js", source: "const settings = { token: resolveToken() };", reason: "review_scope_syntax_review_required" },
+    { path: "shorthand.js", source: "const settings = { token };", reason: "review_scope_syntax_review_required" },
+    { path: "template-comment.js", source: "const value = " + templateTick + "prefix " + templateInterpolation + templateTick + "; /* " + credentialSignature + " */", reason: "review_scope_syntax_review_required" },
     { path: "malformed.js", source: "const = ;", reason: "review_scope_syntax_analysis_blocked" },
     { path: "node-limit.js", source: "a;".repeat(50001), reason: "review_scope_syntax_analysis_blocked" },
     { path: "unsupported.md", source: "ordinary source note", reason: "review_scope_syntax_analysis_blocked" }
@@ -737,6 +741,7 @@ test("RSM-SYNTAX-02: selected AST policy blocks signatures, literals, dynamic va
     const result = await selectedRuntime.runtime.run(createReviewRequest(root, [currentCase.path]));
     assert.equal(result.ok, false);
     assert.equal(result.reason, currentCase.reason);
+    assert.equal(result.error.includes(credentialSignature), false);
     assert.equal(result.metrics.adapterAttempts, 0);
   }
   const traversalResult = await selectedRuntime.runtime.run(createReviewRequest(root, ["../outside.js"]));

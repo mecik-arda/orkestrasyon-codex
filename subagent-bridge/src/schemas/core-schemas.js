@@ -224,7 +224,7 @@ export const attemptDiagnosticsSchema = z.object({
   outputLimitBytes: z.number().int().positive().optional(),
   outputBytesObserved: z.number().int().min(0).optional(),
   outputLimitStream: z.enum(["stdout", "stderr"]).optional(),
-  outputLimitScope: z.enum(["process", "jsonl_record", "final_result"]).optional(),
+  outputLimitScope: z.enum(["process", "jsonl_record", "final_result", "http_response_body"]).optional(),
   acceptedStdoutBytes: z.number().int().min(0).optional(),
   acceptedStderrBytes: z.number().int().min(0).optional(),
   rejectedChunkBytes: z.number().int().min(0).optional()

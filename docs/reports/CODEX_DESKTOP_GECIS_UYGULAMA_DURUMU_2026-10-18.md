@@ -1,8 +1,18 @@
 # Codex Desktop geçiş uygulama durumu
+## 2026-11-05 DeepSeek HTTP yanıt gövdesi sınırı
+
+DeepSeek doğrudan HTTP adapter'ı artık başarılı chat-completion ve `/models` yanıtlarını JSON ayrıştırmasından önce akış halinde kümülatif byte sayarak okur. Sert üst sınır, şemada en çok 8.388.608 byte ile sınırlanan `deepseek.maxOutputBytes` host ayarıdır; çağrı düzeyindeki daha dar bir sınır bunu yalnız azaltabilir. Ölçüm, Fetch'in uygulamaya sunduğu gövde byte'larıdır; sıkıştırılmış ağ aktarım boyutu değildir. Bu, API `max_tokens` tavanından, süreç adapter'larındaki stdout/stderr toplamından ve normalize edilmiş nihai görev sonucu sınırından ayrıdır.
+
+Sınır aşımı daha fazla gövde biriktirilmeden reader iptaliyle `output_limit` / `http_response_body` olarak, retry olmadan döner. Timeout ve kullanıcı cancellation gövde okumasını da keser; malformed UTF-8/JSON `output_parse_invalid` kalır. HTTP hata durumlarında gövde okunmadan iptal edilir. Usage bilinmiyorsa maliyet `null` kalır ve her reservation için en fazla bir settlement denenir. Sahte `Response`/`ReadableStream` testleri tek ve parçalı büyük chunk'ları, yanıltıcı/olmayan `Content-Length`, tam sınır, UTF-8 bölünmesi, parse/stream/abort, health `/models`, bütçe settlement'ı ve runtime'a `output_limit` aktarımını kapsar. Gerçek provider, health veya capability isteği yapılmadı.
+
+Bu yerel kod değişikliği canlı Hades tarafından yüklenmiş sayılmaz; Hades restart edilmedi. P2/P3/P4 işlevsel kabulleri ve Claude P1b'nin ertelenmiş başarısızlık kaydı değişmedi. Önceki Sol incelemesi bu yeni adapter değişikliğini kapsamaz; genel bağımsız inceleme açığı sürer.
+
 ## 2026-11-05 Yerel teslim ve kalan denetim
 
 Bu not önceki P4 kabul kaydını değiştirmez. P2/P3/P4 özgün plan kapsamındaki işlevsel kabuller tamamlanmıştır; P2 recovery kanıtı Windows ayrı süreçli üretim recovery testleridir, canlı Hades recovery olarak adlandırılmaz. Claude Sonnet 4.6 P1b görevi task_json_parse_invalid ile başarısız olmuş ve kullanıcı kararıyla ertelenmiştir. Son GPT-6.1-Sol incelemesi yalnız kendi 10 dosyalı snapshot’ı için geçerlidir. Üç sonraki düzeltme yerel test ve sentetik smoke/config doğrulamasından geçti, bağımsız follow-up incelemesi yapılmadı. Güncel doğal sekiz dosyalı kaynak kapsamı yerel preflight’ta engelli kaldı; teslim payload’ı oluşturulmadı, provider çağrısı yapılmadı. Son tam test 1.079/1.083, dört Windows koşullu atlama, sıfır başarısızlık ve 11,4 saniyelik zorunlu benchmark verdi. AST ayarı unset/kapalıdır. P6 durum belgeleri tutarlıdır; genel koşulsuz geçiş kapanışı bağımsız inceleme tamamlanmadığı için yapılmamıştır.
 
+
+Son doğrulama (2026-11-05): İzin yükseltilmiş standart kullanıcı TEMP/TMP koşulunda `npm test` 1.098 testte 1.094 başarı, dört Windows koşullu atlama ve sıfır başarısızlık verdi; zorunlu seri 5.000-not benchmark'ı 15,16 saniyede geçti. `npm run verify:ci`, varsayılan sentetik `npm run smoke`, sentetik config/agents ve geçici sentetik Vault ile `npm run verify`, hedefli DeepSeek/config/edit testleri, `node --check` ve `git diff --check` başarılıdır. Sentetik verify için Codex executable kontrolü Node sürüm komutuyla ikame edildi; bu gerçek Codex/Hades veya provider sağlığı kanıtı değildir. DeepSeek anahtarı bulunmadığından verify API'ye erişmedi; provider, inference, capability probe, canlı Hades ve gerçek Vault çağrısı yapılmadı. İlk sandbox içi tam test koşusu hard-link/worktree `EPERM` hataları üretti; izin yükseltilmiş koşuda aynı testler geçti.
 
 ## 2026-11-03 P4 nihai kabul uzlaştırması
 

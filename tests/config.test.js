@@ -164,6 +164,15 @@ test("DeepSeek API policy resmi endpoint ve bir dolar pilot tavanıyla sınırla
   assert.equal(validateConfiguration(overBudget).success, false);
 });
 
+test("DeepSeek HTTP yanıt gövdesi sınırı yürütme ve paralel görev tavanıyla eşleşir", () => {
+  const policy = JSON.parse(fs.readFileSync(path.resolve("config/policy.json"), "utf8"));
+  assert.equal(policy.deepseek.maxOutputBytes, 8388608);
+  assert.equal(policy.parallelBatch.maxOutputBytesPerTask, policy.deepseek.maxOutputBytes);
+  const oversized = JSON.parse(JSON.stringify(policy));
+  oversized.deepseek.maxOutputBytes = 8388609;
+  assert.equal(validateConfiguration(oversized).success, false);
+});
+
 test("DeepSeek Flash canonical API kimliğine bağlıdır ve OpenCode konfigürasyonu kaldırılmıştır", () => {
   const policy = JSON.parse(fs.readFileSync(path.resolve("config/policy.json"), "utf8"));
   assert.equal(policy.configVersion, 3);

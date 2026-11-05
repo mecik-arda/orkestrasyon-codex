@@ -38,6 +38,7 @@ function configuration(root) {
       priorUsageReservationUsd: 0.0000189,
       maxPromptBytes: 240000,
       maxOutputTokens: 2048,
+      maxOutputBytes: 32768,
       timeoutMs: 30000,
       deniedRootPaths: []
     },
@@ -68,6 +69,7 @@ test("DeepSeek yapılandırılmış edit pilotu yalnız disposable kopyayı değ
     executions += 1;
     assert.equal(request.mode, "edit");
     assert.equal(request.caller, "deepseek_edit_pilot");
+    assert.equal(request.maxOutputBytes, 32768);
     return createSuccessSubagentResult("deepseek", "deepseek-flash", {
       result: JSON.stringify({ status: "completed", summary: "Value updated", changes: [{ path: "src/value.txt", content: "after\n" }] }),
       durationMs: 1,

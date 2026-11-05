@@ -114,6 +114,7 @@ export function createDeepSeekRuntimeRequest(configuration, input, trustedWorksp
     reviewScope: input.reviewScope,
     delegationDepth: 0,
     timeoutMs: configuration.deepseek.timeoutMs,
+    maxOutputBytes: configuration.deepseek.maxOutputBytes,
     abortSignal,
     resultValidator: normalizeDeepSeekResult,
     schemaRepairPrompt: buildDeepSeekSchemaRepairPrompt(input, guidance),

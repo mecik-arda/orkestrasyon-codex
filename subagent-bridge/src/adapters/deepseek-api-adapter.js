@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { TextDecoder } from "node:util";
 import { createAdapter } from "./agent-adapter-base.js";
 import { createFailureSubagentResult, createSuccessSubagentResult } from "../schemas/core-schemas.js";
 
@@ -8,6 +9,79 @@ export const DEEPSEEK_PEAK_INPUT_PRICE_PER_MILLION = 0.3;
 export const DEEPSEEK_PEAK_OUTPUT_PRICE_PER_MILLION = 1.2;
 
 const activeRequests = new Map();
+const outputLimitCode = "DEEPSEEK_RESPONSE_BODY_LIMIT";
+
+function createOutputLimitError(limitBytes, observedBytes) {
+  const error = new Error("DeepSeek API response body exceeded the configured byte limit");
+  error.code = outputLimitCode;
+  error.outputLimitBytes = limitBytes;
+  error.outputBytesObserved = observedBytes;
+  return error;
+}
+
+function cancelResponseBody(response, reason) {
+  try {
+    const cancellation = response?.body?.cancel(reason);
+    if (cancellation && typeof cancellation.catch === "function") cancellation.catch(() => {});
+  } catch {
+  }
+}
+
+function cancelReader(reader, reason) {
+  try {
+    const cancellation = reader.cancel(reason);
+    if (cancellation && typeof cancellation.catch === "function") cancellation.catch(() => {});
+  } catch {
+  }
+}
+
+function readWithAbort(reader, signal) {
+  if (!signal) return reader.read();
+  if (signal.aborted) return Promise.reject(signal.reason || new Error("DeepSeek response read aborted"));
+  return new Promise((resolve, reject) => {
+    const finish = (callback, value) => {
+      signal.removeEventListener("abort", abort);
+      callback(value);
+    };
+    const abort = () => finish(reject, signal.reason || new Error("DeepSeek response read aborted"));
+    signal.addEventListener("abort", abort, { once: true });
+    reader.read().then((value) => finish(resolve, value), (error) => finish(reject, error));
+  });
+}
+
+async function readBoundedResponseBytes(response, maxOutputBytes, signal) {
+  const reader = response?.body?.getReader?.();
+  if (!reader) return Buffer.alloc(0);
+  const chunks = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const result = await readWithAbort(reader, signal);
+      if (result.done) break;
+      if (!(result.value instanceof Uint8Array)) throw new TypeError("DeepSeek response stream returned a non-byte chunk");
+      const chunkBytes = result.value.byteLength;
+      if (chunkBytes > maxOutputBytes - totalBytes) {
+        throw createOutputLimitError(maxOutputBytes, totalBytes + chunkBytes);
+      }
+      chunks.push(Buffer.from(result.value));
+      totalBytes += chunkBytes;
+    }
+    return Buffer.concat(chunks, totalBytes);
+  } catch (error) {
+    cancelReader(reader, error);
+    throw error;
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+    }
+  }
+}
+
+function parseJsonResponseBytes(bytes) {
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  return JSON.parse(text);
+}
 
 function calculatePeakCostUsd(promptBytes, outputTokens) {
   const reservedInputTokens = promptBytes * 4;
@@ -21,9 +95,9 @@ function calculateObservedPeakCostUsd(usage) {
   return (inputTokens * DEEPSEEK_PEAK_INPUT_PRICE_PER_MILLION + outputTokens * DEEPSEEK_PEAK_OUTPUT_PRICE_PER_MILLION) / 1000000;
 }
 
-function createDiagnostics(providerCode, providerExecutionMs) {
+function createDiagnostics(providerCode, providerExecutionMs, failureStage = "provider_execution") {
   return {
-    failureStage: "provider_execution",
+    failureStage,
     providerCode,
     settingsLockWaitMs: null,
     providerExecutionMs,
@@ -68,6 +142,7 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
   const baseUrl = configuration.deepseek.apiBaseUrl;
   const maxPromptBytes = configuration.deepseek.maxPromptBytes;
   const maxOutputTokens = configuration.deepseek.maxOutputTokens;
+  const configuredMaxOutputBytes = configuration.deepseek.maxOutputBytes;
   const timeoutMs = configuration.deepseek.timeoutMs;
   const adapter = createAdapter("deepseek", {
     canRead: true,
@@ -114,6 +189,17 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
           exitCode: 1
         });
       }
+      const requestedMaxOutputBytes = request.maxOutputBytes ?? configuredMaxOutputBytes;
+      if (!Number.isSafeInteger(configuredMaxOutputBytes) || configuredMaxOutputBytes <= 0 || configuredMaxOutputBytes > 8388608
+        || !Number.isSafeInteger(requestedMaxOutputBytes) || requestedMaxOutputBytes <= 0) {
+        return createFailureSubagentResult("deepseek", model, {
+          error: "DeepSeek API response byte limit is unavailable",
+          reason: "unclassified",
+          durationMs: 0,
+          exitCode: 1
+        });
+      }
+      const maxResponseBodyBytes = Math.min(configuredMaxOutputBytes, requestedMaxOutputBytes);
       const prompt = request.reviewSourcePayload ? `${request.prompt}\n\n${request.reviewSourcePayload}` : request.prompt;
       const body = {
         model,
@@ -156,6 +242,16 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
       const startedAt = Date.now();
       const handle = {};
       const controller = createController({ ...request, timeoutMs: Math.min(request.timeoutMs || timeoutMs, timeoutMs) }, handle);
+      let settlementAttempted = false;
+      const settleReservation = async (actualCostUsd) => {
+        if (settlementAttempted) return { settled: false, overBudget: false };
+        settlementAttempted = true;
+        try {
+          return await budget.settle(reservation.reservationId, actualCostUsd);
+        } catch {
+          return { settled: false, overBudget: false };
+        }
+      };
       try {
         const response = await fetchImplementation(`${baseUrl}/chat/completions`, {
           method: "POST",
@@ -168,7 +264,8 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
         });
         if (!response.ok) {
           const failure = failureReason(response.status);
-          await budget.settle(reservation.reservationId, null);
+          cancelResponseBody(response);
+          await settleReservation(null);
           return createFailureSubagentResult("deepseek", model, {
             error: "DeepSeek API returned an unsuccessful response",
             reason: failure.reason,
@@ -183,12 +280,46 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
             }
           });
         }
-        const payload = await response.json();
+        const responseBytes = await readBoundedResponseBytes(response, maxResponseBodyBytes, controller.signal);
+        let payload;
+        try {
+          payload = parseJsonResponseBytes(responseBytes);
+        } catch {
+          await settleReservation(null);
+          return createFailureSubagentResult("deepseek", model, {
+            error: "DeepSeek API response body was not valid UTF-8 JSON",
+            reason: "output_parse_invalid",
+            retryable: false,
+            timedOut: false,
+            exitCode: 1,
+            durationMs: Date.now() - startedAt,
+            metrics: {
+              totalCostUsd: null,
+              reservedCostUsd: reservation.reservedUsd,
+              diagnostics: createDiagnostics("unclassified", Date.now() - startedAt, "result_parse")
+            }
+          });
+        }
         const choice = payload?.choices?.[0];
         const content = choice?.message?.content;
         const usage = payload?.usage;
         const observedCostUsd = calculateObservedPeakCostUsd(usage || {});
-        const settled = await budget.settle(reservation.reservationId, observedCostUsd);
+        const settled = await settleReservation(observedCostUsd);
+        if (settled?.settled !== true && settled?.overBudget !== true) {
+          return createFailureSubagentResult("deepseek", model, {
+            error: "DeepSeek API usage could not be committed to the pilot budget",
+            reason: "budget_state_unavailable",
+            retryable: false,
+            timedOut: false,
+            exitCode: 1,
+            durationMs: Date.now() - startedAt,
+            metrics: {
+              totalCostUsd: observedCostUsd,
+              reservedCostUsd: reservation.reservedUsd,
+              usage: observedCostUsd === null ? null : { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens }
+            }
+          });
+        }
         if (payload?.model !== model || choice?.finish_reason !== "stop" || typeof content !== "string" || observedCostUsd === null || settled?.overBudget === true) {
           return createFailureSubagentResult("deepseek", model, {
             error: "DeepSeek API response failed model, completion, usage or budget validation",
@@ -215,16 +346,29 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
           }
         });
       } catch (error) {
-        await budget.settle(reservation.reservationId, null);
+        await settleReservation(null);
         const timedOut = controller.signal.aborted && !request.abortSignal?.aborted;
+        const cancelled = request.abortSignal?.aborted === true;
+        const outputLimited = error?.code === outputLimitCode;
         return createFailureSubagentResult("deepseek", model, {
-          error: timedOut ? "DeepSeek API request timed out" : request.abortSignal?.aborted ? "execution cancelled" : "DeepSeek API request failed",
-          reason: timedOut ? "timeout" : request.abortSignal?.aborted ? "cancelled" : "network",
-          retryable: timedOut || !request.abortSignal?.aborted,
+          error: outputLimited ? "DeepSeek API response body exceeded the configured byte limit" : timedOut ? "DeepSeek API request timed out" : cancelled ? "execution cancelled" : "DeepSeek API request failed",
+          reason: outputLimited ? "output_limit" : timedOut ? "timeout" : cancelled ? "cancelled" : "network",
+          retryable: outputLimited ? false : timedOut || !cancelled,
           timedOut,
           exitCode: null,
           durationMs: Date.now() - startedAt,
-          metrics: { totalCostUsd: null, reservedCostUsd: reservation.reservedUsd, diagnostics: createDiagnostics(timedOut ? "timeout" : "network_error", Date.now() - startedAt) }
+          metrics: {
+            totalCostUsd: null,
+            reservedCostUsd: reservation.reservedUsd,
+            diagnostics: {
+              ...createDiagnostics(outputLimited ? "output_limit" : timedOut ? "timeout" : cancelled ? "unclassified" : "network_error", Date.now() - startedAt),
+              ...(outputLimited ? {
+                outputLimitBytes: error.outputLimitBytes,
+                outputBytesObserved: error.outputBytesObserved,
+                outputLimitScope: "http_response_body"
+              } : {})
+            }
+          }
         });
       } finally {
         handle.release();
@@ -244,22 +388,32 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
 export async function checkDeepSeekApi(configuration, fetchImplementation = globalThis.fetch) {
   const apiKey = process.env.DEEPSEEK_API_KEY;
   const model = configuration.deepseek.apiModel;
+  const maxOutputBytes = configuration.deepseek.maxOutputBytes;
   if (typeof apiKey !== "string" || apiKey.length === 0) {
     return { available: false, authenticated: false, model, modelAvailable: false, exitCode: 1 };
   }
+  if (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0 || maxOutputBytes > 8388608) {
+    return { available: false, authenticated: true, model, modelAvailable: false, exitCode: 1 };
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
+  let response;
   try {
-    const response = await fetchImplementation(`${configuration.deepseek.apiBaseUrl}/models`, {
+    response = await fetchImplementation(`${configuration.deepseek.apiBaseUrl}/models`, {
       method: "GET",
       headers: { authorization: `Bearer ${apiKey}` },
       signal: controller.signal
     });
-    if (!response.ok) return { available: false, authenticated: response.status !== 401, model, modelAvailable: false, exitCode: response.status };
-    const payload = await response.json();
+    if (!response.ok) {
+      cancelResponseBody(response);
+      return { available: false, authenticated: response.status !== 401, model, modelAvailable: false, exitCode: response.status };
+    }
+    const responseBytes = await readBoundedResponseBytes(response, maxOutputBytes, controller.signal);
+    const payload = parseJsonResponseBytes(responseBytes);
     const modelAvailable = Array.isArray(payload?.data) && payload.data.some((entry) => entry?.id === model);
     return { available: modelAvailable, authenticated: true, model, modelAvailable, exitCode: modelAvailable ? 0 : 1 };
   } catch {
+    cancelResponseBody(response);
     return { available: false, authenticated: null, model, modelAvailable: false, exitCode: 1 };
   } finally {
     clearTimeout(timeout);

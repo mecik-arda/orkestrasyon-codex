@@ -117,7 +117,7 @@ const configurationSchema = z.object({
     workspaceTools: z.array(z.string().min(1)),
     researchTools: z.array(z.string().min(1)),
     timeoutMs: z.number().int().positive(),
-    maxOutputBytes: z.number().int().positive(),
+    maxOutputBytes: z.number().int().positive().max(8388608),
     requireGitRepository: z.boolean(),
     deniedRoots: z.array(z.string().min(1))
   }).strict(),

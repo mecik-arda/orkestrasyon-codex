@@ -56,7 +56,7 @@ export function createProcessFailureDiagnostics(error, overrides = {}) {
   const outputLimitBytes = Number.isSafeInteger(overrides.outputLimitBytes) ? overrides.outputLimitBytes : error?.outputLimitBytes;
   const outputBytesObserved = Number.isSafeInteger(overrides.outputBytesObserved) ? overrides.outputBytesObserved : error?.outputBytesObserved;
   const outputLimitStream = ["stdout", "stderr"].includes(overrides.outputLimitStream) ? overrides.outputLimitStream : error?.outputLimitStream;
-  const outputLimitScope = ["process", "jsonl_record", "final_result"].includes(overrides.outputLimitScope) ? overrides.outputLimitScope : error?.outputLimitScope;
+  const outputLimitScope = ["process", "jsonl_record", "final_result", "http_response_body"].includes(overrides.outputLimitScope) ? overrides.outputLimitScope : error?.outputLimitScope;
   const acceptedStdoutBytes = Number.isSafeInteger(overrides.acceptedStdoutBytes) ? overrides.acceptedStdoutBytes : error?.acceptedStdoutBytes;
   const acceptedStderrBytes = Number.isSafeInteger(overrides.acceptedStderrBytes) ? overrides.acceptedStderrBytes : error?.acceptedStderrBytes;
   const rejectedChunkBytes = Number.isSafeInteger(overrides.rejectedChunkBytes) ? overrides.rejectedChunkBytes : error?.rejectedChunkBytes;
@@ -72,7 +72,7 @@ export function createProcessFailureDiagnostics(error, overrides = {}) {
     ...(Number.isSafeInteger(outputLimitBytes) && outputLimitBytes > 0 ? { outputLimitBytes } : {}),
     ...(Number.isSafeInteger(outputBytesObserved) && outputBytesObserved >= 0 ? { outputBytesObserved } : {}),
     ...(["stdout", "stderr"].includes(outputLimitStream) ? { outputLimitStream } : {}),
-    ...(["process", "jsonl_record", "final_result"].includes(outputLimitScope) ? { outputLimitScope } : {}),
+    ...(["process", "jsonl_record", "final_result", "http_response_body"].includes(outputLimitScope) ? { outputLimitScope } : {}),
     ...(Number.isSafeInteger(acceptedStdoutBytes) && acceptedStdoutBytes >= 0 ? { acceptedStdoutBytes } : {}),
     ...(Number.isSafeInteger(acceptedStderrBytes) && acceptedStderrBytes >= 0 ? { acceptedStderrBytes } : {}),
     ...(Number.isSafeInteger(rejectedChunkBytes) && rejectedChunkBytes >= 0 ? { rejectedChunkBytes } : {})

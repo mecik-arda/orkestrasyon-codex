@@ -354,7 +354,7 @@ function createFailureDiagnostics(result) {
     ...(Number.isSafeInteger(existing.outputLimitBytes) && existing.outputLimitBytes > 0 ? { outputLimitBytes: existing.outputLimitBytes } : {}),
     ...(Number.isSafeInteger(existing.outputBytesObserved) && existing.outputBytesObserved >= 0 ? { outputBytesObserved: existing.outputBytesObserved } : {}),
     ...(["stdout", "stderr"].includes(existing.outputLimitStream) ? { outputLimitStream: existing.outputLimitStream } : {}),
-    ...(["process", "jsonl_record", "final_result"].includes(existing.outputLimitScope) ? { outputLimitScope: existing.outputLimitScope } : {}),
+    ...(["process", "jsonl_record", "final_result", "http_response_body"].includes(existing.outputLimitScope) ? { outputLimitScope: existing.outputLimitScope } : {}),
     ...(Number.isSafeInteger(existing.acceptedStdoutBytes) && existing.acceptedStdoutBytes >= 0 ? { acceptedStdoutBytes: existing.acceptedStdoutBytes } : {}),
     ...(Number.isSafeInteger(existing.acceptedStderrBytes) && existing.acceptedStderrBytes >= 0 ? { acceptedStderrBytes: existing.acceptedStderrBytes } : {}),
     ...(Number.isSafeInteger(existing.rejectedChunkBytes) && existing.rejectedChunkBytes >= 0 ? { rejectedChunkBytes: existing.rejectedChunkBytes } : {})
@@ -387,7 +387,7 @@ function withProviderAdmissionLease(result, leaseMs) {
   if (Number.isSafeInteger(source.outputLimitBytes) && source.outputLimitBytes > 0) diagnostics.outputLimitBytes = source.outputLimitBytes;
   if (Number.isSafeInteger(source.outputBytesObserved) && source.outputBytesObserved >= 0) diagnostics.outputBytesObserved = source.outputBytesObserved;
   if (["stdout", "stderr"].includes(source.outputLimitStream)) diagnostics.outputLimitStream = source.outputLimitStream;
-  if (["process", "jsonl_record", "final_result"].includes(source.outputLimitScope)) diagnostics.outputLimitScope = source.outputLimitScope;
+  if (["process", "jsonl_record", "final_result", "http_response_body"].includes(source.outputLimitScope)) diagnostics.outputLimitScope = source.outputLimitScope;
   if (Number.isSafeInteger(source.acceptedStdoutBytes) && source.acceptedStdoutBytes >= 0) diagnostics.acceptedStdoutBytes = source.acceptedStdoutBytes;
   if (Number.isSafeInteger(source.acceptedStderrBytes) && source.acceptedStderrBytes >= 0) diagnostics.acceptedStderrBytes = source.acceptedStderrBytes;
   if (Number.isSafeInteger(source.rejectedChunkBytes) && source.rejectedChunkBytes >= 0) diagnostics.rejectedChunkBytes = source.rejectedChunkBytes;
@@ -1604,6 +1604,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
         delegationDepth: 0,
         timeoutMs: input.timeout_seconds ? input.timeout_seconds * 1000 : runtimeConfiguration.deepseek.timeoutMs,
         maxOutputTokens: runtimeConfiguration.deepseek.maxOutputTokens,
+        maxOutputBytes: runtimeConfiguration.deepseek.maxOutputBytes,
         abortSignal
       });
       if (!runtimeResult.ok) {

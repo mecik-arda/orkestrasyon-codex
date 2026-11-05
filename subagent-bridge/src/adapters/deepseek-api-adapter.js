@@ -8,7 +8,6 @@ export const DEEPSEEK_API_BASE_URL = "https://api.deepseek.com";
 export const DEEPSEEK_PEAK_INPUT_PRICE_PER_MILLION = 0.3;
 export const DEEPSEEK_PEAK_OUTPUT_PRICE_PER_MILLION = 1.2;
 
-const activeRequests = new Map();
 const outputLimitCode = "DEEPSEEK_RESPONSE_BODY_LIMIT";
 
 function createOutputLimitError(limitBytes, observedBytes) {
@@ -118,18 +117,42 @@ function failureReason(status) {
   return { reason: "invalid_model", retryable: false, providerCode: "unclassified" };
 }
 
-function createController(request, handle) {
+function createController(request, activeRequests) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new Error("DeepSeek request timed out")), request.timeoutMs);
-  const abort = () => controller.abort(request.abortSignal?.reason);
-  request.abortSignal?.addEventListener("abort", abort, { once: true });
-  activeRequests.set(request.executionId, { controller, timeout, abortSignal: request.abortSignal, abort });
-  handle.release = () => {
-    clearTimeout(timeout);
-    request.abortSignal?.removeEventListener("abort", abort);
-    activeRequests.delete(request.executionId);
+  const handle = {
+    controller,
+    timeout: null,
+    abortSignal: request.abortSignal,
+    abort: null,
+    abortKind: null
   };
-  return controller;
+  const abort = (kind, reason) => {
+    if (controller.signal.aborted) return false;
+    handle.abortKind = kind;
+    controller.abort(reason);
+    return true;
+  };
+  handle.abort = () => abort("cancelled", request.abortSignal?.reason || new Error("DeepSeek request cancelled"));
+  request.abortSignal?.addEventListener("abort", handle.abort, { once: true });
+  activeRequests.set(request.executionId, handle);
+  handle.stopTimeout = () => {
+    if (handle.timeout) clearTimeout(handle.timeout);
+    handle.timeout = null;
+  };
+  handle.startTimeout = (timeoutMs) => {
+    if (controller.signal.aborted) return;
+    handle.timeout = setTimeout(() => abort("timeout", new Error("DeepSeek request timed out")), timeoutMs);
+  };
+  handle.cancel = () => {
+    handle.stopTimeout();
+    return abort("cancelled", new Error("DeepSeek request cancelled"));
+  };
+  handle.release = () => {
+    handle.stopTimeout();
+    request.abortSignal?.removeEventListener("abort", handle.abort);
+    if (activeRequests.get(request.executionId) === handle) activeRequests.delete(request.executionId);
+  };
+  return handle;
 }
 
 export function createDeepSeekApiAdapter(configuration, options = {}) {
@@ -144,6 +167,7 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
   const maxOutputTokens = configuration.deepseek.maxOutputTokens;
   const configuredMaxOutputBytes = configuration.deepseek.maxOutputBytes;
   const timeoutMs = configuration.deepseek.timeoutMs;
+  const activeRequests = new Map();
   const adapter = createAdapter("deepseek", {
     canRead: true,
     canWrite: true,
@@ -224,24 +248,29 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
         });
       }
       const reservedUsd = calculatePeakCostUsd(promptBytes, body.max_tokens);
-      let reservation;
-      try {
-        reservation = await budget.reserve(request.executionId, reservedUsd);
-      } catch {
-        reservation = { allowed: false, reason: "budget_state_unavailable" };
-      }
-      if (reservation?.allowed !== true) {
+      const startedAt = Date.now();
+      const cancellationResult = (reservedCostUsd, totalCostUsd = reservedCostUsd === 0 ? 0 : null, usage = null) => createFailureSubagentResult("deepseek", model, {
+        error: "DeepSeek API request was cancelled",
+        reason: "cancelled",
+        retryable: false,
+        timedOut: false,
+        exitCode: null,
+        durationMs: Date.now() - startedAt,
+        metrics: { totalCostUsd, reservedCostUsd, ...(usage ? { usage } : {}) }
+      });
+      if (request.abortSignal?.aborted) return cancellationResult(0);
+      if (activeRequests.has(request.executionId)) {
         return createFailureSubagentResult("deepseek", model, {
-          error: "DeepSeek pilot budget admission rejected the request",
-          reason: reservation?.reason || "budget_exhausted",
+          error: "DeepSeek API execution ID is already active",
+          reason: "duplicate_execution_id",
           durationMs: 0,
           exitCode: 1,
           metrics: { totalCostUsd: 0, reservedCostUsd: 0 }
         });
       }
-      const startedAt = Date.now();
-      const handle = {};
-      const controller = createController({ ...request, timeoutMs: Math.min(request.timeoutMs || timeoutMs, timeoutMs) }, handle);
+      const handle = createController(request, activeRequests);
+      const controller = handle.controller;
+      let reservation;
       let settlementAttempted = false;
       const settleReservation = async (actualCostUsd) => {
         if (settlementAttempted) return { settled: false, overBudget: false };
@@ -253,6 +282,29 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
         }
       };
       try {
+        try {
+          reservation = await budget.reserve(request.executionId, reservedUsd);
+        } catch {
+          reservation = { allowed: false, reason: "budget_state_unavailable" };
+        }
+        if (handle.abortKind === "cancelled") {
+          if (reservation?.allowed === true) await settleReservation(null);
+          return cancellationResult(reservation?.allowed === true ? reservation.reservedUsd : 0);
+        }
+        if (reservation?.allowed !== true) {
+          return createFailureSubagentResult("deepseek", model, {
+            error: "DeepSeek pilot budget admission rejected the request",
+            reason: reservation?.reason || "budget_exhausted",
+            durationMs: Date.now() - startedAt,
+            exitCode: 1,
+            metrics: { totalCostUsd: 0, reservedCostUsd: 0 }
+          });
+        }
+        handle.startTimeout(Math.min(request.timeoutMs || timeoutMs, timeoutMs));
+        if (handle.abortKind === "cancelled") {
+          await settleReservation(null);
+          return cancellationResult(reservation.reservedUsd);
+        }
         const response = await fetchImplementation(`${baseUrl}/chat/completions`, {
           method: "POST",
           headers: {
@@ -264,8 +316,10 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
         });
         if (!response.ok) {
           const failure = failureReason(response.status);
+          handle.stopTimeout();
           cancelResponseBody(response);
           await settleReservation(null);
+          if (handle.abortKind === "cancelled") return cancellationResult(reservation.reservedUsd);
           return createFailureSubagentResult("deepseek", model, {
             error: "DeepSeek API returned an unsuccessful response",
             reason: failure.reason,
@@ -281,11 +335,13 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
           });
         }
         const responseBytes = await readBoundedResponseBytes(response, maxResponseBodyBytes, controller.signal);
+        handle.stopTimeout();
         let payload;
         try {
           payload = parseJsonResponseBytes(responseBytes);
         } catch {
           await settleReservation(null);
+          if (handle.abortKind === "cancelled") return cancellationResult(reservation.reservedUsd);
           return createFailureSubagentResult("deepseek", model, {
             error: "DeepSeek API response body was not valid UTF-8 JSON",
             reason: "output_parse_invalid",
@@ -320,6 +376,9 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
             }
           });
         }
+        if (handle.abortKind === "cancelled") {
+          return cancellationResult(reservation.reservedUsd, observedCostUsd, { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens });
+        }
         if (payload?.model !== model || choice?.finish_reason !== "stop" || typeof content !== "string" || observedCostUsd === null || settled?.overBudget === true) {
           return createFailureSubagentResult("deepseek", model, {
             error: "DeepSeek API response failed model, completion, usage or budget validation",
@@ -346,9 +405,9 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
           }
         });
       } catch (error) {
-        await settleReservation(null);
-        const timedOut = controller.signal.aborted && !request.abortSignal?.aborted;
-        const cancelled = request.abortSignal?.aborted === true;
+        if (reservation?.allowed === true) await settleReservation(null);
+        const timedOut = handle.abortKind === "timeout";
+        const cancelled = handle.abortKind === "cancelled";
         const outputLimited = error?.code === outputLimitCode;
         return createFailureSubagentResult("deepseek", model, {
           error: outputLimited ? "DeepSeek API response body exceeded the configured byte limit" : timedOut ? "DeepSeek API request timed out" : cancelled ? "execution cancelled" : "DeepSeek API request failed",
@@ -377,10 +436,7 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
     async cancel(executionId) {
       const handle = activeRequests.get(executionId);
       if (!handle) return;
-      clearTimeout(handle.timeout);
-      handle.abortSignal?.removeEventListener("abort", handle.abort);
-      handle.controller.abort();
-      activeRequests.delete(executionId);
+      handle.cancel();
     }
   };
 }

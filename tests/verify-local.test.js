@@ -94,6 +94,54 @@ async function waitForTreeMarkers(command) {
   return { parentPid, descendantPid };
 }
 
+function createSnapshotGitRepository(context, files, prefix = "verify-local-snapshot-") {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  execFileSync("git", ["init", "-q", root]);
+  execFileSync("git", ["-C", root, "config", "user.email", "verify-local@example.invalid"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "Verify Local Test"]);
+  execFileSync("git", ["-C", root, "config", "core.autocrlf", "false"]);
+  for (const [relativePath, contents] of Object.entries(files)) {
+    const targetPath = path.join(root, ...relativePath.split("/"));
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.writeFileSync(targetPath, contents);
+  }
+  execFileSync("git", ["-C", root, "add", "--all"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "snapshot fixture"]);
+  return root;
+}
+
+async function captureWithStreamHook(root, targetPath, signal, hook) {
+  const originalOpen = fs.promises.open;
+  let hooked = false;
+  let openedHandle = null;
+  fs.promises.open = async function (filePath, ...argumentsList) {
+    const handle = await originalOpen.call(fs.promises, filePath, ...argumentsList);
+    if (path.resolve(filePath).toLocaleLowerCase("en-US") === path.resolve(targetPath).toLocaleLowerCase("en-US")) {
+      openedHandle = handle;
+      const originalCreateReadStream = handle.createReadStream.bind(handle);
+      handle.createReadStream = (...streamArguments) => {
+        const stream = originalCreateReadStream(...streamArguments);
+        stream.once("data", () => {
+          hooked = true;
+          hook({ stream, handle });
+        });
+        return stream;
+      };
+    }
+    return handle;
+  };
+  try {
+    try {
+      return { result: await captureSourceSnapshot(root, signal), error: null, hooked: () => hooked, openedHandle: () => openedHandle };
+    } catch (error) {
+      return { result: null, error, hooked: () => hooked, openedHandle: () => openedHandle };
+    }
+  } finally {
+    fs.promises.open = originalOpen;
+  }
+}
+
 test("VERIFY-LOCAL-01: aşamalar statik kontrol, tam test, benchmark, smoke ve verify sırasındadır", () => {
   const stages = buildVerificationStagePlan(projectRoot);
   assert.deepEqual(stages.map((stage) => stage.id), ["verify-ci", "test-suite", "test-benchmark", "smoke", "verify"]);
@@ -254,6 +302,206 @@ test("VERIFY-LOCAL-06: Git kaynak snapshot'ı kirli dosya ve untracked dosya de�
   assert.equal(dirty.workingTreeClean, false);
   assert.equal(dirty.untrackedFileCount, 1);
   assert.notEqual(dirty.snapshotSha256, clean.snapshotSha256);
+});
+
+test("VERIFY-LOCAL-06A: ara dizin junction veya symlink dış hedefe izlenmez", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "nested/source.txt": "inside\n" });
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verify-local-outside-"));
+  context.after(() => fs.rmSync(outsideRoot, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outsideRoot, "source.txt"), "outside synthetic source\n");
+  fs.rmSync(path.join(root, "nested"), { recursive: true, force: true });
+  try {
+    fs.symlinkSync(outsideRoot, path.join(root, "nested"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP"].includes(error.code)) {
+      context.skip("directory junction or symlink creation is unavailable");
+      return;
+    }
+    throw error;
+  }
+  await assert.rejects(captureSourceSnapshot(root), { code: "source_path_link_unsupported" });
+});
+
+test("VERIFY-LOCAL-06B: yaprak symlink hedef içeriğini değil yalnız link metaverisini kapsar", { timeout: 30000 }, async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-local-link-leaf-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verify-local-link-target-"));
+  context.after(() => fs.rmSync(outsideRoot, { recursive: true, force: true }));
+  const externalTarget = path.join(outsideRoot, "target.txt");
+  fs.writeFileSync(externalTarget, "first external content\n");
+  fs.symlinkSync(externalTarget, path.join(root, "link.txt"), "file");
+  execFileSync("git", ["init", "-q", root]);
+  execFileSync("git", ["-C", root, "config", "user.email", "verify-local@example.invalid"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "Verify Local Test"]);
+  execFileSync("git", ["-C", root, "add", "link.txt"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "symlink fixture"]);
+  const before = await captureSourceSnapshot(root);
+  fs.writeFileSync(externalTarget, "second external content with a different size\n");
+  const after = await captureSourceSnapshot(root);
+  assert.equal(after.snapshotSha256, before.snapshotSha256);
+  assert.equal(after.totalBytes, Buffer.byteLength(externalTarget));
+});
+
+test("VERIFY-LOCAL-06C: descriptor kimliği ilk path kontrolünden sonraki aynı içerikli dosya değişimini yakalar", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.txt": "same bytes\n" });
+  const targetPath = path.join(root, "source.txt");
+  const displacedPath = path.join(root, "source.displaced");
+  const replacementPath = path.join(root, "source.replacement");
+  const originalOpen = fs.promises.open;
+  let replaced = false;
+  fs.promises.open = async function (filePath, ...argumentsList) {
+    if (!replaced && path.resolve(filePath).toLocaleLowerCase("en-US") === targetPath.toLocaleLowerCase("en-US")) {
+      replaced = true;
+      fs.renameSync(targetPath, displacedPath);
+      fs.writeFileSync(replacementPath, "same bytes\n");
+      fs.renameSync(replacementPath, targetPath);
+    }
+    return originalOpen.call(fs.promises, filePath, ...argumentsList);
+  };
+  try {
+    await assert.rejects(captureSourceSnapshot(root), { code: "source_snapshot_unstable" });
+  } finally {
+    fs.promises.open = originalOpen;
+  }
+  assert.equal(replaced, true);
+});
+
+test("VERIFY-LOCAL-06D: truncate, büyüme veya rename descriptor okumasını kararsız yapar", { timeout: 30000 }, async (context) => {
+  for (const mutation of ["truncate", "grow", "rename"]) {
+    const prefix = "verify-local-read-" + mutation + "-";
+    const root = createSnapshotGitRepository(context, { "source.bin": Buffer.alloc(2 * 1024 * 1024, 7) }, prefix);
+    const targetPath = path.join(root, "source.bin");
+    const outcome = await captureWithStreamHook(root, targetPath, null, () => {
+      if (mutation === "truncate") fs.truncateSync(targetPath, 0);
+      else if (mutation === "grow") fs.appendFileSync(targetPath, Buffer.alloc(64 * 1024, 9));
+      else fs.renameSync(targetPath, path.join(root, "source.renamed"));
+    });
+    assert.equal(outcome.hooked(), true);
+    assert.equal(outcome.error?.code, "source_snapshot_unstable");
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("VERIFY-LOCAL-06E: okuma ortasında cancellation akışı durdurur ve descriptor'ı kapatır", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.bin": Buffer.alloc(2 * 1024 * 1024, 7) });
+  const controller = new AbortController();
+  const outcome = await captureWithStreamHook(root, path.join(root, "source.bin"), controller.signal, () => controller.abort());
+  assert.equal(outcome.hooked(), true);
+  assert.equal(outcome.error?.code, "cancelled");
+  const handle = outcome.openedHandle();
+  assert.ok(handle);
+  await assert.rejects(handle.stat());
+});
+
+test("VERIFY-LOCAL-06E1: stream hatası ile cancellation çakışınca iptal sonucu korunur", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.bin": Buffer.alloc(2 * 1024 * 1024, 7) });
+  const controller = new AbortController();
+  const outcome = await captureWithStreamHook(root, path.join(root, "source.bin"), controller.signal, ({ stream }) => {
+    stream.destroy(Object.assign(new Error("synthetic stream failure"), { code: "EIO" }));
+    controller.abort();
+  });
+  assert.equal(outcome.hooked(), true);
+  assert.equal(outcome.error?.code, "cancelled");
+  await assert.rejects(outcome.openedHandle().stat());
+});
+
+test("VERIFY-LOCAL-06F: pre-abort dosya descriptor'ı açmaz", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.txt": "fixture\n" });
+  const controller = new AbortController();
+  controller.abort();
+  let openCount = 0;
+  const originalOpen = fs.promises.open;
+  fs.promises.open = async function (...argumentsList) {
+    openCount += 1;
+    return originalOpen.apply(fs.promises, argumentsList);
+  };
+  try {
+    await assert.rejects(captureSourceSnapshot(root, controller.signal), { code: "cancelled" });
+  } finally {
+    fs.promises.open = originalOpen;
+  }
+  assert.equal(openCount, 0);
+});
+
+test("VERIFY-LOCAL-06G: snapshot sırasında yalnız Git index'i değişirse sonuç kararsızdır", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.bin": Buffer.alloc(2 * 1024 * 1024, 7) });
+  const targetPath = path.join(root, "source.bin");
+  const outcome = await captureWithStreamHook(root, targetPath, null, () => {
+    execFileSync("git", ["-C", root, "update-index", "--assume-unchanged", "source.bin"]);
+  });
+  assert.equal(outcome.hooked(), true);
+  assert.equal(outcome.error?.code, "source_snapshot_unstable");
+});
+
+test("VERIFY-LOCAL-06H: snapshot sonundaki Git yol kümesi değişikliği reddedilir", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.bin": Buffer.alloc(2 * 1024 * 1024, 7) });
+  const targetPath = path.join(root, "source.bin");
+  const outcome = await captureWithStreamHook(root, targetPath, null, () => {
+    fs.writeFileSync(path.join(root, "late-untracked.txt"), "late source\n");
+  });
+  assert.equal(outcome.hooked(), true);
+  assert.equal(outcome.error?.code, "source_snapshot_unstable");
+});
+
+test("VERIFY-LOCAL-06H1: hash tamamlandıktan sonra dosya değişirse bitiş doğrulaması reddeder", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.txt": "before\n" });
+  const targetPath = path.join(root, "source.txt");
+  const originalOpen = fs.promises.open;
+  let changed = false;
+  fs.promises.open = async function (filePath, ...argumentsList) {
+    const handle = await originalOpen.call(fs.promises, filePath, ...argumentsList);
+    if (!changed && path.resolve(filePath).toLocaleLowerCase("en-US") === targetPath.toLocaleLowerCase("en-US")) {
+      const originalClose = handle.close.bind(handle);
+      handle.close = async () => {
+        await originalClose();
+        if (!changed) {
+          changed = true;
+          fs.writeFileSync(targetPath, "after!\n");
+        }
+      };
+    }
+    return handle;
+  };
+  try {
+    await assert.rejects(captureSourceSnapshot(root), { code: "source_snapshot_unstable" });
+  } finally {
+    fs.promises.open = originalOpen;
+  }
+  assert.equal(changed, true);
+});
+
+test("VERIFY-LOCAL-06H2: okuma sırasında ara dizin junction değişimi fail-closed sonuçlanır", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "nested/source.bin": Buffer.alloc(2 * 1024 * 1024, 7) });
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verify-local-parent-swap-"));
+  context.after(() => fs.rmSync(outsideRoot, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(outsideRoot, "source.bin"), "outside synthetic source\n");
+  const nestedPath = path.join(root, "nested");
+  const displacedPath = path.join(root, "nested.displaced");
+  const targetPath = path.join(nestedPath, "source.bin");
+  const outcome = await captureWithStreamHook(root, targetPath, null, () => {
+    fs.renameSync(nestedPath, displacedPath);
+    fs.symlinkSync(outsideRoot, nestedPath, process.platform === "win32" ? "junction" : "dir");
+  });
+  assert.equal(outcome.hooked(), true);
+  assert.ok(["source_snapshot_unstable", "source_entry_unreadable", "source_path_link_unsupported"].includes(outcome.error?.code));
+});
+
+test("VERIFY-LOCAL-06I: hard link repo yolunu başka yere yöneltmez ve içeriği snapshot'a dahil eder", { timeout: 30000 }, async (context) => {
+  const root = createSnapshotGitRepository(context, { "source.txt": "linked source\n" });
+  const outsideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verify-local-hard-link-"));
+  context.after(() => fs.rmSync(outsideRoot, { recursive: true, force: true }));
+  try {
+    fs.linkSync(path.join(root, "source.txt"), path.join(outsideRoot, "outside-link.txt"));
+  } catch (error) {
+    if (["EPERM", "EACCES", "ENOTSUP", "EOPNOTSUPP"].includes(error.code)) {
+      context.skip("hard-link creation is unavailable");
+      return;
+    }
+    throw error;
+  }
+  const snapshot = await captureSourceSnapshot(root);
+  assert.equal(snapshot.workingTreeClean, true);
+  assert.equal(snapshot.totalBytes, Buffer.byteLength("linked source\n"));
 });
 
 test("VERIFY-LOCAL-07: sentetik doğrulama ortamı kişisel config, ikinci Vault ve credential'ları dışlar", (context) => {

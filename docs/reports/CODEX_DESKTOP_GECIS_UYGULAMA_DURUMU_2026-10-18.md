@@ -1,4 +1,18 @@
 # Codex Desktop geçiş uygulama durumu
+
+## 2026-11-06 verify:local kaynak snapshot bütünlüğü
+
+`captureSourceSnapshot` geçici Git depolarında sınandı. Önceki yol tabanlı açma akışı ara dizin junction/symlink üzerinden repo dışındaki hedefe ulaşabiliyor, doğrulanan yol yerine aynı path'i yeniden açıyor ve büyük dosya akışı sırasında `AbortSignal` iptalini izlemiyordu. Dosya başına başlangıç/son `lstat` kalıcı değişiklikleri çoğunlukla yakalasa da hash bittikten sonra, diğer kaynaklar taranırken yapılan değişikliği doğrulamıyordu. Git index SHA-256 karşılaştırması ve başlangıç/bitiş Git yol kümesi kontrolü zaten vardı; sentetik testler index-only ve yol kümesi değişimlerinin bunlarla reddedildiğini doğruladı.
+
+Düzeltme, parent path bileşenlerinde symlink/junction'ı reddeder; leaf symlink'i izlemeden yalnız link-target baytlarını snapshot'a alır. Normal dosyayı canonical repo içi yoldan açar, BigInt `fstat` kimliğini kontrol edilen `lstat` ile eşleştirir ve aynı descriptor'dan okur. Dosya ve toplam byte sınırları akış içinde uygulanır. İptal her chunk'ta görülür, aktif stream'i durdurur ve dosya descriptor'ını kapatır. Okuma öncesi/sonrası path-parent kimliği, descriptor metadata'sı, hash sonrası tüm kaynak kimlikleri ve Git index/yol durumu doğrulanır. Hard link kabul edilir; snapshot repo yolundan okunan baytları bağlar, dış alias bulunmadığını kanıtlamaz.
+
+Geçici Git regresyonları aynı içerikli farklı inode ile açılış yarışı, okuma sırasında truncate/büyüme/rename, parent junction değişimi, hash sonrası dosya mutasyonu, index-only değişimi, geç eklenen untracked dosya ve read-time cancellation/stream-error çakışmasını kapsar. Hedefli Windows paketi 35/35 geçti. Bu kanıt POSIX davranışını veya lock-ignoring yazarlara karşı atomik snapshot'ı kanıtlamaz. Stat kimliği ve hash gözlemleri arasındaki bir yarışı işletim sistemi kilidi/snapshot'ı olmadan mutlak biçimde önleme garantisi yoktur.
+
+Son kaynak durumundaki hedefli Windows paketi 35/35 geçti. Ardından `npm run verify:local` 2026-11-06 14:43:33Z–14:49:46Z arasında exit code 0 ve `status=passed` ile tamamlandı: `verify:ci` 184 ms, tam `npm test` (87 test dosyası) 353.549 ms, zorunlu seri benchmark 11.058 ms, sentetik stdio smoke 3.137 ms ve sentetik config/Vault verify 222 ms; toplam 373.275 ms. Benchmark'ın proje içi 30 saniye assertion'ı değiştirilmedi. Node v24.17.0 / Windows x64 kullanıldı.
+
+Koşu HEAD `e872a5afd3cf5b784212acba5609bdd1a037a455`, `main` üzerinde başladı/bitti; çalışma ağacı görev değişiklikleri nedeniyle kirliydi. Snapshot SHA-256 `714c8166f26d116f0e1d45efd09d9d50800b41cc821a72b4da4fd163ad79ece0`, 384 dosya ve 5.993.139 bayt olarak iki uçta eşleşti (`unchangedAtCompletion=true`). Sentetik geçici kök temizlendi ve provider credential'ı aktarılmadı. Bu raporun ölçüm paragrafı koşudan sonra eklendi; üretim kodu, test ve README koşu snapshot'ında yer alıyordu.
+
+Gerçek Vault, provider, model, Hades veya bilgisayar işlemi yapılmadı. Bu yerel doğrulama atomik filesystem snapshot'ı, POSIX davranışı, lock-ignoring yazıcılar, kişisel Vault sağlığı veya bağımsız Sol incelemesini kanıtlamaz. Bağımsız Sol inceleme açığı sürüyor.
 ## 2026-11-06 `verify:local` süreç cleanup düzeltmesi
 
 Süreç yaşam döngüsü gerçek Windows parent/descendant süreçleriyle doğrulandı. Parent daha önce çıkmışken descendant’ın stdout/stderr handle’ını açık tutması runner’ın `close` olayını bekletiyordu; timeout sonrasında runner artık sınırlı kapanış penceresi sonunda kalan pipe’ları kapatıp tek sonucu üretir. Forced stream close, descendant temizliğinin kanıtı sayılmaz.

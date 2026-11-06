@@ -3,7 +3,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { createReadStream } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createSmokeExecutionContext, removeSyntheticSmokeRoot, syntheticSmokeRootPrefix } from "./smoke-mcp-support.js";
 
@@ -141,31 +140,112 @@ function resolveRepositoryPath(projectRoot, relativePath) {
 }
 
 function statIdentity(stat) {
-  return [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
+  return [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].map(String).join(":");
 }
 
-async function hashRepositoryEntry(projectRoot, relativePath, headEntry, aggregate) {
-  const absolutePath = resolveRepositoryPath(projectRoot, relativePath);
-  let before;
+function isMissingPathError(error) {
+  return error?.code === "ENOENT" || error?.code === "ENOTDIR";
+}
+
+async function resolveSafeRepositoryEntryPath(projectRoot, relativePath) {
+  const repositoryRoot = await fs.promises.realpath(projectRoot);
+  const lexicalPath = resolveRepositoryPath(repositoryRoot, relativePath);
+  let parentPath = repositoryRoot;
+  const segments = relativePath.split(/[\\/]/);
+  for (const segment of segments.slice(0, -1)) {
+    parentPath = path.join(parentPath, segment);
+    let parentStatus;
+    try {
+      parentStatus = await fs.promises.lstat(parentPath, { bigint: true });
+    } catch (error) {
+      if (isMissingPathError(error)) return null;
+      throw new LocalVerificationError("source_entry_unreadable");
+    }
+    if (parentStatus.isSymbolicLink()) throw new LocalVerificationError("source_path_link_unsupported");
+    if (!parentStatus.isDirectory()) throw new LocalVerificationError("source_entry_type_unsupported");
+  }
+  let canonicalParent;
   try {
-    before = await fs.promises.lstat(absolutePath);
+    canonicalParent = await fs.promises.realpath(parentPath);
   } catch (error) {
-    if (error.code === "ENOENT") return { path: relativePath, kind: "missing", headMode: headEntry?.mode || null };
+    if (isMissingPathError(error)) return null;
     throw new LocalVerificationError("source_entry_unreadable");
   }
-  if (before.isSymbolicLink()) {
-    const target = await fs.promises.readlink(absolutePath, { encoding: "buffer" });
-    const after = await fs.promises.lstat(absolutePath);
-    if (statIdentity(before) !== statIdentity(after)) throw new LocalVerificationError("source_snapshot_unstable");
-    aggregate.bytes += target.length;
-    if (aggregate.bytes > maximumSnapshotTotalBytes) throw new LocalVerificationError("source_snapshot_size_limit");
-    return { path: relativePath, kind: "symlink", size: target.length, sha256: sha256(target), headMode: headEntry?.mode || null };
+  if (!isWithin(repositoryRoot, canonicalParent) || !isWithin(repositoryRoot, lexicalPath)) {
+    throw new LocalVerificationError("source_path_outside_repository");
   }
-  if (!before.isFile()) throw new LocalVerificationError("source_entry_type_unsupported");
-  if (before.size > maximumSnapshotFileBytes) throw new LocalVerificationError("source_snapshot_file_limit");
+  let parentStatus;
+  try {
+    parentStatus = await fs.promises.lstat(canonicalParent, { bigint: true });
+  } catch {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+  if (!parentStatus.isDirectory() || parentStatus.isSymbolicLink()) {
+    throw new LocalVerificationError("source_path_link_unsupported");
+  }
+  return {
+    repositoryRoot,
+    parentPath: canonicalParent,
+    parentIdentity: statIdentity(parentStatus),
+    absolutePath: path.join(canonicalParent, segments.at(-1))
+  };
+}
+
+function samePath(left, right) {
+  if (typeof left !== "string" || typeof right !== "string") return false;
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLocaleLowerCase("en-US") === normalizedRight.toLocaleLowerCase("en-US")
+    : normalizedLeft === normalizedRight;
+}
+
+async function assertRepositoryEntryPathUnchanged(projectRoot, relativePath, expectedPath) {
+  let currentPath;
+  try {
+    currentPath = await resolveSafeRepositoryEntryPath(projectRoot, relativePath);
+  } catch {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+  if (!currentPath
+    || !samePath(currentPath.absolutePath, expectedPath.absolutePath)
+    || currentPath.parentIdentity !== expectedPath.parentIdentity) {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+}
+
+async function readSymbolicLinkEntry(relativePath, resolvedPath, before, headEntry, aggregate) {
+  let target;
+  let after;
+  try {
+    target = await fs.promises.readlink(resolvedPath.absolutePath, { encoding: "buffer" });
+    after = await fs.promises.lstat(resolvedPath.absolutePath, { bigint: true });
+  } catch {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+  if (!after.isSymbolicLink() || statIdentity(before) !== statIdentity(after)) {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+  aggregate.bytes += target.length;
+  if (aggregate.bytes > maximumSnapshotTotalBytes) throw new LocalVerificationError("source_snapshot_size_limit");
+  return {
+    entry: { path: relativePath, kind: "symlink", size: target.length, sha256: sha256(target), headMode: headEntry?.mode || null },
+    validation: {
+      relativePath,
+      kind: "symlink",
+      identity: statIdentity(after),
+      target,
+      absolutePath: resolvedPath.absolutePath,
+      parentIdentity: resolvedPath.parentIdentity
+    }
+  };
+}
+
+async function consumeSnapshotStream(stream, signal, aggregate) {
   const digest = crypto.createHash("sha256");
   let bytes = 0;
-  for await (const chunk of createReadStream(absolutePath)) {
+  for await (const chunk of stream) {
+    hasAbort(signal);
     bytes += chunk.length;
     aggregate.bytes += chunk.length;
     if (bytes > maximumSnapshotFileBytes || aggregate.bytes > maximumSnapshotTotalBytes) {
@@ -173,16 +253,166 @@ async function hashRepositoryEntry(projectRoot, relativePath, headEntry, aggrega
     }
     digest.update(chunk);
   }
-  const after = await fs.promises.lstat(absolutePath);
-  if (statIdentity(before) !== statIdentity(after) || bytes !== before.size) throw new LocalVerificationError("source_snapshot_unstable");
-  return {
-    path: relativePath,
-    kind: "file",
-    size: bytes,
-    executable: Boolean(before.mode & 0o111),
-    sha256: digest.digest("hex"),
-    headMode: headEntry?.mode || null
+  return { bytes, digest: digest.digest("hex") };
+}
+
+async function waitForStreamClose(stream) {
+  if (!stream || stream.closed) return;
+  stream.destroy();
+  if (!stream.closed) await new Promise((resolve) => stream.once("close", resolve));
+}
+
+async function hashRepositoryEntry(projectRoot, relativePath, headEntry, aggregate, signal) {
+  const resolvedPath = await resolveSafeRepositoryEntryPath(projectRoot, relativePath);
+  if (!resolvedPath) return {
+    entry: { path: relativePath, kind: "missing", headMode: headEntry?.mode || null },
+    validation: { relativePath, kind: "missing" }
   };
+  let before;
+  try {
+    before = await fs.promises.lstat(resolvedPath.absolutePath, { bigint: true });
+  } catch (error) {
+    if (isMissingPathError(error)) return {
+      entry: { path: relativePath, kind: "missing", headMode: headEntry?.mode || null },
+      validation: { relativePath, kind: "missing" }
+    };
+    throw new LocalVerificationError("source_entry_unreadable");
+  }
+  if (before.isSymbolicLink()) return readSymbolicLinkEntry(relativePath, resolvedPath, before, headEntry, aggregate);
+  if (!before.isFile()) throw new LocalVerificationError("source_entry_type_unsupported");
+  if (before.size > BigInt(maximumSnapshotFileBytes)) throw new LocalVerificationError("source_snapshot_file_limit");
+  let canonicalFilePath;
+  try {
+    canonicalFilePath = await fs.promises.realpath(resolvedPath.absolutePath);
+  } catch {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+  if (!isWithin(resolvedPath.repositoryRoot, canonicalFilePath)
+    || !samePath(canonicalFilePath, resolvedPath.absolutePath)) {
+    throw new LocalVerificationError("source_path_outside_repository");
+  }
+  const noFollow = fs.constants.O_NOFOLLOW || 0;
+  let handle;
+  let stream;
+  let abortListener;
+  try {
+    hasAbort(signal);
+    handle = await fs.promises.open(canonicalFilePath, fs.constants.O_RDONLY | noFollow);
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || statIdentity(before) !== statIdentity(opened)) {
+      throw new LocalVerificationError("source_snapshot_unstable");
+    }
+    await assertRepositoryEntryPathUnchanged(projectRoot, relativePath, resolvedPath);
+    stream = handle.createReadStream({ autoClose: false });
+    const readPromise = consumeSnapshotStream(stream, signal, aggregate);
+    if (signal) {
+      abortListener = () => stream.destroy(new LocalVerificationError("cancelled"));
+      signal.addEventListener("abort", abortListener, { once: true });
+      if (signal.aborted) abortListener();
+    }
+    let content;
+    try {
+      content = await readPromise;
+    } catch (error) {
+      if (signal?.aborted || error?.code === "cancelled") throw new LocalVerificationError("cancelled");
+      if (error instanceof LocalVerificationError) throw error;
+      throw new LocalVerificationError("source_entry_unreadable");
+    }
+    await assertRepositoryEntryPathUnchanged(projectRoot, relativePath, resolvedPath);
+    const completed = await handle.stat({ bigint: true });
+    let pathAfter;
+    try {
+      pathAfter = await fs.promises.lstat(canonicalFilePath, { bigint: true });
+    } catch {
+      throw new LocalVerificationError("source_snapshot_unstable");
+    }
+    if (statIdentity(opened) !== statIdentity(completed)
+      || statIdentity(opened) !== statIdentity(pathAfter)
+      || !pathAfter.isFile()
+      || BigInt(content.bytes) !== completed.size) {
+      throw new LocalVerificationError("source_snapshot_unstable");
+    }
+    return {
+      entry: {
+        path: relativePath,
+        kind: "file",
+        size: content.bytes,
+        executable: Boolean(Number(before.mode & 0o111n)),
+        sha256: content.digest,
+        headMode: headEntry?.mode || null
+      },
+      validation: {
+        relativePath,
+        kind: "file",
+        identity: statIdentity(completed),
+        canonicalFilePath,
+        absolutePath: resolvedPath.absolutePath,
+        parentIdentity: resolvedPath.parentIdentity
+      }
+    };
+  } catch (error) {
+    if (signal?.aborted) throw new LocalVerificationError("cancelled");
+    if (error instanceof LocalVerificationError) throw error;
+    if (error?.code === "ENOENT" || error?.code === "ELOOP") throw new LocalVerificationError("source_snapshot_unstable");
+    throw new LocalVerificationError("source_entry_unreadable");
+  } finally {
+    signal?.removeEventListener("abort", abortListener);
+    await waitForStreamClose(stream);
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+async function verifyRepositoryEntryUnchanged(projectRoot, validation) {
+  const resolvedPath = await resolveSafeRepositoryEntryPath(projectRoot, validation.relativePath);
+  if (validation.kind === "missing") {
+    if (resolvedPath) {
+      try {
+        await fs.promises.lstat(resolvedPath.absolutePath, { bigint: true });
+        throw new LocalVerificationError("source_snapshot_unstable");
+      } catch (error) {
+        if (!isMissingPathError(error)) throw error;
+      }
+    }
+    return;
+  }
+  if (!resolvedPath
+    || (validation.absolutePath && !samePath(resolvedPath.absolutePath, validation.absolutePath))
+    || (validation.parentIdentity && resolvedPath.parentIdentity !== validation.parentIdentity)) {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+  if (validation.kind === "symlink") {
+    let current;
+    let target;
+    try {
+      current = await fs.promises.lstat(resolvedPath.absolutePath, { bigint: true });
+      target = await fs.promises.readlink(resolvedPath.absolutePath, { encoding: "buffer" });
+    } catch {
+      throw new LocalVerificationError("source_snapshot_unstable");
+    }
+    if (!current.isSymbolicLink() || statIdentity(current) !== validation.identity || !target.equals(validation.target)) {
+      throw new LocalVerificationError("source_snapshot_unstable");
+    }
+    return;
+  }
+  let status;
+  try {
+    status = await fs.promises.lstat(validation.canonicalFilePath, { bigint: true });
+  } catch {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+  const currentRealPath = await fs.promises.realpath(resolvedPath.absolutePath).catch(() => null);
+  if (!status.isFile()
+    || statIdentity(status) !== validation.identity
+    || !samePath(currentRealPath, validation.canonicalFilePath)) {
+    throw new LocalVerificationError("source_snapshot_unstable");
+  }
+}
+
+async function verifySnapshotEntries(projectRoot, validations, signal) {
+  for (const validation of validations) {
+    hasAbort(signal);
+    await verifyRepositoryEntryUnchanged(projectRoot, validation);
+  }
 }
 
 function sameStringSet(left, right) {
@@ -205,12 +435,16 @@ export async function captureSourceSnapshot(projectRoot, signal) {
     normalizedPaths.add(key);
   }
   const sortedPaths = [...allPaths].sort((left, right) => left.localeCompare(right, "en-US"));
-  const aggregate = { bytes: 0 };
+  const aggregate = { bytes: 0, validations: [] };
   const entries = [];
   for (const relativePath of sortedPaths) {
     hasAbort(signal);
-    entries.push(await hashRepositoryEntry(projectRoot, relativePath, before.headTree.get(relativePath), aggregate));
+    const result = await hashRepositoryEntry(projectRoot, relativePath, before.headTree.get(relativePath), aggregate, signal);
+    entries.push(result.entry);
+    if (result.validation) aggregate.validations.push(result.validation);
   }
+  hasAbort(signal);
+  await verifySnapshotEntries(projectRoot, aggregate.validations, signal);
   const after = readGitState(projectRoot);
   const sameGitView = before.root === after.root
     && before.head === after.head

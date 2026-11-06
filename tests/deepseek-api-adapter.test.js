@@ -633,3 +633,195 @@ test("DeepSeek pilot bütçesi eşzamanlı rezervasyonları sert tavanda tutar",
   assert.equal(snapshot.reservedUsd, 0);
   assert.equal(snapshot.limitUsd, 1);
 });
+
+test("real budget ledger gates HTTP and records usage-priced adapter success", async (t) => {
+  const previousKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "synthetic-budget-ledger-key";
+  const deniedDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-budget-admission-"));
+  const successDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-budget-success-"));
+  t.after(() => {
+    fs.rmSync(deniedDirectory, { recursive: true, force: true });
+    fs.rmSync(successDirectory, { recursive: true, force: true });
+    if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousKey;
+  });
+
+  const deniedBudget = createDeepSeekPilotBudget({ stateDirectory: deniedDirectory, limitUsd: 1, priorUsageReservationUsd: 0 });
+  await deniedBudget.reserve("fills-limit", 0.999999999);
+  const deniedLedgerPath = path.join(deniedDirectory, "deepseek-pilot-budget.json");
+  const deniedLedgerBytes = fs.readFileSync(deniedLedgerPath);
+  let deniedRequests = 0;
+  const deniedAdapter = createDeepSeekApiAdapter(configuration(), {
+    budget: deniedBudget,
+    fetchImplementation: async () => {
+      deniedRequests += 1;
+      return response(validApiPayload());
+    }
+  });
+  const deniedResult = await deniedAdapter.execute({ executionId: "denied-before-http", model: "deepseek-flash", mode: "read_only", prompt: "{}", timeoutMs: 1000 });
+  assert.equal(deniedResult.ok, false);
+  assert.equal(deniedResult.reason, "budget_exhausted");
+  assert.equal(deniedRequests, 0);
+  assert.deepEqual(fs.readFileSync(deniedLedgerPath), deniedLedgerBytes);
+  assert.equal((await deniedBudget.snapshot()).reservedUsd, 0.999999999);
+
+  const successBudget = createDeepSeekPilotBudget({ stateDirectory: successDirectory, limitUsd: 1, priorUsageReservationUsd: 0 });
+  const successAdapter = createDeepSeekApiAdapter(configuration(), {
+    budget: successBudget,
+    fetchImplementation: async () => response(validApiPayload())
+  });
+  const successResult = await successAdapter.execute({ executionId: "success-settlement", model: "deepseek-flash", mode: "read_only", prompt: "{}", timeoutMs: 1000 });
+  assert.equal(successResult.ok, true);
+  const successSnapshot = await successBudget.snapshot();
+  assert.equal(successSnapshot.activeReservedUsd, 0);
+  assert.equal(successSnapshot.unknownReservedUsd, 0);
+  assert.equal(successSnapshot.usagePricedUsd, Math.ceil(successResult.metrics.totalCostUsd * 1000000000) / 1000000000);
+});
+
+test("real budget ledger retains timeout, cancellation and response failures as unknown reservations", async (t) => {
+  const previousKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "synthetic-budget-ledger-key";
+  const directories = ["timeout", "cancel", "parse", "byte-limit"].map((name) => fs.mkdtempSync(path.join(os.tmpdir(), `deepseek-budget-${name}-`)));
+  t.after(() => {
+    for (const directory of directories) fs.rmSync(directory, { recursive: true, force: true });
+    if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousKey;
+  });
+
+  const timeoutBudget = createDeepSeekPilotBudget({ stateDirectory: directories[0], limitUsd: 1, priorUsageReservationUsd: 0 });
+  let requestStarted;
+  const requestStartedPromise = new Promise((resolve) => { requestStarted = resolve; });
+  const timeoutAdapter = createDeepSeekApiAdapter(configuration({ timeoutMs: 50 }), {
+    budget: timeoutBudget,
+    fetchImplementation: async (url, options) => new Promise((resolve, reject) => {
+      requestStarted();
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    })
+  });
+  const timeoutPending = timeoutAdapter.execute({ executionId: "unknown-timeout", model: "deepseek-flash", mode: "read_only", prompt: "{}", timeoutMs: 50 });
+  await requestStartedPromise;
+  const timeoutResult = await timeoutPending;
+  assert.equal(timeoutResult.reason, "timeout");
+  assert.ok((await timeoutBudget.snapshot()).unknownReservedUsd > 0);
+
+  const cancelBudget = createDeepSeekPilotBudget({ stateDirectory: directories[1], limitUsd: 1, priorUsageReservationUsd: 0 });
+  let cancellationRequestStarted;
+  const cancellationRequestStartedPromise = new Promise((resolve) => { cancellationRequestStarted = resolve; });
+  const cancelAdapter = createDeepSeekApiAdapter(configuration(), {
+    budget: cancelBudget,
+    fetchImplementation: async (url, options) => new Promise((resolve, reject) => {
+      cancellationRequestStarted();
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    })
+  });
+  const cancelPending = cancelAdapter.execute({ executionId: "unknown-cancel", model: "deepseek-flash", mode: "read_only", prompt: "{}", timeoutMs: 1000 });
+  await cancellationRequestStartedPromise;
+  await cancelAdapter.cancel("unknown-cancel");
+  const cancelResult = await cancelPending;
+  assert.equal(cancelResult.reason, "cancelled");
+  assert.ok((await cancelBudget.snapshot()).unknownReservedUsd > 0);
+
+  const parseBudget = createDeepSeekPilotBudget({ stateDirectory: directories[2], limitUsd: 1, priorUsageReservationUsd: 0 });
+  const parseAdapter = createDeepSeekApiAdapter(configuration(), {
+    budget: parseBudget,
+    fetchImplementation: async () => new Response("{")
+  });
+  const parseResult = await parseAdapter.execute({ executionId: "unknown-parse", model: "deepseek-flash", mode: "read_only", prompt: "{}", timeoutMs: 1000 });
+  assert.equal(parseResult.reason, "output_parse_invalid");
+  assert.ok((await parseBudget.snapshot()).unknownReservedUsd > 0);
+
+  const byteLimitBudget = createDeepSeekPilotBudget({ stateDirectory: directories[3], limitUsd: 1, priorUsageReservationUsd: 0 });
+  const byteLimitAdapter = createDeepSeekApiAdapter(configuration({ maxOutputBytes: 16 }), {
+    budget: byteLimitBudget,
+    fetchImplementation: async () => new Response("x".repeat(17))
+  });
+  const byteLimitResult = await byteLimitAdapter.execute({ executionId: "unknown-byte-limit", model: "deepseek-flash", mode: "read_only", prompt: "{}", timeoutMs: 1000 });
+  assert.equal(byteLimitResult.reason, "output_limit");
+  assert.ok((await byteLimitBudget.snapshot()).unknownReservedUsd > 0);
+});
+
+test("runtime retries cannot admit a second adapter attempt over the real pilot ledger", async (t) => {
+  const previousKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "synthetic-budget-ledger-key";
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-budget-runtime-retry-"));
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousKey;
+  });
+  const stateDirectory = path.join(root, "state");
+  const budget = createDeepSeekPilotBudget({ stateDirectory, limitUsd: 0.004, priorUsageReservationUsd: 0 });
+  let requests = 0;
+  const adapter = createDeepSeekApiAdapter(configuration(), {
+    budget,
+    fetchImplementation: async () => {
+      requests += 1;
+      throw new Error("synthetic network failure");
+    }
+  });
+  const configurationValue = {
+    packageRoot: root,
+    statePaths: { logs: path.join(root, "logs"), state: stateDirectory, cache: path.join(root, "cache") },
+    deepseek: { ...configuration().deepseek, pilotBudgetUsd: 0.004, priorUsageReservationUsd: 0 },
+    reliability: { maxAttempts: 2 }
+  };
+  const runtime = createBridgeRuntime({ configuration: configurationValue, adapters: { deepseek: adapter }, sleep: async () => {} });
+  const result = await runtime.run({
+    target: "deepseek",
+    model: "deepseek-flash",
+    prompt: "{}",
+    mode: "read_only",
+    trustedWorkspace: root,
+    caller: "budget-retry-test",
+    delegationDepth: 0,
+    timeoutMs: 1000
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "budget_exhausted");
+  assert.equal(result.metrics.adapterAttempts, 2);
+  assert.equal(result.metrics.retries, 1);
+  assert.equal(requests, 1);
+  const snapshot = await budget.snapshot();
+  assert.ok(snapshot.unknownReservedUsd > 0);
+  assert.equal(snapshot.reservationCount, 1);
+});
+
+test("settlement storage failure preserves the reservation and cannot return success", async (t) => {
+  const previousKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "synthetic-budget-ledger-key";
+  const stateDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-budget-settlement-write-"));
+  t.after(() => {
+    fs.rmSync(stateDirectory, { recursive: true, force: true });
+    if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousKey;
+  });
+  const budget = createDeepSeekPilotBudget({ stateDirectory, limitUsd: 1, priorUsageReservationUsd: 0 });
+  const ledgerPath = path.join(stateDirectory, "deepseek-pilot-budget.json");
+  const originalRename = fs.renameSync;
+  const adapter = createDeepSeekApiAdapter(configuration(), {
+    budget,
+    fetchImplementation: async () => {
+      fs.renameSync = (source, destination) => {
+        if (path.resolve(destination) === ledgerPath) {
+          const error = new Error("synthetic storage failure");
+          error.code = "EIO";
+          throw error;
+        }
+        return originalRename(source, destination);
+      };
+      return response(validApiPayload());
+    }
+  });
+  let result;
+  try {
+    result = await adapter.execute({ executionId: "settlement-write-failure", model: "deepseek-flash", mode: "read_only", prompt: "{}", timeoutMs: 1000 });
+  } finally {
+    fs.renameSync = originalRename;
+  }
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "budget_state_unavailable");
+  const snapshot = await budget.snapshot();
+  assert.ok(snapshot.activeReservedUsd > 0);
+  assert.equal(snapshot.usagePricedUsd, 0);
+  assert.equal(fs.readdirSync(stateDirectory).some((name) => name.endsWith(".tmp")), false);
+});

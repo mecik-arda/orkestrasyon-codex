@@ -51,6 +51,40 @@ function writeRecord(filePath, record, ending = "\n") {
   fs.writeFileSync(filePath, `${JSON.stringify(record)}${ending}`, "utf8");
 }
 
+function feedbackRecord(recordType, executionIdHash, recordedAt, outcome) {
+  const routing = recordType === "routing_feedback";
+  return {
+    recordType,
+    recordedAt,
+    backend: routing ? "routing-evaluation" : "direct-edit-baseline",
+    executionIdHash,
+    outcome
+  };
+}
+
+function writeUniqueRoutingFeedback(filePath, count, offset = 0) {
+  const descriptor = fs.openSync(filePath, "w");
+  try {
+    const batchSize = 512;
+    for (let batchStart = 0; batchStart < count; batchStart += batchSize) {
+      const batchEnd = Math.min(count, batchStart + batchSize);
+      const lines = [];
+      for (let index = batchStart; index < batchEnd; index += 1) {
+        lines.push(JSON.stringify(feedbackRecord(
+          "routing_feedback",
+          hash(`bounded-execution-${offset + index}`),
+          fixedNow.toISOString(),
+          "useful"
+        )));
+      }
+      fs.writeSync(descriptor, `${lines.join("\n")}\n`, null, "utf8");
+    }
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return fs.statSync(filePath).size;
+}
+
 function read(config, options = {}) {
   return readRecentRuns(config, { now: fixedNow, ...options });
 }
@@ -314,4 +348,195 @@ test("RRB-09: read limits reject non-integer, unsafe, negative, and oversized va
   const noFiles = read(config, { maxFiles: 0 });
   assert.equal(noFiles.snapshot.bytesRead, 0);
   assert.equal(noFiles.truncated, true);
+});
+
+test("RRB-10: repeated routing and direct-edit feedback stays bounded below the source byte cap", (t) => {
+  const { config, directory, filePath } = createFixture(t);
+  const run = executionRecord();
+  const routingPath = path.join(directory, "routing-evaluation-runs.jsonl");
+  const directEditPath = path.join(directory, "direct-edit-baseline-runs.jsonl");
+  const routing = feedbackRecord("routing_feedback", run.executionIdHash, fixedNow.toISOString(), "useful");
+  const directEdit = feedbackRecord("direct_edit_feedback", run.executionIdHash, fixedNow.toISOString(), "accepted");
+  const recordCount = 140000;
+  writeRecord(filePath, run);
+  fs.writeFileSync(routingPath, `${JSON.stringify(routing)}\n`.repeat(recordCount), "utf8");
+  fs.writeFileSync(directEditPath, `${JSON.stringify(directEdit)}\n`.repeat(recordCount), "utf8");
+  const totalSourceBytes = fs.statSync(filePath).size + fs.statSync(routingPath).size + fs.statSync(directEditPath).size;
+  assert.ok(fs.statSync(routingPath).size < 64 * 1024 * 1024);
+  assert.ok(fs.statSync(directEditPath).size < 64 * 1024 * 1024);
+  assert.ok(totalSourceBytes < 64 * 1024 * 1024);
+
+  const result = read(config);
+
+  assert.equal(result.runCount, 1);
+  assert.equal(result.runs[0].feedback.routing, "useful");
+  assert.equal(result.runs[0].feedback.directEdit, "accepted");
+  assert.equal(result.snapshot.bytesRead, totalSourceBytes);
+  assert.equal(result.snapshot.processedRecordCount, recordCount * 2 + 1);
+  assert.equal(result.snapshot.retainedExecutionIdentityCount, 1);
+  assert.equal(result.snapshot.maximumRetainedExecutionIdentities, 50000);
+  assert.equal(result.snapshot.status, "complete");
+  assert.equal(result.truncated, false);
+});
+
+test("RRB-11: per-file unique identity budget is exact below, at, and above its boundary", (t) => {
+  const { config, directory } = createFixture(t);
+  const feedbackPath = path.join(directory, "routing-evaluation-runs.jsonl");
+
+  writeUniqueRoutingFeedback(feedbackPath, 49999);
+  const below = read(config);
+  assert.equal(below.snapshot.retainedExecutionIdentityCount, 49999);
+  assert.equal(below.snapshot.status, "complete");
+  assert.equal(below.truncated, false);
+
+  writeUniqueRoutingFeedback(feedbackPath, 50000);
+  const exact = read(config);
+  assert.equal(exact.snapshot.retainedExecutionIdentityCount, 50000);
+  assert.equal(exact.snapshot.status, "complete");
+  assert.equal(exact.truncated, false);
+
+  writeUniqueRoutingFeedback(feedbackPath, 50001);
+  fs.appendFileSync(feedbackPath, "{}\n", "utf8");
+  const above = read(config);
+  assert.equal(above.snapshot.retainedExecutionIdentityCount, 0);
+  assert.equal(above.snapshot.stateLimitExceededFileCount, 1);
+  assert.equal(above.snapshot.stateLimitDroppedRecordCount, 50001);
+  assert.equal(above.snapshot.stateLimitSkippedLineCount, 1);
+  assert.equal(above.snapshot.status, "partial");
+  assert.equal(above.truncated, true);
+  assert.equal(above.runCount, 0);
+});
+
+test("RRB-12: aggregate identity budget drops an overflowing file as one stage", (t) => {
+  const { config, directory } = createFixture(t);
+  const firstPath = path.join(directory, "routing-evaluation-runs.jsonl");
+  const secondPath = path.join(directory, "routing-evaluation-runs-older.jsonl");
+  writeUniqueRoutingFeedback(firstPath, 25000);
+  writeUniqueRoutingFeedback(secondPath, 25001, 25000);
+  fs.utimesSync(firstPath, new Date("2026-11-06T11:00:00.000Z"), new Date("2026-11-06T11:00:00.000Z"));
+  fs.utimesSync(secondPath, new Date("2026-11-06T10:00:00.000Z"), new Date("2026-11-06T10:00:00.000Z"));
+
+  const result = read(config);
+
+  assert.equal(result.selectedFileCount, 2);
+  assert.equal(result.snapshot.retainedExecutionIdentityCount, 25000);
+  assert.equal(result.snapshot.stateLimitExceededFileCount, 1);
+  assert.equal(result.snapshot.stateLimitDroppedRecordCount, 25001);
+  assert.equal(result.snapshot.droppedRecordCount, 25001);
+  assert.equal(result.snapshot.status, "partial");
+  assert.equal(result.truncated, true);
+});
+
+test("RRB-13: latest feedback wins while equal timestamps keep deterministic first-in-file order", (t) => {
+  const { config, directory } = createFixture(t);
+  const run = executionRecord();
+  const routingPath = path.join(directory, "routing-evaluation-runs.jsonl");
+  const directEditPath = path.join(directory, "direct-edit-baseline-runs.jsonl");
+  writeRecord(path.join(directory, "codex-runs.jsonl"), run);
+  fs.writeFileSync(routingPath, [
+    feedbackRecord("routing_feedback", run.executionIdHash, "2026-11-06T10:00:00.000Z", "useful"),
+    feedbackRecord("routing_feedback", run.executionIdHash, "2026-11-06T11:00:00.000Z", "partial"),
+    feedbackRecord("routing_feedback", run.executionIdHash, "2026-11-06T11:00:00.000Z", "not_useful")
+  ].map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8");
+  fs.writeFileSync(directEditPath, [
+    feedbackRecord("direct_edit_feedback", run.executionIdHash, "2026-11-06T11:00:00.000Z", "minor_fix"),
+    feedbackRecord("direct_edit_feedback", run.executionIdHash, "2026-11-06T10:00:00.000Z", "reverted")
+  ].map((record) => JSON.stringify(record)).join("\n") + "\n", "utf8");
+
+  const result = read(config);
+
+  assert.equal(result.runs[0].feedback.routing, "partial");
+  assert.equal(result.runs[0].feedback.directEdit, "minor_fix");
+});
+
+test("RRB-14: feedback before or after a run is joined by identity and never crosses the selected run", (t) => {
+  const { config, directory } = createFixture(t);
+  const selected = executionRecord({ executionIdHash: hash("selected"), recordedAt: "2026-11-06T11:50:00.000Z" });
+  const unselected = executionRecord({ executionIdHash: hash("unselected"), recordedAt: "2026-11-06T11:30:00.000Z" });
+  const routingPath = path.join(directory, "routing-evaluation-runs.jsonl");
+  const directEditPath = path.join(directory, "direct-edit-baseline-runs.jsonl");
+  fs.writeFileSync(routingPath, `${JSON.stringify(feedbackRecord("routing_feedback", unselected.executionIdHash, "2026-11-06T11:40:00.000Z", "useful"))}\n`, "utf8");
+  writeRecord(path.join(directory, "codex-runs.jsonl"), selected);
+  writeRecord(path.join(directory, "codex-runs-older.jsonl"), unselected);
+  fs.writeFileSync(directEditPath, `${JSON.stringify(feedbackRecord("direct_edit_feedback", unselected.executionIdHash, "2026-11-06T11:45:00.000Z", "accepted"))}\n`, "utf8");
+  fs.utimesSync(routingPath, new Date("2026-11-06T11:00:00.000Z"), new Date("2026-11-06T11:00:00.000Z"));
+  fs.utimesSync(path.join(directory, "codex-runs.jsonl"), new Date("2026-11-06T10:00:00.000Z"), new Date("2026-11-06T10:00:00.000Z"));
+  fs.utimesSync(directEditPath, new Date("2026-11-06T09:00:00.000Z"), new Date("2026-11-06T09:00:00.000Z"));
+  fs.utimesSync(path.join(directory, "codex-runs-older.jsonl"), new Date("2026-11-06T08:00:00.000Z"), new Date("2026-11-06T08:00:00.000Z"));
+
+  const result = read(config, { limit: 1 });
+
+  assert.equal(result.runCount, 1);
+  assert.equal(result.runs[0].recordedAt, selected.recordedAt);
+  assert.deepEqual(result.runs[0].feedback, { routing: "pending", directEdit: "pending" });
+});
+
+test("RRB-15: changed file cannot leak staged feedback or run conflicts into a valid file result", (t) => {
+  const { config, directory } = createFixture(t);
+  const validRunPath = path.join(directory, "codex-runs.jsonl");
+  const changedFilePath = path.join(directory, "routing-evaluation-runs.jsonl");
+  const validRun = executionRecord();
+  writeRecord(validRunPath, validRun);
+  fs.writeFileSync(changedFilePath, [
+    JSON.stringify({ ...validRun, outcomeStatus: "failed", failureClass: "process_exit" }),
+    JSON.stringify(feedbackRecord("routing_feedback", validRun.executionIdHash, "2026-11-06T11:59:00.000Z", "not_useful"))
+  ].join("\n") + "\n", "utf8");
+  fs.utimesSync(validRunPath, new Date("2026-11-06T11:00:00.000Z"), new Date("2026-11-06T11:00:00.000Z"));
+  fs.utimesSync(changedFilePath, new Date("2026-11-06T10:00:00.000Z"), new Date("2026-11-06T10:00:00.000Z"));
+  const originalOpen = fs.openSync;
+  const originalRead = fs.readSync;
+  let changedFileDescriptor = null;
+  let truncated = false;
+  fs.openSync = (targetPath, ...argumentsList) => {
+    const descriptor = originalOpen(targetPath, ...argumentsList);
+    if (path.resolve(String(targetPath)) === changedFilePath) changedFileDescriptor = descriptor;
+    return descriptor;
+  };
+  fs.readSync = (descriptor, ...argumentsList) => {
+    const bytesRead = originalRead(descriptor, ...argumentsList);
+    if (descriptor === changedFileDescriptor && !truncated && bytesRead > 0) {
+      truncated = true;
+      fs.ftruncateSync(descriptor, 0);
+    }
+    return bytesRead;
+  };
+  let result;
+  try {
+    result = read(config);
+  } finally {
+    fs.openSync = originalOpen;
+    fs.readSync = originalRead;
+  }
+
+  assert.equal(truncated, true);
+  assert.equal(result.runCount, 1);
+  assert.equal(result.conflictCount, 0);
+  assert.equal(result.runs[0].outcomeStatus, "completed");
+  assert.equal(result.runs[0].feedback.routing, "pending");
+  assert.equal(result.snapshot.changedFileCount, 1);
+  assert.equal(result.snapshot.status, "partial");
+  assert.equal(result.truncated, true);
+});
+
+test("RRB-16: identical runs remain harmless and feedback for a conflicting identity is not joined", (t) => {
+  const { config, filePath } = createFixture(t);
+  const visibleRun = executionRecord({ executionIdHash: hash("visible") });
+  const conflictingRun = executionRecord({ executionIdHash: hash("conflicting") });
+  const differentRun = { ...conflictingRun, outcomeStatus: "failed", failureClass: "process_exit" };
+  const records = [
+    visibleRun,
+    visibleRun,
+    conflictingRun,
+    differentRun,
+    feedbackRecord("routing_feedback", conflictingRun.executionIdHash, fixedNow.toISOString(), "useful"),
+    feedbackRecord("direct_edit_feedback", conflictingRun.executionIdHash, fixedNow.toISOString(), "accepted")
+  ];
+  fs.writeFileSync(filePath, `${records.map((record) => JSON.stringify(record)).join("\n")}\n`, "utf8");
+
+  const result = read(config);
+
+  assert.equal(result.conflictCount, 1);
+  assert.equal(result.runCount, 1);
+  assert.equal(result.runs[0].feedback.routing, "pending");
+  assert.equal(result.runs[0].feedback.directEdit, "pending");
 });

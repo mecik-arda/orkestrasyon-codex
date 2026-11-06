@@ -174,6 +174,7 @@ const maximumRecentRunFiles = 64;
 const maximumRecentRunBytes = 64 * 1024 * 1024;
 const maximumMetricRecordBytes = 256 * 1024;
 const metricReadChunkBytes = 16 * 1024;
+const maximumRetainedExecutionIdentities = 50000;
 const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
 function isPathInside(candidatePath, rootPath) {
@@ -259,11 +260,106 @@ function selectMetricFiles(metricsDirectory, limits) {
 }
 
 function createMetricFileStage() {
-  return { runs: [], routingFeedback: [], directEditFeedback: [], retainedRecordCount: 0 };
+  return {
+    runs: new Map(),
+    conflictingIdentities: new Set(),
+    routingFeedback: new Map(),
+    directEditFeedback: new Map(),
+    identities: new Set(),
+    acceptedRecordCount: 0,
+    stateLimitExceeded: false,
+    fileChanged: false
+  };
+}
+
+function retainMetricIdentity(stage, identity) {
+  if (stage.identities.has(identity)) return true;
+  if (stage.identities.size >= maximumRetainedExecutionIdentities) {
+    stage.stateLimitExceeded = true;
+    return false;
+  }
+  stage.identities.add(identity);
+  return true;
+}
+
+function retainLatestFeedback(feedbackByIdentity, feedback) {
+  const existing = feedbackByIdentity.get(feedback.executionIdHash);
+  if (!existing || Date.parse(existing.recordedAt) < Date.parse(feedback.recordedAt)) {
+    feedbackByIdentity.set(feedback.executionIdHash, feedback);
+  }
+}
+
+function retainStageRun(stage, run) {
+  if (!retainMetricIdentity(stage, run.identity)) return;
+  if (stage.conflictingIdentities.has(run.identity)) return;
+  const existing = stage.runs.get(run.identity);
+  if (existing && JSON.stringify(existing) !== JSON.stringify(run)) {
+    stage.conflictingIdentities.add(run.identity);
+    stage.runs.delete(run.identity);
+  } else if (!existing) {
+    stage.runs.set(run.identity, run);
+  }
+}
+
+function hasRetainedMetricIdentity(identity, runsByIdentity, conflictingIdentities, routingFeedback, directEditFeedback) {
+  return runsByIdentity.has(identity)
+    || conflictingIdentities.has(identity)
+    || routingFeedback.has(identity)
+    || directEditFeedback.has(identity);
+}
+
+function retainValidatedMetricFile(stage, state, diagnostics) {
+  if (stage.fileChanged) {
+    diagnostics.droppedRecordCount += stage.acceptedRecordCount;
+    return false;
+  }
+  if (stage.stateLimitExceeded) {
+    diagnostics.stateLimitExceededFileCount += 1;
+    diagnostics.stateLimitDroppedRecordCount += stage.acceptedRecordCount;
+    diagnostics.droppedRecordCount += stage.acceptedRecordCount;
+    diagnostics.truncated = true;
+    return false;
+  }
+  let additionalIdentityCount = 0;
+  for (const identity of stage.identities) {
+    if (!hasRetainedMetricIdentity(identity, state.runsByIdentity, state.conflictingIdentities, state.routingFeedback, state.directEditFeedback)) {
+      additionalIdentityCount += 1;
+    }
+  }
+  if (state.retainedIdentityCount + additionalIdentityCount > maximumRetainedExecutionIdentities) {
+    diagnostics.stateLimitExceededFileCount += 1;
+    diagnostics.stateLimitDroppedRecordCount += stage.acceptedRecordCount;
+    diagnostics.droppedRecordCount += stage.acceptedRecordCount;
+    diagnostics.truncated = true;
+    return false;
+  }
+  for (const identity of stage.conflictingIdentities) {
+    state.conflictingIdentities.add(identity);
+    state.runsByIdentity.delete(identity);
+  }
+  for (const [identity, run] of stage.runs) {
+    if (state.conflictingIdentities.has(identity)) continue;
+    const existing = state.runsByIdentity.get(identity);
+    if (existing && JSON.stringify(existing) !== JSON.stringify(run)) {
+      state.conflictingIdentities.add(identity);
+      state.runsByIdentity.delete(identity);
+    } else if (!existing) {
+      state.runsByIdentity.set(identity, run);
+    }
+  }
+  for (const feedback of stage.routingFeedback.values()) retainLatestFeedback(state.routingFeedback, feedback);
+  for (const feedback of stage.directEditFeedback.values()) retainLatestFeedback(state.directEditFeedback, feedback);
+  state.retainedIdentityCount += additionalIdentityCount;
+  return true;
 }
 
 function consumeMetricRecord(line, stage, diagnostics, periodStart, nowMs) {
   if (line.length === 0) return;
+  if (stage.stateLimitExceeded) {
+    diagnostics.stateLimitSkippedLineCount += 1;
+    diagnostics.droppedRecordCount += 1;
+    return;
+  }
   diagnostics.processedRecordCount += 1;
   let record;
   try {
@@ -277,21 +373,25 @@ function consumeMetricRecord(line, stage, diagnostics, periodStart, nowMs) {
   if (run) {
     const recordedAt = Date.parse(run.recordedAt);
     if (recordedAt >= periodStart && recordedAt <= nowMs) {
-      stage.runs.push({ run, serialized: JSON.stringify(run) });
-      stage.retainedRecordCount += 1;
+      stage.acceptedRecordCount += 1;
+      retainStageRun(stage, run);
     }
     return;
   }
   const routing = routingFeedbackSchema.safeParse(record);
   if (routing.success) {
-    stage.routingFeedback.push(routing.data);
-    stage.retainedRecordCount += 1;
+    stage.acceptedRecordCount += 1;
+    if (retainMetricIdentity(stage, routing.data.executionIdHash)) {
+      retainLatestFeedback(stage.routingFeedback, routing.data);
+    }
     return;
   }
   const directEdit = directEditFeedbackSchema.safeParse(record);
   if (directEdit.success) {
-    stage.directEditFeedback.push(directEdit.data);
-    stage.retainedRecordCount += 1;
+    stage.acceptedRecordCount += 1;
+    if (retainMetricIdentity(stage, directEdit.data.executionIdHash)) {
+      retainLatestFeedback(stage.directEditFeedback, directEdit.data);
+    }
   }
 }
 
@@ -426,11 +526,8 @@ function readMetricFileSnapshot(candidate, selection, remainingBudget, stage, di
     if (fileInvalid) {
       diagnostics.changedFileCount += 1;
       diagnostics.truncated = true;
-      diagnostics.droppedRecordCount += stage.retainedRecordCount;
-      stage.runs.length = 0;
-      stage.routingFeedback.length = 0;
-      stage.directEditFeedback.length = 0;
-      stage.retainedRecordCount = 0;
+      diagnostics.droppedRecordCount += stage.acceptedRecordCount;
+      stage.fileChanged = true;
     }
   }
 }
@@ -587,8 +684,13 @@ export function readRecentRuns(configuration, options = {}) {
   const metricsDirectory = options.metricsDirectory || path.join(configuration.statePaths.logs, "metrics");
   const selection = selectMetricFiles(metricsDirectory, { maxFiles, maxBytes });
   const periodStart = now.getTime() - days * 86400000;
-  const runsByIdentity = new Map();
-  const conflictingIdentities = new Set();
+  const state = {
+    runsByIdentity: new Map(),
+    conflictingIdentities: new Set(),
+    routingFeedback: new Map(),
+    directEditFeedback: new Map(),
+    retainedIdentityCount: 0
+  };
   const diagnostics = {
     bytesRead: 0,
     requestedBytes: 0,
@@ -602,42 +704,20 @@ export function readRecentRuns(configuration, options = {}) {
     changedFileCount: 0,
     appendedFileCount: 0,
     readErrorCount: 0,
+    stateLimitDroppedRecordCount: 0,
+    stateLimitSkippedLineCount: 0,
+    stateLimitExceededFileCount: 0,
     truncated: selection.truncated
   };
-  const routingFeedbackRecords = [];
-  const directEditFeedbackRecords = [];
   for (const candidate of selection.files) {
     const stage = createMetricFileStage();
     const remainingBudget = maxBytes - diagnostics.bytesRead;
     readMetricFileSnapshot(candidate, selection, remainingBudget, stage, diagnostics, periodStart, now.getTime());
-    for (const { run, serialized } of stage.runs) {
-      const existing = runsByIdentity.get(run.identity);
-      if (existing && existing.serialized !== serialized) {
-        conflictingIdentities.add(run.identity);
-        runsByIdentity.delete(run.identity);
-      } else if (!existing && !conflictingIdentities.has(run.identity)) {
-        runsByIdentity.set(run.identity, { run, serialized });
-      }
-    }
-    routingFeedbackRecords.push(...stage.routingFeedback);
-    directEditFeedbackRecords.push(...stage.directEditFeedback);
+    retainValidatedMetricFile(stage, state, diagnostics);
   }
-  const selectedRuns = [...runsByIdentity.values()].map((entry) => entry.run)
+  const selectedRuns = [...state.runsByIdentity.values()]
     .sort((left, right) => Date.parse(right.recordedAt) - Date.parse(left.recordedAt))
     .slice(0, limit);
-  const selectedExecutionHashes = new Set(selectedRuns.filter((run) => run.kind === "execution").map((run) => run.fullHash));
-  const routingFeedback = new Map();
-  const directEditFeedback = new Map();
-  for (const record of routingFeedbackRecords) {
-    if (!selectedExecutionHashes.has(record.executionIdHash)) continue;
-    const existing = routingFeedback.get(record.executionIdHash);
-    if (!existing || Date.parse(existing.recordedAt) < Date.parse(record.recordedAt)) routingFeedback.set(record.executionIdHash, record);
-  }
-  for (const record of directEditFeedbackRecords) {
-    if (!selectedExecutionHashes.has(record.executionIdHash)) continue;
-    const existing = directEditFeedback.get(record.executionIdHash);
-    if (!existing || Date.parse(existing.recordedAt) < Date.parse(record.recordedAt)) directEditFeedback.set(record.executionIdHash, record);
-  }
   const prefixes = uniquePrefixes(selectedRuns.map((run) => run.fullHash));
   return {
     sourceClass: "canonical_metrics",
@@ -647,7 +727,7 @@ export function readRecentRuns(configuration, options = {}) {
     scope: "structural_metadata_only",
     integrity: "best_effort_not_cryptographically_verified",
     truncated: diagnostics.truncated,
-    conflictCount: conflictingIdentities.size,
+    conflictCount: state.conflictingIdentities.size,
     invalidRecordCount: diagnostics.invalidRecordCount,
     runCount: selectedRuns.length,
     snapshot: {
@@ -660,6 +740,11 @@ export function readRecentRuns(configuration, options = {}) {
       maximumPendingRecordBytes: diagnostics.maximumPendingRecordBytes,
       processedRecordCount: diagnostics.processedRecordCount,
       droppedRecordCount: diagnostics.droppedRecordCount,
+      maximumRetainedExecutionIdentities,
+      retainedExecutionIdentityCount: state.retainedIdentityCount,
+      stateLimitDroppedRecordCount: diagnostics.stateLimitDroppedRecordCount,
+      stateLimitSkippedLineCount: diagnostics.stateLimitSkippedLineCount,
+      stateLimitExceededFileCount: diagnostics.stateLimitExceededFileCount,
       oversizedRecordCount: diagnostics.oversizedRecordCount,
       partialRecordCount: diagnostics.partialRecordCount,
       changedFileCount: diagnostics.changedFileCount,
@@ -692,8 +777,8 @@ export function readRecentRuns(configuration, options = {}) {
       retries: run.retries,
       ...(run.reviewContract ? { reviewContract: run.reviewContract } : {}),
       feedback: run.kind === "legacy" ? { routing: "not_applicable", directEdit: "not_applicable" } : {
-        routing: routingFeedback.get(run.fullHash)?.outcome || "pending",
-        directEdit: directEditFeedback.get(run.fullHash)?.outcome || "pending"
+        routing: state.routingFeedback.get(run.fullHash)?.outcome || "pending",
+        directEdit: state.directEditFeedback.get(run.fullHash)?.outcome || "pending"
       }
     }))
   };

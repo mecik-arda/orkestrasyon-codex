@@ -1,6 +1,6 @@
 # Recent Runs Gözlemlenebilirlik Planı
 
-> Durum notu (2026-11-06): `recent-runs` canonical JSONL okuyucusu descriptor tabanlı sınırlı okuma, tek snapshot üzerinden run/feedback eşleme, 256 KiB kayıt framer'ı ve değişiklik göstergeleriyle sertleştirildi. Kaynak durumunun `available` olması snapshot bütünlüğü anlamına gelmez; `snapshot.status` ayrıdır. Kilide uymayan aynı dosya yazıcılarına karşı atomik snapshot garantisi verilmez. Tarihsel uygulama denetimi `docs/reports/PLAN_UYGULAMA_DENETIMI_2026-09-18.md` içindedir; güncel doğrulama `npm test` ve proje verify kapılarıdır.
+> Durum notu (2026-11-06): `recent-runs` canonical JSONL okuyucusu descriptor tabanlı sınırlı okuma, tek snapshot üzerinden run/feedback eşleme, 256 KiB kayıt framer'ı, dosya değişikliği göstergeleri ve 50.000 benzersiz execution kimliğiyle sınırlı aggregate durumla sertleştirildi. Kimlik sınırı aşılırsa ilgili dosyanın aşaması bütünüyle atılır ve snapshot kısmi bildirilir; yinelenen feedback kimlik/tür başına tek kayda sıkıştırılır. Kaynak durumunun `available` olması snapshot bütünlüğü anlamına gelmez; `snapshot.status` ayrıdır. Kilide uymayan aynı dosya yazıcılarına karşı atomik snapshot garantisi verilmez. Tarihsel uygulama denetimi `docs/reports/PLAN_UYGULAMA_DENETIMI_2026-09-18.md` içindedir; güncel doğrulama `npm test` ve proje verify kapılarıdır.
 
 > Durum notu (2026-09-18): Bu belge tarihsel plandır; uygulama denetimi `docs/reports/PLAN_UYGULAMA_DENETIMI_2026-09-18.md` içindedir. Plandaki test ve araç sayıları oluşturulma tarihine aittir; güncel doğrulama için `npm test`. Denetim sonucu: tamamlandı (opt-in mirror varsayılan kapalı).
 
@@ -22,7 +22,9 @@ Global `runs:recent` komutu mevcut redacted metrics JSONL dosyalarını salt-oku
 
 ## Uygulama Durumu
 
-2026-11-06 güncellemesi: Seçilen dosyalar toplam 64 MiB ve 64 dosya sınırında descriptor üzerinden 16 KiB parçalarla okunur; JSONL kaydı 256 KiB ile sınırlıdır. Run ve feedback aynı okuma snapshot'ından işlenir. `snapshot.status` dosya verisinin tam okunup okunmadığını `sourceStatus` dizin erişilebilirliğinden ayırır. Gözlenen append, dosya değişikliği ve kısmi son satır `truncated`/snapshot tanısına yansır; kilide uymayan yazıcılara karşı OS düzeyinde atomik snapshot garantisi verilmez.
+2026-11-06 güncellemesi: Seçilen dosyalar toplam 64 MiB ve 64 dosya sınırında descriptor üzerinden 16 KiB parçalarla okunur; JSONL kaydı 256 KiB ile sınırlıdır. Run ve feedback aynı okuma snapshot'ından işlenir. Dosya başına geçici aşama ve dosyalar arası tutulan durum en fazla 50.000 farklı execution kimliği taşır; run, conflict, routing feedback ve direct-edit feedback bu birleşik kimlik sayısına dahildir. Her feedback türünde kimlik başına en yeni kayıt saklanır; eşit zaman damgalarında deterministik dosya/satır tarama sırasındaki ilk kayıt korunur. Sınır aşılınca dosyanın tüm aşaması birleştirilmez; `stateLimitDroppedRecordCount`, `stateLimitSkippedLineCount` ve `stateLimitExceededFileCount` tanıları ile `snapshot.status=partial` ve `truncated=true` döner. Bu sayısal durum sınırıdır, kesin heap-byte garantisi değildir. `snapshot.status` dosya verisinin tam okunup okunmadığını `sourceStatus` dizin erişilebilirliğinden ayırır. Gözlenen append, dosya değişikliği ve kısmi son satır `truncated`/snapshot tanısına yansır; kilide uymayan yazıcılara karşı OS düzeyinde atomik snapshot garantisi verilmez.
+
+Son teslim doğrulaması (2026-11-06): hedefli recent-runs testleri 39/39 geçti. `npm run verify:local` başarılı tamamlandı; `verify:ci`, tam `npm test`, ayrı seri benchmark, sentetik stdio smoke ve sentetik config verify aşamalarının tümü geçti. Benchmark 10 saniye 33 ms sürdü. Runner kişisel config ve gerçek Vault yerine geçici sentetik yapılandırma/Vault kullandı, provider credential'larını aktarmadı ve kaynak snapshot'ının koşu boyunca değişmediğini doğruladı. Bu sonuçlar bağımsız Sol incelemesi değildir.
 
 Her iki faz 2026-08-11 tarihinde uygulanmıştır:
 
@@ -259,7 +261,7 @@ truncated: false
 - Aynı run hash'i altında çelişkili sonuçlar varsa satır gösterilmez ve `conflictCount` artırılır.
 - En fazla 64 beklenen JSONL dosyası ve toplam 64 MiB veri en yeniden eskiye okunur.
 - Kaynak sınırına ulaşıldığında sonuç `truncated: true` ile işaretlenir.
-- Reader önce zaman ve limit kurallarıyla en fazla 200 run seçer. Feedback akışlarında yalnız bu run'ların tam execution hash'leriyle eşleşen kayıtlar bellekte tutulur; bütün feedback geçmişi join için belleğe yüklenmez.
+- Reader, feedback daha sonraki bir dosyada bulunan run'dan önce gelebileceği için sonuç seçilmeden feedback ve run'ları aynı dosya aşamasında biriktirir. Dosya başına ve toplamda en fazla 50.000 farklı execution kimliği tutulur; her kimlik/tür için yalnız en yeni feedback kaydı korunur. Dosya geçersizse aşaması genel sonuca katılmaz. Sınır taşarsa aşama bütünüyle düşürülür ve snapshot kısmi olur; görülmeyen satırlar hakkında conflict veya newest-feedback yokluğu sonucu çıkarılamaz. Son görünümde feedback yalnız seçilen run'ların tam hash'iyle birleştirilir.
 
 ## DeepSeek Legacy Sınırı
 

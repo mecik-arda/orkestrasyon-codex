@@ -170,21 +170,48 @@ const directEditFeedbackSchema = z.object({
   outcome: z.enum(["accepted", "minor_fix", "reverted", "security_concern"])
 }).strict();
 
+const maximumRecentRunFiles = 64;
+const maximumRecentRunBytes = 64 * 1024 * 1024;
+const maximumMetricRecordBytes = 256 * 1024;
+const metricReadChunkBytes = 16 * 1024;
+const fatalUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
 function isPathInside(candidatePath, rootPath) {
   const relativePath = path.relative(rootPath, candidatePath);
   return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
 }
 
+function metricFileIdentity(status) {
+  return [status.dev, status.ino, status.mode, status.nlink, status.size, status.mtimeNs, status.ctimeNs].map(String).join(":");
+}
+
+function sameMetricFileObject(left, right) {
+  return left.dev === right.dev
+    && left.ino === right.ino
+    && left.mode === right.mode
+    && left.nlink === right.nlink;
+}
+
+function sameMetricFileSnapshot(left, right) {
+  return metricFileIdentity(left) === metricFileIdentity(right);
+}
+
+function validateMetricReadLimit(value, name, maximum) {
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new Error(`${name} must be a safe integer between 0 and ${maximum}`);
+  }
+}
+
 function selectMetricFiles(metricsDirectory, limits) {
-  if (!fs.existsSync(metricsDirectory)) return { files: [], truncated: false, sourceStatus: "missing", droppedFileCount: 0 };
+  if (!fs.existsSync(metricsDirectory)) return { files: [], canonicalRoot: null, truncated: false, sourceStatus: "missing", droppedFileCount: 0 };
   let rootStatus;
   let canonicalRoot;
   try {
-    rootStatus = fs.lstatSync(metricsDirectory);
-    if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) return { files: [], truncated: false, sourceStatus: "unsafe", droppedFileCount: 0 };
+    rootStatus = fs.lstatSync(metricsDirectory, { bigint: true });
+    if (!rootStatus.isDirectory() || rootStatus.isSymbolicLink()) return { files: [], canonicalRoot: null, truncated: false, sourceStatus: "unsafe", droppedFileCount: 0 };
     canonicalRoot = fs.realpathSync(metricsDirectory);
   } catch {
-    return { files: [], truncated: false, sourceStatus: "unreadable", droppedFileCount: 0 };
+    return { files: [], canonicalRoot: null, truncated: false, sourceStatus: "unreadable", droppedFileCount: 0 };
   }
   const candidates = [];
   let droppedFileCount = 0;
@@ -192,14 +219,14 @@ function selectMetricFiles(metricsDirectory, limits) {
   try {
     entries = fs.readdirSync(metricsDirectory, { withFileTypes: true });
   } catch {
-    return { files: [], truncated: false, sourceStatus: "unreadable", droppedFileCount: 0 };
+    return { files: [], canonicalRoot: null, truncated: false, sourceStatus: "unreadable", droppedFileCount: 0 };
   }
   for (const entry of entries) {
     if (!/-runs(?:-[a-zA-Z0-9-]+)?\.jsonl$/.test(entry.name) || entry.isSymbolicLink()) continue;
     const filePath = path.join(metricsDirectory, entry.name);
     try {
-      const status = fs.lstatSync(filePath);
-      if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1) {
+      const status = fs.lstatSync(filePath, { bigint: true });
+      if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1n) {
         droppedFileCount += 1;
         continue;
       }
@@ -208,48 +235,204 @@ function selectMetricFiles(metricsDirectory, limits) {
         droppedFileCount += 1;
         continue;
       }
-      candidates.push({ filePath: realPath, mtimeMs: status.mtimeMs, size: status.size });
+      candidates.push({ filePath: realPath, snapshot: status, mtimeNs: status.mtimeNs, size: status.size });
     } catch {
       droppedFileCount += 1;
     }
   }
-  candidates.sort((left, right) => right.mtimeMs - left.mtimeMs || left.filePath.localeCompare(right.filePath));
+  candidates.sort((left, right) => left.mtimeNs === right.mtimeNs
+    ? left.filePath.localeCompare(right.filePath)
+    : left.mtimeNs > right.mtimeNs ? -1 : 1);
   const files = [];
-  let totalBytes = 0;
+  let totalBytes = 0n;
   let truncated = candidates.length > limits.maxFiles;
+  const maximumBytes = BigInt(limits.maxBytes);
   for (const candidate of candidates) {
-    if (files.length >= limits.maxFiles || totalBytes + candidate.size > limits.maxBytes) {
+    if (files.length >= limits.maxFiles || totalBytes + candidate.size > maximumBytes) {
       truncated = true;
       break;
     }
     files.push(candidate);
     totalBytes += candidate.size;
   }
-  return { files, truncated, sourceStatus: "available", droppedFileCount };
+  return { files, canonicalRoot, truncated, sourceStatus: "available", droppedFileCount };
 }
 
-function scanMetricFiles(selection, visit, countInvalid = true) {
-  let invalidRecordCount = 0;
-  for (const candidate of selection.files) {
-    try {
-      const status = fs.lstatSync(candidate.filePath);
-      if (!status.isFile() || status.isSymbolicLink() || status.nlink !== 1 || status.size !== candidate.size) {
-        if (countInvalid) invalidRecordCount += 1;
-        continue;
+function createMetricFileStage() {
+  return { runs: [], routingFeedback: [], directEditFeedback: [], retainedRecordCount: 0 };
+}
+
+function consumeMetricRecord(line, stage, diagnostics, periodStart, nowMs) {
+  if (line.length === 0) return;
+  diagnostics.processedRecordCount += 1;
+  let record;
+  try {
+    record = JSON.parse(fatalUtf8Decoder.decode(line));
+  } catch {
+    diagnostics.invalidRecordCount += 1;
+    diagnostics.droppedRecordCount += 1;
+    return;
+  }
+  const run = normalizeRun(record);
+  if (run) {
+    const recordedAt = Date.parse(run.recordedAt);
+    if (recordedAt >= periodStart && recordedAt <= nowMs) {
+      stage.runs.push({ run, serialized: JSON.stringify(run) });
+      stage.retainedRecordCount += 1;
+    }
+    return;
+  }
+  const routing = routingFeedbackSchema.safeParse(record);
+  if (routing.success) {
+    stage.routingFeedback.push(routing.data);
+    stage.retainedRecordCount += 1;
+    return;
+  }
+  const directEdit = directEditFeedbackSchema.safeParse(record);
+  if (directEdit.success) {
+    stage.directEditFeedback.push(directEdit.data);
+    stage.retainedRecordCount += 1;
+  }
+}
+
+function frameMetricBytes(chunk, state, stage, diagnostics, periodStart, nowMs) {
+  let offset = 0;
+  while (offset < chunk.length) {
+    const newlineIndex = chunk.indexOf(10, offset);
+    const segmentEnd = newlineIndex < 0 ? chunk.length : newlineIndex;
+    const segment = chunk.subarray(offset, segmentEnd);
+    if (state.discardingOversizedRecord) {
+      if (newlineIndex < 0) return;
+      state.discardingOversizedRecord = false;
+      state.pending = Buffer.alloc(0);
+      offset = newlineIndex + 1;
+      continue;
+    }
+    const combinedLength = state.pending.length + segment.length;
+    diagnostics.maximumPendingRecordBytes = Math.max(diagnostics.maximumPendingRecordBytes, Math.min(combinedLength, maximumMetricRecordBytes));
+    if (combinedLength > maximumMetricRecordBytes) {
+      diagnostics.oversizedRecordCount += 1;
+      diagnostics.invalidRecordCount += 1;
+      diagnostics.droppedRecordCount += 1;
+      diagnostics.truncated = true;
+      state.pending = Buffer.alloc(0);
+      state.discardingOversizedRecord = newlineIndex < 0;
+    } else {
+      const line = state.pending.length === 0 ? segment : Buffer.concat([state.pending, segment], combinedLength);
+      state.pending = Buffer.alloc(0);
+      if (newlineIndex < 0) {
+        state.pending = Buffer.from(line);
+        return;
       }
-      for (const line of fs.readFileSync(candidate.filePath, "utf8").split("\n")) {
-        if (!line) continue;
-        try {
-          visit(JSON.parse(line));
-        } catch {
-          if (countInvalid) invalidRecordCount += 1;
-        }
+      const recordLine = line.length > 0 && line.at(-1) === 13 ? line.subarray(0, line.length - 1) : line;
+      consumeMetricRecord(recordLine, stage, diagnostics, periodStart, nowMs);
+    }
+    if (newlineIndex < 0) return;
+    offset = newlineIndex + 1;
+  }
+}
+
+function finishMetricFileFrame(state, diagnostics) {
+  if (state.discardingOversizedRecord) return;
+  if (state.pending.length > 0) {
+    diagnostics.partialRecordCount += 1;
+    diagnostics.droppedRecordCount += 1;
+    diagnostics.truncated = true;
+    state.pending = Buffer.alloc(0);
+  }
+}
+
+function metricPathMatchesSnapshot(candidate, canonicalRoot) {
+  const pathStatus = fs.lstatSync(candidate.filePath, { bigint: true });
+  if (!pathStatus.isFile() || pathStatus.isSymbolicLink() || pathStatus.nlink !== 1n
+    || !sameMetricFileSnapshot(pathStatus, candidate.snapshot)) return false;
+  const realPath = fs.realpathSync(candidate.filePath);
+  return realPath === candidate.filePath && isPathInside(realPath, canonicalRoot);
+}
+
+function readMetricFileSnapshot(candidate, selection, remainingBudget, stage, diagnostics, periodStart, nowMs) {
+  let descriptor;
+  let fileInvalid = false;
+  let appended = false;
+  const framingState = { pending: Buffer.alloc(0), discardingOversizedRecord: false };
+  try {
+    if (!metricPathMatchesSnapshot(candidate, selection.canonicalRoot)) {
+      fileInvalid = true;
+      return;
+    }
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    descriptor = fs.openSync(candidate.filePath, fs.constants.O_RDONLY | noFollow);
+    const openedStatus = fs.fstatSync(descriptor, { bigint: true });
+    if (!openedStatus.isFile() || openedStatus.nlink !== 1n || !sameMetricFileSnapshot(openedStatus, candidate.snapshot)) {
+      fileInvalid = true;
+      return;
+    }
+    const snapshotBytes = candidate.snapshot.size;
+    const targetBytes = snapshotBytes < BigInt(remainingBudget) ? snapshotBytes : BigInt(remainingBudget);
+    const buffer = Buffer.allocUnsafe(metricReadChunkBytes);
+    let position = 0n;
+    while (position < targetBytes) {
+      const requestedBytes = Number((targetBytes - position) < BigInt(metricReadChunkBytes)
+        ? targetBytes - position
+        : BigInt(metricReadChunkBytes));
+      diagnostics.requestedBytes += requestedBytes;
+      diagnostics.maximumReadRequestBytes = Math.max(diagnostics.maximumReadRequestBytes, requestedBytes);
+      const bytesRead = fs.readSync(descriptor, buffer, 0, requestedBytes, Number(position));
+      if (bytesRead === 0) {
+        fileInvalid = true;
+        break;
       }
-    } catch {
-      if (countInvalid) invalidRecordCount += 1;
+      diagnostics.bytesRead += bytesRead;
+      position += BigInt(bytesRead);
+      frameMetricBytes(buffer.subarray(0, bytesRead), framingState, stage, diagnostics, periodStart, nowMs);
+    }
+    if (position !== targetBytes || targetBytes !== snapshotBytes) fileInvalid = true;
+    const afterStatus = fs.fstatSync(descriptor, { bigint: true });
+    const pathStatus = fs.lstatSync(candidate.filePath, { bigint: true });
+    const pathRealPath = fs.realpathSync(candidate.filePath);
+    if (!sameMetricFileObject(openedStatus, afterStatus)
+      || !sameMetricFileObject(openedStatus, pathStatus)
+      || !pathStatus.isFile()
+      || pathStatus.isSymbolicLink()
+      || pathStatus.nlink !== 1n
+      || pathRealPath !== candidate.filePath
+      || !isPathInside(pathRealPath, selection.canonicalRoot)
+      || afterStatus.size < snapshotBytes
+      || pathStatus.size < snapshotBytes) {
+      fileInvalid = true;
+    } else if (afterStatus.size > snapshotBytes || pathStatus.size > snapshotBytes) {
+      appended = true;
+      diagnostics.truncated = true;
+    } else if (afterStatus.mtimeNs !== openedStatus.mtimeNs || afterStatus.ctimeNs !== openedStatus.ctimeNs
+      || pathStatus.mtimeNs !== openedStatus.mtimeNs || pathStatus.ctimeNs !== openedStatus.ctimeNs) {
+      fileInvalid = true;
+    }
+    if (!fileInvalid) {
+      finishMetricFileFrame(framingState, diagnostics);
+      if (appended) diagnostics.appendedFileCount += 1;
+    }
+  } catch {
+    diagnostics.readErrorCount += 1;
+    fileInvalid = true;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        diagnostics.readErrorCount += 1;
+        fileInvalid = true;
+      }
+    }
+    if (fileInvalid) {
+      diagnostics.changedFileCount += 1;
+      diagnostics.truncated = true;
+      diagnostics.droppedRecordCount += stage.retainedRecordCount;
+      stage.runs.length = 0;
+      stage.routingFeedback.length = 0;
+      stage.directEditFeedback.length = 0;
+      stage.retainedRecordCount = 0;
     }
   }
-  return invalidRecordCount;
 }
 
 function lastAttemptDiagnosis(attempts, fallback = {}) {
@@ -399,42 +582,62 @@ export function readRecentRuns(configuration, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   if (!Number.isInteger(days) || days < 1 || days > 45) throw new Error("days must be an integer between 1 and 45");
   if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error("limit must be an integer between 1 and 200");
+  validateMetricReadLimit(maxFiles, "maxFiles", maximumRecentRunFiles);
+  validateMetricReadLimit(maxBytes, "maxBytes", maximumRecentRunBytes);
   const metricsDirectory = options.metricsDirectory || path.join(configuration.statePaths.logs, "metrics");
   const selection = selectMetricFiles(metricsDirectory, { maxFiles, maxBytes });
   const periodStart = now.getTime() - days * 86400000;
   const runsByIdentity = new Map();
   const conflictingIdentities = new Set();
-  let invalidRecordCount = scanMetricFiles(selection, (record) => {
-    const run = normalizeRun(record);
-    if (!run || Date.parse(run.recordedAt) < periodStart || Date.parse(run.recordedAt) > now.getTime()) return;
-    const serialized = JSON.stringify(run);
-    const existing = runsByIdentity.get(run.identity);
-    if (existing && existing.serialized !== serialized) {
-      conflictingIdentities.add(run.identity);
-      runsByIdentity.delete(run.identity);
-      return;
+  const diagnostics = {
+    bytesRead: 0,
+    requestedBytes: 0,
+    maximumReadRequestBytes: 0,
+    maximumPendingRecordBytes: 0,
+    processedRecordCount: 0,
+    droppedRecordCount: 0,
+    invalidRecordCount: 0,
+    oversizedRecordCount: 0,
+    partialRecordCount: 0,
+    changedFileCount: 0,
+    appendedFileCount: 0,
+    readErrorCount: 0,
+    truncated: selection.truncated
+  };
+  const routingFeedbackRecords = [];
+  const directEditFeedbackRecords = [];
+  for (const candidate of selection.files) {
+    const stage = createMetricFileStage();
+    const remainingBudget = maxBytes - diagnostics.bytesRead;
+    readMetricFileSnapshot(candidate, selection, remainingBudget, stage, diagnostics, periodStart, now.getTime());
+    for (const { run, serialized } of stage.runs) {
+      const existing = runsByIdentity.get(run.identity);
+      if (existing && existing.serialized !== serialized) {
+        conflictingIdentities.add(run.identity);
+        runsByIdentity.delete(run.identity);
+      } else if (!existing && !conflictingIdentities.has(run.identity)) {
+        runsByIdentity.set(run.identity, { run, serialized });
+      }
     }
-    if (!existing && !conflictingIdentities.has(run.identity)) runsByIdentity.set(run.identity, { run, serialized });
-  });
+    routingFeedbackRecords.push(...stage.routingFeedback);
+    directEditFeedbackRecords.push(...stage.directEditFeedback);
+  }
   const selectedRuns = [...runsByIdentity.values()].map((entry) => entry.run)
     .sort((left, right) => Date.parse(right.recordedAt) - Date.parse(left.recordedAt))
     .slice(0, limit);
   const selectedExecutionHashes = new Set(selectedRuns.filter((run) => run.kind === "execution").map((run) => run.fullHash));
   const routingFeedback = new Map();
   const directEditFeedback = new Map();
-  scanMetricFiles(selection, (record) => {
-    const routing = routingFeedbackSchema.safeParse(record);
-    if (routing.success && selectedExecutionHashes.has(routing.data.executionIdHash)) {
-      const existing = routingFeedback.get(routing.data.executionIdHash);
-      if (!existing || Date.parse(existing.recordedAt) < Date.parse(routing.data.recordedAt)) routingFeedback.set(routing.data.executionIdHash, routing.data);
-      return;
-    }
-    const directEdit = directEditFeedbackSchema.safeParse(record);
-    if (directEdit.success && selectedExecutionHashes.has(directEdit.data.executionIdHash)) {
-      const existing = directEditFeedback.get(directEdit.data.executionIdHash);
-      if (!existing || Date.parse(existing.recordedAt) < Date.parse(directEdit.data.recordedAt)) directEditFeedback.set(directEdit.data.executionIdHash, directEdit.data);
-    }
-  }, false);
+  for (const record of routingFeedbackRecords) {
+    if (!selectedExecutionHashes.has(record.executionIdHash)) continue;
+    const existing = routingFeedback.get(record.executionIdHash);
+    if (!existing || Date.parse(existing.recordedAt) < Date.parse(record.recordedAt)) routingFeedback.set(record.executionIdHash, record);
+  }
+  for (const record of directEditFeedbackRecords) {
+    if (!selectedExecutionHashes.has(record.executionIdHash)) continue;
+    const existing = directEditFeedback.get(record.executionIdHash);
+    if (!existing || Date.parse(existing.recordedAt) < Date.parse(record.recordedAt)) directEditFeedback.set(record.executionIdHash, record);
+  }
   const prefixes = uniquePrefixes(selectedRuns.map((run) => run.fullHash));
   return {
     sourceClass: "canonical_metrics",
@@ -443,10 +646,26 @@ export function readRecentRuns(configuration, options = {}) {
     droppedFileCount: selection.droppedFileCount,
     scope: "structural_metadata_only",
     integrity: "best_effort_not_cryptographically_verified",
-    truncated: selection.truncated,
+    truncated: diagnostics.truncated,
     conflictCount: conflictingIdentities.size,
-    invalidRecordCount,
+    invalidRecordCount: diagnostics.invalidRecordCount,
     runCount: selectedRuns.length,
+    snapshot: {
+      status: selection.sourceStatus !== "available"
+        ? "unavailable"
+        : diagnostics.truncated || selection.droppedFileCount > 0 || diagnostics.readErrorCount > 0 || diagnostics.changedFileCount > 0 ? "partial" : "complete",
+      bytesRead: diagnostics.bytesRead,
+      requestedBytes: diagnostics.requestedBytes,
+      maximumReadRequestBytes: diagnostics.maximumReadRequestBytes,
+      maximumPendingRecordBytes: diagnostics.maximumPendingRecordBytes,
+      processedRecordCount: diagnostics.processedRecordCount,
+      droppedRecordCount: diagnostics.droppedRecordCount,
+      oversizedRecordCount: diagnostics.oversizedRecordCount,
+      partialRecordCount: diagnostics.partialRecordCount,
+      changedFileCount: diagnostics.changedFileCount,
+      appendedFileCount: diagnostics.appendedFileCount,
+      readErrorCount: diagnostics.readErrorCount
+    },
     runs: selectedRuns.map((run) => ({
       recordedAt: run.recordedAt,
       feedbackId: prefixes.get(run.fullHash),

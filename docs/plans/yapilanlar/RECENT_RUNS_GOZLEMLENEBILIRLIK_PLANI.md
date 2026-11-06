@@ -1,5 +1,7 @@
 # Recent Runs Gözlemlenebilirlik Planı
 
+> Durum notu (2026-11-06): `recent-runs` canonical JSONL okuyucusu descriptor tabanlı sınırlı okuma, tek snapshot üzerinden run/feedback eşleme, 256 KiB kayıt framer'ı ve değişiklik göstergeleriyle sertleştirildi. Kaynak durumunun `available` olması snapshot bütünlüğü anlamına gelmez; `snapshot.status` ayrıdır. Kilide uymayan aynı dosya yazıcılarına karşı atomik snapshot garantisi verilmez. Tarihsel uygulama denetimi `docs/reports/PLAN_UYGULAMA_DENETIMI_2026-09-18.md` içindedir; güncel doğrulama `npm test` ve proje verify kapılarıdır.
+
 > Durum notu (2026-09-18): Bu belge tarihsel plandır; uygulama denetimi `docs/reports/PLAN_UYGULAMA_DENETIMI_2026-09-18.md` içindedir. Plandaki test ve araç sayıları oluşturulma tarihine aittir; güncel doğrulama için `npm test`. Denetim sonucu: tamamlandı (opt-in mirror varsayılan kapalı).
 
 ## Karar
@@ -19,6 +21,8 @@ Global metrics
 Global `runs:recent` komutu mevcut redacted metrics JSONL dosyalarını salt-okunur okur. Proje-local mirror global kaydın yerine geçmez; kolay proje bağlamı için güvenli bir alt kümesini yazar.
 
 ## Uygulama Durumu
+
+2026-11-06 güncellemesi: Seçilen dosyalar toplam 64 MiB ve 64 dosya sınırında descriptor üzerinden 16 KiB parçalarla okunur; JSONL kaydı 256 KiB ile sınırlıdır. Run ve feedback aynı okuma snapshot'ından işlenir. `snapshot.status` dosya verisinin tam okunup okunmadığını `sourceStatus` dizin erişilebilirliğinden ayırır. Gözlenen append, dosya değişikliği ve kısmi son satır `truncated`/snapshot tanısına yansır; kilide uymayan yazıcılara karşı OS düzeyinde atomik snapshot garantisi verilmez.
 
 Her iki faz 2026-08-11 tarihinde uygulanmıştır:
 

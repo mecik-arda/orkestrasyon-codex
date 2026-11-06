@@ -1,5 +1,9 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-11-06 18:03 Türkiye — 392b550 için sentetik verify teslimi
+
+`392b550cdfa82721de9dd2ed0597d3c0b8538f7d` DeepSeek adapter iptal/HTTP yaşam döngüsü değişikliğinin güncel `main` HEAD'i `0664f1eda246e514931bb8e370d4b6fdafdd7705` üzerindeki doğrulama teslimi, yalnız mevcut sentetik config/Vault mekanizmasıyla `node scripts/verify-project.js` çalıştırılarak tamamlandı. `verify-local` içindeki `prepareSyntheticExecutionContext` ve `validateSyntheticExecutionContext`, dağıtım policy/agents kopyalarını ve geçici Vault'u oluşturup doğruladı; child ortamı bu doğrulanmış sentetik ortamla sınırlandı. Dosya ve skill kontrolleri geçti, Codex doğrulaması yalnız `--version` oldu. DeepSeek anahtarı child ortamında yoktu; kaynakta anahtar yokken `/models` isteği yapılmadan dönen yol doğrulandı. `verify` sonucu başarılı; geçici sentetik kök temizlendi. Kişisel config, gerçek Vault, harici provider, model inference, smoke, tam npm test veya restart çalıştırılmadı. Bu koşu verify doğrulamasıdır; `392b550` için önceki test kanıtını tekrarlamaz veya bağımsız Sol incelemesini kapatmaz.
+
 ## 2026-11-06 verify:local kaynak snapshot bütünlüğü
 
 `captureSourceSnapshot` geçici Git depolarında sınandı. Önceki yol tabanlı açma akışı ara dizin junction/symlink üzerinden repo dışındaki hedefe ulaşabiliyor, doğrulanan yol yerine aynı path'i yeniden açıyor ve büyük dosya akışı sırasında `AbortSignal` iptalini izlemiyordu. Dosya başına başlangıç/son `lstat` kalıcı değişiklikleri çoğunlukla yakalasa da hash bittikten sonra, diğer kaynaklar taranırken yapılan değişikliği doğrulamıyordu. Git index SHA-256 karşılaştırması ve başlangıç/bitiş Git yol kümesi kontrolü zaten vardı; sentetik testler index-only ve yol kümesi değişimlerinin bunlarla reddedildiğini doğruladı.

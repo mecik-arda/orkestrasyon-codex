@@ -378,7 +378,14 @@ function makeSkippedStage(stage, reason) {
     durationMs: 0,
     timeoutMs: stage.timeoutMs,
     outputBytes: 0,
-    processTreeCleanup: null
+    processTreeCleanup: {
+      status: "not_applied",
+      method: "stage_not_started",
+      terminationRequested: false,
+      directChildExited: null,
+      stdioClosed: null,
+      forcedStdioClose: false
+    }
   };
 }
 
@@ -411,7 +418,21 @@ export async function executeVerificationStages(stages, options = {}) {
         signal: options.signal
       });
     } catch (error) {
-      result = { status: "runner_error", errorCode: safeErrorCode(error), exitCode: null, durationMs: 0, outputBytes: 0, processTreeCleanup: null };
+      result = {
+        status: "runner_error",
+        errorCode: safeErrorCode(error),
+        exitCode: null,
+        durationMs: 0,
+        outputBytes: 0,
+        processTreeCleanup: {
+          status: "not_applied",
+          method: "runner_error",
+          terminationRequested: false,
+          directChildExited: null,
+          stdioClosed: null,
+          forcedStdioClose: false
+        }
+      };
     }
     const item = {
       id: stage.id,
@@ -454,77 +475,173 @@ function terminationTaskkillPath() {
   }
 }
 
-function terminateProcessTree(child) {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return { terminated: true, method: "already_exited" };
+function terminateProcessTree(child, processControl = {}) {
+  if (!child.pid) return { status: "not_applied", method: "not_spawned", terminationRequested: false, errorCode: null };
+  if (child.exitCode !== null || child.signalCode !== null) return { status: "unconfirmed", method: "parent_already_exited", terminationRequested: false, errorCode: null };
   if (process.platform === "win32") {
-    const taskkillPath = terminationTaskkillPath();
+    const resolveTaskkillPath = processControl.taskkillPathResolver || terminationTaskkillPath;
+    const runTaskkill = processControl.spawnSync || spawnSync;
+    const sendDirectChildSignal = processControl.sendDirectChildSignal || ((target, signal) => target.kill(signal));
+    const taskkillPath = resolveTaskkillPath();
     if (taskkillPath) {
+      let taskkillErrorCode = null;
+      let taskkillExitCode = null;
       try {
-        const result = spawnSync(taskkillPath, ["/PID", String(child.pid), "/T", "/F"], {
+        const result = runTaskkill(taskkillPath, ["/PID", String(child.pid), "/T", "/F"], {
           env: createMinimalSystemEnvironment(),
           timeout: 5000,
           windowsHide: true,
           stdio: "ignore"
         });
-        if (result.status === 0) return { terminated: true, tree: true, method: "taskkill_tree" };
-      } catch {
+        if (result.status === 0) return { status: "unconfirmed", method: "taskkill_tree", terminationRequested: true, errorCode: null, toolExitCode: 0 };
+        taskkillErrorCode = result.error ? safeErrorCode(result.error) : null;
+        taskkillExitCode = Number.isInteger(result.status) ? result.status : null;
+      } catch (error) {
+        taskkillErrorCode = safeErrorCode(error);
+      }
+      try {
+        const signalled = sendDirectChildSignal(child, "SIGTERM");
+        return {
+          status: "unconfirmed",
+          method: "direct_fallback",
+          terminationRequested: signalled,
+          errorCode: taskkillErrorCode,
+          ...(Number.isInteger(taskkillExitCode) ? { toolExitCode: taskkillExitCode } : {})
+        };
+      } catch (error) {
+        return { status: "failed", method: "direct_fallback", terminationRequested: false, errorCode: safeErrorCode(error) };
       }
     }
     try {
-      return { terminated: child.kill("SIGTERM"), tree: false, method: "direct_fallback" };
-    } catch {
-      return { terminated: false, tree: false, method: "direct_fallback" };
+      const signalled = sendDirectChildSignal(child, "SIGTERM");
+      return { status: "unconfirmed", method: "direct_fallback", terminationRequested: signalled, errorCode: null };
+    } catch (error) {
+      return { status: "failed", method: "direct_fallback", terminationRequested: false, errorCode: safeErrorCode(error) };
     }
   }
+  const sendProcessGroupSignal = processControl.sendProcessGroupSignal || ((pid, signal) => process.kill(-pid, signal));
+  const processGroupIsRunning = processControl.processGroupIsRunning || ((pid) => {
+    try {
+      process.kill(-pid, 0);
+      return true;
+    } catch (error) {
+      return error.code !== "ESRCH";
+    }
+  });
+  const sendDirectChildSignal = processControl.sendDirectChildSignal || ((target, signal) => target.kill(signal));
   try {
-    process.kill(-child.pid, "SIGTERM");
-    setTimeout(() => {
+    sendProcessGroupSignal(child.pid, "SIGTERM");
+    const escalationTimer = setTimeout(() => {
       try {
-        process.kill(-child.pid, "SIGKILL");
+        sendProcessGroupSignal(child.pid, "SIGKILL");
       } catch {
       }
     }, 750).unref();
-    return { terminated: true, tree: true, method: "process_group" };
-  } catch {
+    return { status: "unconfirmed", method: "process_group", terminationRequested: true, errorCode: null, processGroupIsRunning, escalationTimer };
+  } catch (error) {
     try {
-      return { terminated: child.kill("SIGTERM"), tree: false, method: "direct_fallback" };
-    } catch {
-      return { terminated: false, tree: false, method: "direct_fallback" };
+      const signalled = sendDirectChildSignal(child, "SIGTERM");
+      return { status: signalled ? "unconfirmed" : "failed", method: "direct_fallback", terminationRequested: signalled, errorCode: safeErrorCode(error) };
+    } catch (fallbackError) {
+      return { status: "failed", method: "direct_fallback", terminationRequested: false, errorCode: safeErrorCode(fallbackError) };
     }
   }
 }
 
-export function runCommand(options) {
+const processTerminationGraceMs = 1500;
+const processTerminationSettleMs = 500;
+
+export function runCommand(options, processControl = {}) {
   const startedAt = Date.now();
   if (options.signal?.aborted) {
-    return Promise.resolve({ status: "cancelled", exitCode: null, durationMs: 0, outputBytes: 0, processTreeCleanup: true });
+    return Promise.resolve({
+      status: "cancelled",
+      exitCode: null,
+      durationMs: 0,
+      outputBytes: 0,
+      processTreeCleanup: { status: "not_applied", method: "pre_aborted", terminationRequested: false, directChildExited: null, stdioClosed: null, forcedStdioClose: false }
+    });
   }
   return new Promise((resolve) => {
     let child;
     let outputBytes = 0;
     let terminalStatus = null;
-    let processTreeCleanup = null;
+    let termination = null;
+    let directChildExited = false;
+    let stdioClosed = false;
+    let forcedStdioClose = false;
     let finalized = false;
     let timer;
+    let terminationTimer;
+    let settleTimer;
     let abortListener;
     const finalize = (exitCode, errorCode = null) => {
       if (finalized) return;
       finalized = true;
       clearTimeout(timer);
+      clearTimeout(terminationTimer);
+      clearTimeout(settleTimer);
+      clearTimeout(termination?.escalationTimer);
       options.signal?.removeEventListener("abort", abortListener);
+      let cleanupStatus = "not_applied";
+      if (termination) {
+        cleanupStatus = termination.status;
+        if (termination.status === "unconfirmed" && directChildExited && stdioClosed && !forcedStdioClose) {
+          if (termination.method === "process_group") {
+            try {
+              const groupRunning = termination.processGroupIsRunning(child.pid);
+              cleanupStatus = groupRunning === false ? "confirmed" : groupRunning === true ? "failed" : "unconfirmed";
+            } catch {
+              cleanupStatus = "unconfirmed";
+            }
+          } else if (termination.method === "taskkill_tree") {
+            cleanupStatus = "confirmed";
+          }
+        }
+        if (!directChildExited && cleanupStatus !== "failed") cleanupStatus = "failed";
+      }
       resolve({
         status: terminalStatus || (errorCode ? "spawn_error" : exitCode === 0 ? "passed" : "failed"),
         exitCode,
         durationMs: Date.now() - startedAt,
         outputBytes,
-        processTreeCleanup,
+        processTreeCleanup: {
+          status: cleanupStatus,
+          method: termination?.method || "none",
+          terminationRequested: termination?.terminationRequested || false,
+          directChildExited,
+          stdioClosed,
+          forcedStdioClose,
+          ...(termination?.errorCode ? { errorCode: termination.errorCode } : {}),
+          ...(Number.isInteger(termination?.toolExitCode) ? { toolExitCode: termination.toolExitCode } : {})
+        },
         ...(errorCode ? { errorCode } : {})
       });
+    };
+    const forceDirectChildTermination = () => {
+      if (directChildExited || !child?.pid || child.exitCode !== null || child.signalCode !== null) return false;
+      try {
+        const sendDirectChildSignal = processControl.sendDirectChildSignal || ((target, signal) => target.kill(signal));
+        return sendDirectChildSignal(child, "SIGKILL");
+      } catch {
+        return false;
+      }
+    };
+    const settleAfterTermination = () => {
+      terminationTimer = setTimeout(() => {
+        forceDirectChildTermination();
+        forcedStdioClose = true;
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settleTimer = setTimeout(() => finalize(child.exitCode ?? null), processTerminationSettleMs);
+      }, processTerminationGraceMs);
     };
     const stopChildTree = (status) => {
       if (terminalStatus) return;
       terminalStatus = status;
-      processTreeCleanup = terminateProcessTree(child).tree;
+      termination = terminateProcessTree(child, processControl);
+      processControl.onTerminationRequested?.(status);
+      settleAfterTermination();
     };
     try {
       child = spawn(options.executable, options.args, {
@@ -537,7 +654,8 @@ export function runCommand(options) {
       });
     } catch (error) {
       terminalStatus = "spawn_error";
-      processTreeCleanup = true;
+      directChildExited = true;
+      stdioClosed = true;
       finalize(null, error.code || "spawn_failed");
       return;
     }
@@ -548,11 +666,22 @@ export function runCommand(options) {
     child.stdout.on("data", countOutput);
     child.stderr.on("data", countOutput);
     child.on("error", (error) => {
-      terminalStatus = "spawn_error";
-      processTreeCleanup = true;
-      finalize(null, error.code || "spawn_failed");
+      if (!terminalStatus) terminalStatus = "spawn_error";
+      if (!child.pid) {
+        directChildExited = true;
+        stdioClosed = true;
+        finalize(null, error.code || "spawn_failed");
+      }
     });
-    child.on("close", (exitCode) => finalize(exitCode));
+    child.on("exit", () => {
+      directChildExited = true;
+      processControl.onDirectChildExit?.();
+    });
+    child.on("close", (exitCode) => {
+      directChildExited = true;
+      stdioClosed = true;
+      finalize(exitCode);
+    });
     timer = setTimeout(() => stopChildTree("timeout"), options.timeoutMs);
     abortListener = () => stopChildTree("cancelled");
     options.signal?.addEventListener("abort", abortListener, { once: true });
@@ -573,7 +702,7 @@ export async function runLocalVerification(options = {}) {
   const startedAt = new Date().toISOString();
   const startedClock = Date.now();
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "setup_failed",
     startedAt,
     finishedAt: null,
@@ -637,13 +766,24 @@ export async function runLocalVerification(options = {}) {
     }
   } finally {
     if (context?.smokeRoot) {
-      try {
-        cleanupContext(context);
-        report.cleanup.status = "removed";
-      } catch (error) {
-        cleanupError = { class: "cleanup_failed", errorCode: safeErrorCode(error) };
-        report.cleanup.status = "failed";
-        report.cleanup.errorCode = cleanupError.errorCode;
+      const uncertainProcessCleanup = report.stages.some((stage) => {
+        const processCleanup = stage.processTreeCleanup;
+        return processCleanup?.status === "unconfirmed" || processCleanup?.status === "failed";
+      });
+      if (uncertainProcessCleanup) {
+        report.cleanup.status = "preserved";
+        report.cleanup.reason = report.stages.some((stage) => stage.processTreeCleanup?.status === "failed")
+          ? "process_tree_cleanup_failed"
+          : "process_tree_cleanup_unconfirmed";
+      } else {
+        try {
+          cleanupContext(context);
+          report.cleanup.status = "removed";
+        } catch (error) {
+          cleanupError = { class: "cleanup_failed", errorCode: safeErrorCode(error) };
+          report.cleanup.status = "failed";
+          report.cleanup.errorCode = cleanupError.errorCode;
+        }
       }
     } else if (primaryFailure?.class === "setup_failed") {
       report.cleanup.status = "not_created";

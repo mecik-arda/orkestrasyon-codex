@@ -1,4 +1,20 @@
 # Codex Desktop geçiş uygulama durumu
+## 2026-11-06 `verify:local` süreç cleanup düzeltmesi
+
+Süreç yaşam döngüsü gerçek Windows parent/descendant süreçleriyle doğrulandı. Parent daha önce çıkmışken descendant’ın stdout/stderr handle’ını açık tutması runner’ın `close` olayını bekletiyordu; timeout sonrasında runner artık sınırlı kapanış penceresi sonunda kalan pipe’ları kapatıp tek sonucu üretir. Forced stream close, descendant temizliğinin kanıtı sayılmaz.
+
+Her aşamanın `processTreeCleanup` alanı sürümlü raporda `confirmed`, `failed`, `unconfirmed` veya `not_applied` durumunu taşır; termination yöntemi/isteği, doğrudan child çıkışı ve stdio kapanışı ayrıca kaydedilir. Windows `taskkill /T /F` başarı kodu ile child çıkışı ve doğal stdio kapanışı birlikteyse ağaç temizliği doğrulanır. Taskkill hata/erişilemezliği sonrası doğrudan child fallback’i descendant temizliğini doğrulamaz. POSIX’te process group temizliği yalnız grup artık gözlenmediğinde doğrulanır. Cleanup başarısız veya belirsizse yalnız bu koşunun sentetik config/Vault kökü korunur; kullanıcı alanı veya genel TEMP temizliği yapılmaz.
+
+Çocuk komutunun stage timeout’u yürütme süresini sınırlar; temizlik Windows `taskkill` çağrısı için en çok 5 saniye, ardından 1,5 saniye termination grace ve 0,5 saniye settlement penceresi ekleyebilir. `taskkill` kullanılmayan yolda ek süre en çok 2 saniyedir. Bu sınırlar aşama süresine dahildir ve runner belirsizlikte pipe’ları kapattıktan sonra tek sonuç üretir.
+
+Windows hedefli `verify-local` regresyonları gerçek parent/descendant süreçleriyle 23/23 geçti. Kapsam normal bitişi, gerçek `taskkill /T` yolunu, taskkill hata/fallback yollarını, parent-sonrası açık pipe’ı, doğrudan kill başarısızlığını, timeout/cancellation/output-limit olay sırasını ve belirsiz/başarısız cleanup’ta sentetik kökün korunmasını içerir. Gerçek `taskkill` başarı yolu yükseltilmiş tek test çağrısında da geçti. Bu testler yalnız testin oluşturduğu PID’leri sonlandırdı.
+
+Son kaynak durumundaki `npm run verify:local` 2026-11-06 tarihinde exit code 0 ve `status=passed` ile tamamlandı. Seri aşamalar `verify:ci` 135 ms, `npm test` 349.525 ms, zorunlu benchmark 17.500 ms, sentetik smoke 2.069 ms ve sentetik config/Vault verify 207 ms sürdü; toplam süre 371.742 ms oldu. Windows x64 / Node v24.17.0 kullanıldı. Geçici sentetik kök kaldırıldı; provider credential aktarımı olmadı.
+
+Koşu HEAD `0112712edea18050948be1059095c6d9f3a2dc8f`, dal `main` üzerinde başladı ve bitti. Görev değişiklikleri nedeniyle başlangıç ve bitiş çalışma ağacı kirliydi; 384 dosya, 5.967.920 bayt ve `9ee70c5671f39987b5e1990a199c9106893b895fa8d08f63ac4886cc7e678c89` snapshot SHA-256 değeri koşu boyunca aynı kaldı (`unchangedAtCompletion=true`). Bu son koşu kaydı doğrulamadan sonra eklendi; koşu içindeki kod ve README snapshot’ı değişmemiştir.
+
+Bu sentetik doğrulama kişisel Vault, harici provider, çalışan Desktop Hades revision’ı veya bağımsız Sol incelemesi için kanıt değildir. Bağımsız Sol inceleme açığı sürmektedir.
+
 ## 2026-11-06 son kaynak `verify:local` koşusu
 
 İlk başarılı tam koşudan sonra iptalin iki aşama arasında gelmesi halinde runner'ın başarısızlık kaydı üretmeyebildiği doğrulandı. `executeVerificationStages` artık ilk atlanan aşamada `cancelled` başarısızlığı kaydediyor; önceden iptal ve aşamalar arası iptal regresyonları bunu ayırt ediyor. Windows `taskkill` çağrısının başlatılamaması da doğrulama sürecini düşürmeden doğrudan çocuk süreç fallback'ine geçiyor; ağaç temizliği başarıyla doğrulanmadığında sonuç bunu `processTreeCleanup=false` olarak taşır. Son hedefli `verify-local` testleri 13/13 geçti.

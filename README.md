@@ -369,6 +369,7 @@ npm run smoke:vault           Explicit real-Vault search/read opt-in
 npm run budget                Budget accounting totals (not invoice), observed/estimated cost, coverage and enforcement mode
 npm run p0:e2e                Trusted workspace portability acceptance
 npm test                      All Node.js regression tests
+npm run verify:local          Serial local verification with synthetic config and Vault
 npm run verify                Local executable, skill, config and Vault verification
 npm run verify:ci             Provider-auth-free CI verification
 npm run skills:check-global   Compare the four global skill copies with the canonical source (--strict fails on missing)
@@ -392,6 +393,10 @@ npm run hook:install          Generate the opt-in read-only memory hook (--clien
 npm run memory:evaluate       Retrieval quality evaluation
 npm run config:backup         Personal policy backup
 ```
+
+`npm run verify:local` runs `verify:ci`, the full root-level Node test set, the required serial memory-search benchmark, the synthetic stdio MCP smoke, and `verify` in that order. The runner invokes the package scripts' fixed Node entry points without a shell, stops after the first failed stage, and returns a nonzero exit code. It gives each child the existing synthetic smoke config, Vault, profile, and temporary directory; provider credentials and personal config paths are not inherited. The verify health check receives no DeepSeek credential, so it returns before an API request. The command does not run provider inference, capability probes, live pilots, the real-Vault smoke opt-in, or the Desktop Hades process.
+
+Progress is written to stderr and one bounded JSON result is written to stdout; there is no persistent report path. The result binds the initial and final HEAD, branch, index hash, tracked and non-ignored untracked file contents, dirty state, and a SHA-256 snapshot digest. This local digest is not a host attestation and does not cover ignored files such as `node_modules`, installed tool versions beyond the reported Node/platform values, or runtime state. A dirty tree is reported as dirty and is not cleaned or committed. Temporary synthetic state is removed after success, failure, timeout, or cancellation. `verify:local` validates this checkout and local synthetic MCP process; it does not prove personal Vault health, external provider access, a running Desktop Hades revision, or independent source review.
 
 ## Hard limits
 

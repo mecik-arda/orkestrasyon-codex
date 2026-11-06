@@ -1,0 +1,721 @@
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { createReadStream } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { createSmokeExecutionContext, removeSyntheticSmokeRoot, syntheticSmokeRootPrefix } from "./smoke-mcp-support.js";
+
+const maximumSnapshotFileBytes = 268435456;
+const maximumSnapshotTotalBytes = 4294967296;
+const maximumStageOutputBytes = 16777216;
+const maximumGitOutputBytes = 67108864;
+const completeStageTimeoutMs = 2700000;
+const benchmarkTimeoutMs = 60000;
+const standardStageTimeoutMs = 180000;
+const expectedPackageScripts = {
+  "verify:ci": "node scripts/verify-project-ci.js",
+  test: "node --test --test-timeout=120000 tests/*.test.js && node --test --test-timeout=35000 tests/performance/memory-search.test.js",
+  smoke: "node scripts/smoke-mcp.js",
+  verify: "node scripts/verify-project.js",
+  "verify:local": "node scripts/verify-local.js"
+};
+const allowedSyntheticEnvironmentNames = new Set([
+  "comspec",
+  "pathext",
+  "path",
+  "systemroot",
+  "windir",
+  "orchestrator_config",
+  "subagent_bridge_agents_config",
+  "subagent_bridge_trusted_workspace",
+  "userprofile",
+  "home",
+  "homedrive",
+  "homepath",
+  "appdata",
+  "localappdata",
+  "temp",
+  "tmp",
+  "subagent_bridge_orchestrator_approval"
+]);
+const credentialEnvironmentNamePattern = /(?:API[_-]?KEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|CLIENT[_-]?SECRET|PASSWORD|PROVIDER[_-]?CREDENTIAL)/i;
+const systemEnvironmentNames = new Set(["comspec", "pathext", "path", "systemroot", "windir"]);
+
+export class LocalVerificationError extends Error {
+  constructor(code) {
+    super(code);
+    this.code = code;
+  }
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function createMinimalSystemEnvironment(source = process.env) {
+  const environment = Object.fromEntries(Object.entries(source).filter(([name]) => systemEnvironmentNames.has(name.toLowerCase())));
+  environment.TEMP = os.tmpdir();
+  environment.TMP = os.tmpdir();
+  environment.GIT_CONFIG_NOSYSTEM = "1";
+  const nullDevice = process.platform === "win32" ? "NUL" : os.devNull;
+  environment.GIT_CONFIG_SYSTEM = nullDevice;
+  environment.GIT_CONFIG_GLOBAL = nullDevice;
+  environment.GIT_OPTIONAL_LOCKS = "0";
+  return environment;
+}
+
+function gitBuffer(projectRoot, argumentsList) {
+  return execFileSync("git", argumentsList, {
+    cwd: projectRoot,
+    encoding: "buffer",
+    env: createMinimalSystemEnvironment(),
+    maxBuffer: maximumGitOutputBytes,
+    timeout: 30000,
+    windowsHide: true
+  });
+}
+
+function gitText(projectRoot, argumentsList) {
+  return gitBuffer(projectRoot, argumentsList).toString("utf8").trim();
+}
+
+function nulSeparatedValues(buffer) {
+  return buffer.toString("utf8").split("\0").filter(Boolean);
+}
+
+function readHeadTree(projectRoot) {
+  const entries = new Map();
+  const treeRecords = gitBuffer(projectRoot, ["ls-tree", "-r", "-z", "--full-tree", "HEAD"]).toString("utf8");
+  for (const record of treeRecords.split("\0").filter(Boolean)) {
+    const separator = record.indexOf("\t");
+    if (separator < 0) throw new LocalVerificationError("git_tree_parse_failed");
+    const [mode, type, objectId] = record.slice(0, separator).split(" ");
+    const relativePath = record.slice(separator + 1);
+    if (type === "commit" || mode === "160000") throw new LocalVerificationError("git_submodule_snapshot_unsupported");
+    entries.set(relativePath, { mode, objectId });
+  }
+  return entries;
+}
+
+function readGitState(projectRoot) {
+  const root = gitText(projectRoot, ["rev-parse", "--show-toplevel"]);
+  const expectedRoot = path.resolve(projectRoot);
+  if (path.resolve(root).toLocaleLowerCase("en-US") !== expectedRoot.toLocaleLowerCase("en-US")) {
+    throw new LocalVerificationError("repository_root_mismatch");
+  }
+  const head = gitText(projectRoot, ["rev-parse", "HEAD"]);
+  const branch = gitText(projectRoot, ["branch", "--show-current"]) || null;
+  const status = gitBuffer(projectRoot, ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=all"]);
+  const indexPath = gitText(projectRoot, ["rev-parse", "--git-path", "index"]);
+  const absoluteIndexPath = path.isAbsolute(indexPath) ? indexPath : path.resolve(projectRoot, indexPath);
+  const indexSha256 = sha256(fs.readFileSync(absoluteIndexPath));
+  const headTree = readHeadTree(projectRoot);
+  const indexPaths = new Set(nulSeparatedValues(gitBuffer(projectRoot, ["ls-files", "-z", "--cached"])));
+  const untrackedPaths = new Set(nulSeparatedValues(gitBuffer(projectRoot, ["ls-files", "-z", "--others", "--exclude-standard"])));
+  return {
+    root: expectedRoot,
+    head,
+    branch,
+    dirty: status.length > 0,
+    indexSha256,
+    headTree,
+    indexPaths,
+    untrackedPaths
+  };
+}
+
+function isWithin(root, candidate) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function resolveRepositoryPath(projectRoot, relativePath) {
+  if (path.posix.isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes("..")) {
+    throw new LocalVerificationError("git_path_invalid");
+  }
+  const absolutePath = path.resolve(projectRoot, ...relativePath.split(/[\\/]/));
+  if (!isWithin(projectRoot, absolutePath)) throw new LocalVerificationError("git_path_outside_repository");
+  return absolutePath;
+}
+
+function statIdentity(stat) {
+  return [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeMs, stat.ctimeMs].join(":");
+}
+
+async function hashRepositoryEntry(projectRoot, relativePath, headEntry, aggregate) {
+  const absolutePath = resolveRepositoryPath(projectRoot, relativePath);
+  let before;
+  try {
+    before = await fs.promises.lstat(absolutePath);
+  } catch (error) {
+    if (error.code === "ENOENT") return { path: relativePath, kind: "missing", headMode: headEntry?.mode || null };
+    throw new LocalVerificationError("source_entry_unreadable");
+  }
+  if (before.isSymbolicLink()) {
+    const target = await fs.promises.readlink(absolutePath, { encoding: "buffer" });
+    const after = await fs.promises.lstat(absolutePath);
+    if (statIdentity(before) !== statIdentity(after)) throw new LocalVerificationError("source_snapshot_unstable");
+    aggregate.bytes += target.length;
+    if (aggregate.bytes > maximumSnapshotTotalBytes) throw new LocalVerificationError("source_snapshot_size_limit");
+    return { path: relativePath, kind: "symlink", size: target.length, sha256: sha256(target), headMode: headEntry?.mode || null };
+  }
+  if (!before.isFile()) throw new LocalVerificationError("source_entry_type_unsupported");
+  if (before.size > maximumSnapshotFileBytes) throw new LocalVerificationError("source_snapshot_file_limit");
+  const digest = crypto.createHash("sha256");
+  let bytes = 0;
+  for await (const chunk of createReadStream(absolutePath)) {
+    bytes += chunk.length;
+    aggregate.bytes += chunk.length;
+    if (bytes > maximumSnapshotFileBytes || aggregate.bytes > maximumSnapshotTotalBytes) {
+      throw new LocalVerificationError("source_snapshot_size_limit");
+    }
+    digest.update(chunk);
+  }
+  const after = await fs.promises.lstat(absolutePath);
+  if (statIdentity(before) !== statIdentity(after) || bytes !== before.size) throw new LocalVerificationError("source_snapshot_unstable");
+  return {
+    path: relativePath,
+    kind: "file",
+    size: bytes,
+    executable: Boolean(before.mode & 0o111),
+    sha256: digest.digest("hex"),
+    headMode: headEntry?.mode || null
+  };
+}
+
+function sameStringSet(left, right) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function hasAbort(signal) {
+  if (!signal?.aborted) return;
+  throw new LocalVerificationError("cancelled");
+}
+
+export async function captureSourceSnapshot(projectRoot, signal) {
+  hasAbort(signal);
+  const before = readGitState(projectRoot);
+  const allPaths = new Set([...before.headTree.keys(), ...before.indexPaths, ...before.untrackedPaths]);
+  const normalizedPaths = new Set();
+  for (const relativePath of allPaths) {
+    const key = relativePath.toLocaleLowerCase("en-US");
+    if (normalizedPaths.has(key)) throw new LocalVerificationError("case_colliding_source_paths");
+    normalizedPaths.add(key);
+  }
+  const sortedPaths = [...allPaths].sort((left, right) => left.localeCompare(right, "en-US"));
+  const aggregate = { bytes: 0 };
+  const entries = [];
+  for (const relativePath of sortedPaths) {
+    hasAbort(signal);
+    entries.push(await hashRepositoryEntry(projectRoot, relativePath, before.headTree.get(relativePath), aggregate));
+  }
+  const after = readGitState(projectRoot);
+  const sameGitView = before.root === after.root
+    && before.head === after.head
+    && before.branch === after.branch
+    && before.dirty === after.dirty
+    && before.indexSha256 === after.indexSha256
+    && sameStringSet(before.indexPaths, after.indexPaths)
+    && sameStringSet(before.untrackedPaths, after.untrackedPaths)
+    && sameStringSet(new Set(before.headTree.keys()), new Set(after.headTree.keys()));
+  if (!sameGitView) throw new LocalVerificationError("source_snapshot_unstable");
+  const manifest = JSON.stringify({
+    schemaVersion: 1,
+    head: before.head,
+    branch: before.branch,
+    workingTreeClean: !before.dirty,
+    indexSha256: before.indexSha256,
+    entries
+  });
+  return {
+    head: before.head,
+    branch: before.branch,
+    workingTreeClean: !before.dirty,
+    snapshotSha256: sha256(manifest),
+    trackedFileCount: before.headTree.size,
+    indexedFileCount: before.indexPaths.size,
+    untrackedFileCount: before.untrackedPaths.size,
+    fileCount: entries.length,
+    totalBytes: aggregate.bytes
+  };
+}
+
+function getTestFiles(projectRoot) {
+  return fs.readdirSync(path.join(projectRoot, "tests"), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".test.js"))
+    .map((entry) => `tests/${entry.name}`)
+    .sort((left, right) => left.localeCompare(right, "en-US"));
+}
+
+export function buildVerificationStagePlan(projectRoot) {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
+  for (const [scriptName, expected] of Object.entries(expectedPackageScripts)) {
+    if (packageJson.scripts?.[scriptName] !== expected) throw new LocalVerificationError("package_script_contract_changed");
+  }
+  const testFiles = getTestFiles(projectRoot);
+  if (testFiles.length === 0) throw new LocalVerificationError("unit_test_files_missing");
+  const node = process.execPath;
+  return [
+    {
+      id: "verify-ci",
+      packageScript: "npm run verify:ci",
+      command: "node scripts/verify-project-ci.js",
+      executable: node,
+      args: ["scripts/verify-project-ci.js"],
+      timeoutMs: standardStageTimeoutMs
+    },
+    {
+      id: "test-suite",
+      packageScript: "npm test",
+      command: `node --test --test-timeout=120000 tests/*.test.js (${testFiles.length} files)`,
+      executable: node,
+      args: ["--test", "--test-timeout=120000", ...testFiles],
+      timeoutMs: completeStageTimeoutMs
+    },
+    {
+      id: "test-benchmark",
+      packageScript: "npm test",
+      command: "node --test --test-timeout=35000 tests/performance/memory-search.test.js",
+      executable: node,
+      args: ["--test", "--test-timeout=35000", "tests/performance/memory-search.test.js"],
+      timeoutMs: benchmarkTimeoutMs
+    },
+    {
+      id: "smoke",
+      packageScript: "npm run smoke",
+      command: "node scripts/smoke-mcp.js",
+      executable: node,
+      args: ["scripts/smoke-mcp.js"],
+      timeoutMs: standardStageTimeoutMs
+    },
+    {
+      id: "verify",
+      packageScript: "npm run verify",
+      command: "node scripts/verify-project.js",
+      executable: node,
+      args: ["scripts/verify-project.js"],
+      timeoutMs: standardStageTimeoutMs
+    }
+  ];
+}
+
+function regularNonLink(filePath, expectedType) {
+  const stat = fs.lstatSync(filePath);
+  if (stat.isSymbolicLink()) return false;
+  return expectedType === "directory" ? stat.isDirectory() : stat.isFile();
+}
+
+export function validateSyntheticExecutionContext(context, projectRoot) {
+  if (!context || context.mode !== "synthetic" || typeof context.smokeRoot !== "string") {
+    throw new LocalVerificationError("synthetic_context_unavailable");
+  }
+  const root = path.resolve(context.smokeRoot);
+  const temporaryRoot = path.resolve(os.tmpdir());
+  if (path.dirname(root).toLocaleLowerCase("en-US") !== temporaryRoot.toLocaleLowerCase("en-US")
+    || !path.basename(root).startsWith(syntheticSmokeRootPrefix)
+    || !regularNonLink(root, "directory")) {
+    throw new LocalVerificationError("synthetic_root_invalid");
+  }
+  for (const candidate of [context.vaultRoot, context.configurationPath, context.agentsConfigurationPath, context.fixturePath]) {
+    if (typeof candidate !== "string" || !isWithin(root, path.resolve(candidate))) throw new LocalVerificationError("synthetic_path_invalid");
+  }
+  if (!regularNonLink(context.vaultRoot, "directory")
+    || !regularNonLink(context.configurationPath, "file")
+    || !regularNonLink(context.agentsConfigurationPath, "file")
+    || !regularNonLink(context.fixturePath, "file")) {
+    throw new LocalVerificationError("synthetic_fixture_invalid");
+  }
+  const configuration = JSON.parse(fs.readFileSync(context.configurationPath, "utf8"));
+  if (path.resolve(configuration.memory?.vaultRoot || "") !== path.resolve(context.vaultRoot)) {
+    throw new LocalVerificationError("synthetic_vault_binding_invalid");
+  }
+  const environment = context.environment;
+  if (!environment || typeof environment !== "object") throw new LocalVerificationError("synthetic_environment_missing");
+  if (Object.keys(environment).some((name) => !allowedSyntheticEnvironmentNames.has(name.toLowerCase()) || credentialEnvironmentNamePattern.test(name))) {
+    throw new LocalVerificationError("synthetic_environment_not_isolated");
+  }
+  if (environment.ORCHESTRATOR_CONFIG !== context.configurationPath
+    || environment.SUBAGENT_BRIDGE_AGENTS_CONFIG !== context.agentsConfigurationPath
+    || path.resolve(environment.SUBAGENT_BRIDGE_TRUSTED_WORKSPACE || "") !== path.resolve(projectRoot)
+    || path.resolve(environment.USERPROFILE || "") !== path.join(root, "profile")
+    || path.resolve(environment.HOME || "") !== path.join(root, "profile")
+    || path.resolve(environment.LOCALAPPDATA || "") !== path.join(root, "profile", "AppData", "Local")
+    || path.resolve(environment.TEMP || "") !== root
+    || path.resolve(environment.TMP || "") !== root) {
+    throw new LocalVerificationError("synthetic_environment_binding_invalid");
+  }
+  return {
+    root,
+    environment,
+    identity: {
+      config: "temporary_distribution_copy",
+      vault: "temporary_synthetic_fixture",
+      providerCredentials: "excluded"
+    }
+  };
+}
+
+export function prepareSyntheticExecutionContext(projectRoot, inheritedEnvironment = process.env) {
+  const context = createSmokeExecutionContext([], projectRoot, inheritedEnvironment);
+  try {
+    return { context, validated: validateSyntheticExecutionContext(context, projectRoot) };
+  } catch (error) {
+    if (context.smokeRoot) removeSyntheticSmokeRoot(context.smokeRoot);
+    throw error;
+  }
+}
+
+function makeSkippedStage(stage, reason) {
+  return {
+    id: stage.id,
+    packageScript: stage.packageScript,
+    command: stage.command,
+    status: "skipped",
+    skipReason: reason,
+    exitCode: null,
+    durationMs: 0,
+    timeoutMs: stage.timeoutMs,
+    outputBytes: 0,
+    processTreeCleanup: null
+  };
+}
+
+export async function executeVerificationStages(stages, options = {}) {
+  const runner = options.runCommand || runCommand;
+  const stageResults = [];
+  let failure = null;
+  let skipReason = null;
+  for (const stage of stages) {
+    if (skipReason) {
+      stageResults.push(makeSkippedStage(stage, skipReason));
+      continue;
+    }
+    if (options.signal?.aborted) {
+      skipReason = "cancelled";
+      failure = { stageId: stage.id, class: "cancelled" };
+      stageResults.push(makeSkippedStage(stage, skipReason));
+      continue;
+    }
+    options.onStageStart?.(stage);
+    let result;
+    try {
+      result = await runner({
+        executable: stage.executable,
+        args: stage.args,
+        cwd: options.projectRoot,
+        env: options.environment,
+        timeoutMs: stage.timeoutMs,
+        maxOutputBytes: options.maxOutputBytes ?? maximumStageOutputBytes,
+        signal: options.signal
+      });
+    } catch (error) {
+      result = { status: "runner_error", errorCode: safeErrorCode(error), exitCode: null, durationMs: 0, outputBytes: 0, processTreeCleanup: null };
+    }
+    const item = {
+      id: stage.id,
+      packageScript: stage.packageScript,
+      command: stage.command,
+      status: result.status,
+      exitCode: result.exitCode ?? null,
+      durationMs: result.durationMs,
+      timeoutMs: stage.timeoutMs,
+      outputBytes: result.outputBytes,
+      timedOut: result.status === "timeout",
+      cancelled: result.status === "cancelled",
+      processTreeCleanup: result.processTreeCleanup ?? null,
+      ...(result.errorCode ? { errorCode: result.errorCode } : {})
+    };
+    stageResults.push(item);
+    options.onStageComplete?.(stage, item);
+    if (result.status !== "passed") {
+      failure = {
+        stageId: stage.id,
+        class: result.status,
+        ...(result.errorCode ? { errorCode: result.errorCode } : {}),
+        ...(result.exitCode !== undefined ? { exitCode: result.exitCode } : {})
+      };
+      skipReason = result.status === "cancelled" ? "cancelled" : "previous_stage_failed";
+    }
+  }
+  return { stages: stageResults, failure };
+}
+
+function terminationTaskkillPath() {
+  const windowsRoot = process.env.SystemRoot || process.env.WINDIR;
+  if (!windowsRoot || !/^[A-Za-z]:\\[^\0]*$/.test(windowsRoot)) return null;
+  const target = path.join(windowsRoot, "System32", "taskkill.exe");
+  try {
+    const stat = fs.lstatSync(target);
+    return stat.isFile() && !stat.isSymbolicLink() ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+function terminateProcessTree(child) {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return { terminated: true, method: "already_exited" };
+  if (process.platform === "win32") {
+    const taskkillPath = terminationTaskkillPath();
+    if (taskkillPath) {
+      try {
+        const result = spawnSync(taskkillPath, ["/PID", String(child.pid), "/T", "/F"], {
+          env: createMinimalSystemEnvironment(),
+          timeout: 5000,
+          windowsHide: true,
+          stdio: "ignore"
+        });
+        if (result.status === 0) return { terminated: true, tree: true, method: "taskkill_tree" };
+      } catch {
+      }
+    }
+    try {
+      return { terminated: child.kill("SIGTERM"), tree: false, method: "direct_fallback" };
+    } catch {
+      return { terminated: false, tree: false, method: "direct_fallback" };
+    }
+  }
+  try {
+    process.kill(-child.pid, "SIGTERM");
+    setTimeout(() => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+      }
+    }, 750).unref();
+    return { terminated: true, tree: true, method: "process_group" };
+  } catch {
+    try {
+      return { terminated: child.kill("SIGTERM"), tree: false, method: "direct_fallback" };
+    } catch {
+      return { terminated: false, tree: false, method: "direct_fallback" };
+    }
+  }
+}
+
+export function runCommand(options) {
+  const startedAt = Date.now();
+  if (options.signal?.aborted) {
+    return Promise.resolve({ status: "cancelled", exitCode: null, durationMs: 0, outputBytes: 0, processTreeCleanup: true });
+  }
+  return new Promise((resolve) => {
+    let child;
+    let outputBytes = 0;
+    let terminalStatus = null;
+    let processTreeCleanup = null;
+    let finalized = false;
+    let timer;
+    let abortListener;
+    const finalize = (exitCode, errorCode = null) => {
+      if (finalized) return;
+      finalized = true;
+      clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abortListener);
+      resolve({
+        status: terminalStatus || (errorCode ? "spawn_error" : exitCode === 0 ? "passed" : "failed"),
+        exitCode,
+        durationMs: Date.now() - startedAt,
+        outputBytes,
+        processTreeCleanup,
+        ...(errorCode ? { errorCode } : {})
+      });
+    };
+    const stopChildTree = (status) => {
+      if (terminalStatus) return;
+      terminalStatus = status;
+      processTreeCleanup = terminateProcessTree(child).tree;
+    };
+    try {
+      child = spawn(options.executable, options.args, {
+        cwd: options.cwd,
+        env: options.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        detached: process.platform !== "win32",
+        shell: false
+      });
+    } catch (error) {
+      terminalStatus = "spawn_error";
+      processTreeCleanup = true;
+      finalize(null, error.code || "spawn_failed");
+      return;
+    }
+    const countOutput = (chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > options.maxOutputBytes) stopChildTree("output_limit");
+    };
+    child.stdout.on("data", countOutput);
+    child.stderr.on("data", countOutput);
+    child.on("error", (error) => {
+      terminalStatus = "spawn_error";
+      processTreeCleanup = true;
+      finalize(null, error.code || "spawn_failed");
+    });
+    child.on("close", (exitCode) => finalize(exitCode));
+    timer = setTimeout(() => stopChildTree("timeout"), options.timeoutMs);
+    abortListener = () => stopChildTree("cancelled");
+    options.signal?.addEventListener("abort", abortListener, { once: true });
+    if (options.signal?.aborted) stopChildTree("cancelled");
+  });
+}
+
+function safeErrorCode(error) {
+  return typeof error?.code === "string" && /^[A-Za-z0-9_]+$/.test(error.code) ? error.code : "verification_setup_failed";
+}
+
+function skippedStages(stages, reason) {
+  return stages.map((stage) => makeSkippedStage(stage, reason));
+}
+
+export async function runLocalVerification(options = {}) {
+  const projectRoot = path.resolve(options.projectRoot || path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."));
+  const startedAt = new Date().toISOString();
+  const startedClock = Date.now();
+  const report = {
+    schemaVersion: 1,
+    status: "setup_failed",
+    startedAt,
+    finishedAt: null,
+    durationMs: null,
+    source: { snapshotAvailable: false, unchangedAtCompletion: null },
+    environment: { synthetic: true, node: process.version, platform: process.platform, architecture: process.arch },
+    stages: [],
+    cleanup: { status: "not_started", temporaryRootId: null },
+    failure: null
+  };
+  let stagePlan = [];
+  let context = null;
+  let startSnapshot = null;
+  let primaryFailure = null;
+  let cleanupError = null;
+  const captureSnapshot = options.captureSnapshot || captureSourceSnapshot;
+  const createContext = options.createContext || prepareSyntheticExecutionContext;
+  const cleanupContext = options.cleanupContext || ((activeContext) => removeSyntheticSmokeRoot(activeContext.smokeRoot));
+  try {
+    stagePlan = buildVerificationStagePlan(projectRoot);
+    startSnapshot = await captureSnapshot(projectRoot, options.signal);
+    report.source = {
+      snapshotAvailable: true,
+      headAtStart: startSnapshot.head,
+      branchAtStart: startSnapshot.branch,
+      cleanAtStart: startSnapshot.workingTreeClean,
+      snapshotSha256AtStart: startSnapshot.snapshotSha256,
+      trackedFileCount: startSnapshot.trackedFileCount,
+      indexedFileCount: startSnapshot.indexedFileCount,
+      untrackedFileCount: startSnapshot.untrackedFileCount,
+      fileCount: startSnapshot.fileCount,
+      totalBytes: startSnapshot.totalBytes,
+      unchangedAtCompletion: null
+    };
+    hasAbort(options.signal);
+    const prepared = await createContext(projectRoot, options.inheritedEnvironment || process.env);
+    context = prepared.context;
+    const validatedContext = validateSyntheticExecutionContext(context, projectRoot);
+    report.cleanup.temporaryRootId = path.basename(context.smokeRoot);
+    report.environment.syntheticConfig = true;
+    report.environment.syntheticVault = true;
+    report.environment.providerCredentialsForwarded = false;
+    const sequence = await executeVerificationStages(stagePlan, {
+      projectRoot,
+      environment: validatedContext.environment,
+      signal: options.signal,
+      runCommand: options.runCommand,
+      maxOutputBytes: options.maxOutputBytes,
+      onStageStart: options.onStageStart,
+      onStageComplete: options.onStageComplete
+    });
+    report.stages = sequence.stages;
+    primaryFailure = sequence.failure;
+    if (primaryFailure) report.failure = primaryFailure;
+  } catch (error) {
+    const code = safeErrorCode(error);
+    primaryFailure = { class: code === "cancelled" ? "cancelled" : "setup_failed", errorCode: code };
+    report.failure = primaryFailure;
+    if (report.stages.length === 0 && stagePlan.length > 0) {
+      report.stages = skippedStages(stagePlan, code === "cancelled" ? "cancelled" : "setup_failed");
+    }
+  } finally {
+    if (context?.smokeRoot) {
+      try {
+        cleanupContext(context);
+        report.cleanup.status = "removed";
+      } catch (error) {
+        cleanupError = { class: "cleanup_failed", errorCode: safeErrorCode(error) };
+        report.cleanup.status = "failed";
+        report.cleanup.errorCode = cleanupError.errorCode;
+      }
+    } else if (primaryFailure?.class === "setup_failed") {
+      report.cleanup.status = "not_created";
+    }
+    try {
+      const endSnapshot = await captureSnapshot(projectRoot);
+      report.source.headAtEnd = endSnapshot.head;
+      report.source.branchAtEnd = endSnapshot.branch;
+      report.source.cleanAtEnd = endSnapshot.workingTreeClean;
+      report.source.snapshotSha256AtEnd = endSnapshot.snapshotSha256;
+      report.source.unchangedAtCompletion = Boolean(startSnapshot
+        && startSnapshot.head === endSnapshot.head
+        && startSnapshot.branch === endSnapshot.branch
+        && startSnapshot.workingTreeClean === endSnapshot.workingTreeClean
+        && startSnapshot.snapshotSha256 === endSnapshot.snapshotSha256);
+    } catch (error) {
+      report.source.endSnapshotError = safeErrorCode(error);
+      report.source.unchangedAtCompletion = false;
+    }
+  }
+  if (cleanupError && !report.failure) report.failure = cleanupError;
+  if (primaryFailure?.class === "cancelled") report.status = "cancelled";
+  else if (report.source.snapshotAvailable && report.source.unchangedAtCompletion === false) report.status = "source_changed";
+  else if (primaryFailure) report.status = primaryFailure.class === "setup_failed" ? "setup_failed" : "failed";
+  else if (cleanupError) report.status = "cleanup_failed";
+  else report.status = "passed";
+  report.finishedAt = new Date().toISOString();
+  report.durationMs = Date.now() - startedClock;
+  report.exitCode = report.status === "passed" ? 0 : report.status === "cancelled" ? 130 : 1;
+  return report;
+}
+
+function usageText() {
+  return [
+    "Usage: npm run verify:local",
+    "Runs verify:ci, the serial npm test suite and benchmark, synthetic smoke, and synthetic-config verify.",
+    "Progress is written to stderr and one redacted JSON result is written to stdout.",
+    "The command does not accept a persistent report path or arbitrary child command."
+  ].join("\n");
+}
+
+export async function main(argumentsList = process.argv.slice(2)) {
+  if (argumentsList.length === 1 && argumentsList[0] === "--help") {
+    process.stdout.write(`${usageText()}\n`);
+    return 0;
+  }
+  if (argumentsList.length !== 0) {
+    process.stderr.write(`${usageText()}\n`);
+    return 2;
+  }
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  process.once("SIGINT", abort);
+  process.once("SIGTERM", abort);
+  try {
+    const report = await runLocalVerification({
+      onStageStart(stage) {
+        process.stderr.write(`[verify:local] started ${stage.id}\n`);
+      },
+      onStageComplete(stage, result) {
+        process.stderr.write(`[verify:local] ${result.status} ${stage.id} ${result.durationMs}ms\n`);
+      },
+      signal: controller.signal
+    });
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    return report.exitCode;
+  } finally {
+    process.removeListener("SIGINT", abort);
+    process.removeListener("SIGTERM", abort);
+  }
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))) {
+  process.exitCode = await main();
+}

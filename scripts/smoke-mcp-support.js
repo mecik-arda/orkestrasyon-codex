@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 
 export const syntheticSmokeQuery = "hades-smoke-fixture-2026-11-03";
-const temporaryRootPrefix = "hades-mcp-smoke-";
+export const syntheticSmokeRootPrefix = "hades-mcp-smoke-";
+const temporaryRootPrefix = syntheticSmokeRootPrefix;
 const inheritedSystemEnvironmentNames = new Set(["comspec", "pathext", "path", "systemroot", "windir"]);
 
 function createSyntheticSmokeBaseEnvironment(inheritedEnvironment) {
@@ -60,6 +61,8 @@ export function createSyntheticSmokeEnvironment(projectRoot, smokeRoot, inherite
   const configurationDirectory = path.join(resolvedSmokeRoot, "configuration");
   fs.mkdirSync(path.join(vaultRoot, "03_Resources"), { recursive: true });
   fs.mkdirSync(configurationDirectory, { recursive: true });
+  fs.mkdirSync(path.join(profileRoot, "AppData", "Roaming"), { recursive: true });
+  fs.mkdirSync(localAppDataRoot, { recursive: true });
 
   const configuration = JSON.parse(fs.readFileSync(path.join(resolvedProjectRoot, "config", "policy.json"), "utf8"));
   configuration.memory.vaultRoot = vaultRoot;

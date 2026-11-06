@@ -89,7 +89,7 @@ test("WP5B-CHANNEL-01: orkestratör onay bayrağı yalnız tam değerle etkinle�
   assert.equal(isOrchestratorApprovalEnabled({ SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL: "true" }), false);
   assert.equal(isOrchestratorApprovalEnabled({ SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL: "" }), false);
   assert.equal(isOrchestratorApprovalEnabled({}), false);
-  assert.equal(isOrchestratorApprovalEnabled(), typeof process.env.SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL === "string");
+  assert.equal(isOrchestratorApprovalEnabled(), process.env.SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL === "1");
 });
 
 test("WP5B-CHANNEL-02: hazırlanmış edit karar araçları yalnız bayrak açıkken kaydedilir", async () => {

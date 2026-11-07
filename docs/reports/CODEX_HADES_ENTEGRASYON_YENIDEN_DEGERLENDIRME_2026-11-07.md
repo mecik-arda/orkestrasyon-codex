@@ -1,5 +1,11 @@
 # Codex–Hades entegrasyonu: yeniden değerlendirme
 
+## 2026-11-08: Sonraki eval teslimi
+
+Karar değişmedi: AST sınıflandırıcı üretim varsayılanı kapalı kalır; bağımsız Sol follow-up incelemesi kullanıcı kararıyla ertelenmiştir ve tamamlanmış sayılmaz. Sabit sentetik corpus ölçümünde benign etiketli sekiz örneğin legacy bulgusu AST'de bulgusuz kaldı; dört risk etiketli örnek de statik bulgusuz sonuç verdi. Bu ölçüm genel etkinleştirme veya kaynak teslimi için yeterli değildir; hedefli eval testleri 16/16 geçti.
+
+Eval düzeltme paketi `0d13fd015fbcab545d5c1021f9c5d28a47e1472c` commit'iyle yerel `main` dalına alındı ve `origin/main` dalına push edildi. Commit sekiz görev dosyası içerir. Bu teslim, Sol incelemesini veya P6 koşulsuz kapanışını tamamlamaz. Bu kayıt önceki bölümlerdeki commit edilmemiş paket/Git durumu açıklamalarını güncel teslim açısından geçersiz kılar; tarihsel araştırma bulgularını değiştirmez.
+
 ## 2026-11-08: Güncel teslim ve politika kararı
 
 Bu not aşağıdaki tarihsel açık kararların güncel durumunu belirtir. Kullanıcı, bağımsız Sol incelemesini daha sonraya bırakmış ve politika seçimini ana orkestratöre devretmiştir. Karar, AST sınıflandırıcısının varsayılan kapalı tutulması ve offline eval paketinin yalnız deneysel değerlendirme aracı olarak korunmasıdır. Üretim policy'sinde ilgili alan false olarak doğrulandı; bu işlemde üretim kodu, kişisel config veya canlı Hades ayarı değiştirilmedi.

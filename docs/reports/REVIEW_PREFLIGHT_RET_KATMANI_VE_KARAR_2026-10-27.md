@@ -1,5 +1,11 @@
 # Review preflight ret katmanı ve gerekli karar
 
+## Sonraki eval teslim kaydı (2026-11-08)
+
+Varsayılan kaynak inceleme preflight'ı ve AST seçeneği değişmedi; AST üretim kararı kapalıdır. Sabit sentetik corpus eval'i legacy bulgusundan AST bulgusuz sonuca geçen 11 örnek gösterdi; bunların sekizi corpus'ta benign, dördü ise risk etiketli örneklerdir. Sonuç yalnız bu sabit sentetik corpus içindir ve gerçek kaynaklar için precision/recall ölçümü değildir. Değerlendirme düzeltmeleri için hedefli testler 16/16 geçti.
+
+Bu raporda daha önce kaydedilen sekiz dosyalık paket `0d13fd015fbcab545d5c1021f9c5d28a47e1472c` commit'inde yerel `main` dalına alındı ve `origin/main` dalına push edildi. Bağımsız Sol follow-up incelemesi kullanıcı kararıyla ertelendi; kaynak teslimi ve model çağrısı yapılmadı. Bu teslim, yerel preflight veya platform kararını değiştirmez ve bağımsız inceleme kanıtı değildir. Aşağıdaki eski Git durumu açıklamaları tarihsel kayıt olarak korunur.
+
 Tarih: 2026-10-27 Türkiye
 
 ## Sonuç

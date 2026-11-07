@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync, execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createSmokeExecutionContext, removeSyntheticSmokeRoot, syntheticSmokeRootPrefix } from "./smoke-mcp-support.js";
+import { createTestDiagnosticsCollector, createUnavailableTestDiagnostics } from "./verify-local-test-diagnostics.js";
 
 const maximumSnapshotFileBytes = 268435456;
 const maximumSnapshotTotalBytes = 4294967296;
@@ -491,6 +492,7 @@ export function buildVerificationStagePlan(projectRoot) {
   const testFiles = getTestFiles(projectRoot);
   if (testFiles.length === 0) throw new LocalVerificationError("unit_test_files_missing");
   const node = process.execPath;
+  const testReporter = `--test-reporter=${pathToFileURL(path.join(projectRoot, "scripts", "verify-local-test-reporter.js")).href}`;
   return [
     {
       id: "verify-ci",
@@ -505,16 +507,18 @@ export function buildVerificationStagePlan(projectRoot) {
       packageScript: "npm test",
       command: `node --test --test-timeout=120000 tests/*.test.js (${testFiles.length} files)`,
       executable: node,
-      args: ["--test", "--test-timeout=120000", ...testFiles],
-      timeoutMs: completeStageTimeoutMs
+      args: ["--test", "--test-timeout=120000", testReporter, "--test-reporter-destination=stdout", ...testFiles],
+      timeoutMs: completeStageTimeoutMs,
+      testFiles
     },
     {
       id: "test-benchmark",
       packageScript: "npm test",
       command: "node --test --test-timeout=35000 tests/performance/memory-search.test.js",
       executable: node,
-      args: ["--test", "--test-timeout=35000", "tests/performance/memory-search.test.js"],
-      timeoutMs: benchmarkTimeoutMs
+      args: ["--test", "--test-timeout=35000", testReporter, "--test-reporter-destination=stdout", "tests/performance/memory-search.test.js"],
+      timeoutMs: benchmarkTimeoutMs,
+      testFiles: ["tests/performance/memory-search.test.js"]
     },
     {
       id: "smoke",
@@ -619,7 +623,8 @@ function makeSkippedStage(stage, reason) {
       directChildExited: null,
       stdioClosed: null,
       forcedStdioClose: false
-    }
+    },
+    ...(stage.testFiles ? { diagnostics: createUnavailableTestDiagnostics(stage.id, "stage_not_started") } : {})
   };
 }
 
@@ -649,7 +654,14 @@ export async function executeVerificationStages(stages, options = {}) {
         env: options.environment,
         timeoutMs: stage.timeoutMs,
         maxOutputBytes: options.maxOutputBytes ?? maximumStageOutputBytes,
-        signal: options.signal
+        signal: options.signal,
+        ...(stage.testFiles ? {
+          diagnostics: {
+            stageId: stage.id,
+            projectRoot: options.projectRoot,
+            allowedTestFiles: stage.testFiles
+          }
+        } : {})
       });
     } catch (error) {
       result = {
@@ -680,6 +692,9 @@ export async function executeVerificationStages(stages, options = {}) {
       timedOut: result.status === "timeout",
       cancelled: result.status === "cancelled",
       processTreeCleanup: result.processTreeCleanup ?? null,
+      ...(stage.testFiles ? {
+        diagnostics: result.diagnostics || createUnavailableTestDiagnostics(stage.id, "runner_diagnostics_missing")
+      } : {}),
       ...(result.errorCode ? { errorCode: result.errorCode } : {})
     };
     stageResults.push(item);
@@ -787,13 +802,17 @@ const processTerminationSettleMs = 500;
 
 export function runCommand(options, processControl = {}) {
   const startedAt = Date.now();
+  const diagnostics = options.diagnostics
+    ? createTestDiagnosticsCollector(options.diagnostics)
+    : null;
   if (options.signal?.aborted) {
     return Promise.resolve({
       status: "cancelled",
       exitCode: null,
       durationMs: 0,
       outputBytes: 0,
-      processTreeCleanup: { status: "not_applied", method: "pre_aborted", terminationRequested: false, directChildExited: null, stdioClosed: null, forcedStdioClose: false }
+      processTreeCleanup: { status: "not_applied", method: "pre_aborted", terminationRequested: false, directChildExited: null, stdioClosed: null, forcedStdioClose: false },
+      ...(diagnostics ? { diagnostics: diagnostics.finish({ primaryStatus: "cancelled" }) } : {})
     });
   }
   return new Promise((resolve) => {
@@ -849,6 +868,7 @@ export function runCommand(options, processControl = {}) {
           ...(termination?.errorCode ? { errorCode: termination.errorCode } : {}),
           ...(Number.isInteger(termination?.toolExitCode) ? { toolExitCode: termination.toolExitCode } : {})
         },
+        ...(diagnostics ? { diagnostics: diagnostics.finish({ primaryStatus: terminalStatus || (errorCode ? "spawn_error" : exitCode === 0 ? "passed" : "failed"), spawnError: Boolean(errorCode) }) } : {}),
         ...(errorCode ? { errorCode } : {})
       });
     };
@@ -893,12 +913,16 @@ export function runCommand(options, processControl = {}) {
       finalize(null, error.code || "spawn_failed");
       return;
     }
-    const countOutput = (chunk) => {
+    const countOutput = (chunk, outputType) => {
       outputBytes += chunk.length;
+      if (diagnostics && outputType === "stdout") {
+        const consumed = diagnostics.consume(chunk);
+        outputBytes += consumed.accountedOutputBytes;
+      }
       if (outputBytes > options.maxOutputBytes) stopChildTree("output_limit");
     };
-    child.stdout.on("data", countOutput);
-    child.stderr.on("data", countOutput);
+    child.stdout.on("data", (chunk) => countOutput(chunk, "stdout"));
+    child.stderr.on("data", (chunk) => countOutput(chunk, "stderr"));
     child.on("error", (error) => {
       if (!terminalStatus) terminalStatus = "spawn_error";
       if (!child.pid) {
@@ -936,7 +960,7 @@ export async function runLocalVerification(options = {}) {
   const startedAt = new Date().toISOString();
   const startedClock = Date.now();
   const report = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     status: "setup_failed",
     startedAt,
     finishedAt: null,

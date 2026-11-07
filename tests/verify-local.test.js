@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   buildVerificationStagePlan,
   captureSourceSnapshot,
@@ -15,6 +16,7 @@ import {
   validateSyntheticExecutionContext
 } from "../scripts/verify-local.js";
 import { removeSyntheticSmokeRoot } from "../scripts/smoke-mcp-support.js";
+import { createTestDiagnosticsCollector, maximumDiagnosticPendingBytes, maximumDiagnosticRecordBytes } from "../scripts/verify-local-test-diagnostics.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -111,6 +113,58 @@ function createSnapshotGitRepository(context, files, prefix = "verify-local-snap
   return root;
 }
 
+function createDiagnosticEnvironment() {
+  return Object.fromEntries(Object.entries({
+    PATH: process.env.Path || process.env.PATH,
+    SystemRoot: process.env.SystemRoot,
+    WINDIR: process.env.WINDIR,
+    ComSpec: process.env.ComSpec,
+    PATHEXT: process.env.PATHEXT,
+    TEMP: os.tmpdir(),
+    TMP: os.tmpdir()
+  }).filter(([, value]) => typeof value === "string"));
+}
+
+function startDiagnosticTestFiles(context, files, options = {}) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-local-diagnostics-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const [relativePath, contents] of Object.entries(files)) {
+    const destination = path.join(root, ...relativePath.split("/"));
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, contents, "utf8");
+  }
+  const reporterPath = options.reporterSource
+    ? path.join(root, "failing-reporter.mjs")
+    : path.join(projectRoot, "scripts", "verify-local-test-reporter.js");
+  if (options.reporterSource) fs.writeFileSync(reporterPath, options.reporterSource, "utf8");
+  const args = [
+    "--test",
+    `--test-reporter=${pathToFileURL(reporterPath).href}`,
+    "--test-reporter-destination=stdout",
+    ...Object.keys(files)
+  ];
+  const result = runCommand({
+    executable: process.execPath,
+    args,
+    cwd: root,
+    env: createDiagnosticEnvironment(),
+    timeoutMs: options.timeoutMs ?? 10000,
+    maxOutputBytes: options.maxOutputBytes ?? 16777216,
+    signal: options.signal,
+    diagnostics: {
+      stageId: options.stageId || "test-suite",
+      projectRoot: root,
+      allowedTestFiles: Object.keys(files)
+    }
+  });
+  return { result, root, files: Object.keys(files), args };
+}
+
+async function runDiagnosticTestFiles(context, files, options = {}) {
+  const running = startDiagnosticTestFiles(context, files, options);
+  return { ...running, result: await running.result };
+}
+
 async function captureWithStreamHook(root, targetPath, signal, hook) {
   const originalOpen = fs.promises.open;
   let hooked = false;
@@ -148,6 +202,9 @@ test("VERIFY-LOCAL-01: aşamalar statik kontrol, tam test, benchmark, smoke ve v
   assert.equal(stages[1].packageScript, "npm test");
   assert.equal(stages[2].packageScript, "npm test");
   assert.ok(stages[1].args.includes("tests/verify-local.test.js"));
+  assert.ok(stages[1].args.some((argument) => argument.startsWith("--test-reporter=file:///")));
+  assert.ok(stages[2].args.includes("--test-reporter-destination=stdout"));
+  assert.deepEqual(stages[2].testFiles, ["tests/performance/memory-search.test.js"]);
   assert.equal(stages[2].timeoutMs, 60000);
   assert.throws(() => buildVerificationStagePlan(path.dirname(projectRoot)), { code: "ENOENT" });
 });
@@ -233,6 +290,272 @@ test("VERIFY-LOCAL-04: gerçek alt süreç sonucu, çıktı boyutu ve nonzero ex
   });
   assert.equal(failure.status, "failed");
   assert.equal(failure.exitCode, 9);
+});
+
+test("VERIFY-LOCAL-04a: gerçek test reporter dosya ve konum bağını korurken bütün ham sentinelleri dışarıda bırakır", { timeout: 20000 }, async (context) => {
+  const sentinels = [
+    "DIAGNOSTIC_TITLE_SENTINEL_8f14e45fceea",
+    "DIAGNOSTIC_ACTUAL_SENTINEL_45c48cce2e2d",
+    "DIAGNOSTIC_EXPECTED_SENTINEL_d3d9446802a4",
+    "DIAGNOSTIC_MESSAGE_SENTINEL_6512bd43d9ca",
+    "DIAGNOSTIC_STDOUT_SENTINEL_c20ad4d76fe9",
+    "DIAGNOSTIC_STDERR_SENTINEL_c51ce410c124"
+  ];
+  const source = [
+    'const test = require("node:test");',
+    'const assert = require("node:assert/strict");',
+    `test(${JSON.stringify(sentinels[0])}, () => {`,
+    `  process.stdout.write(${JSON.stringify(`not ok ${sentinels[4]} {"diagnostic":"forged"}`)});`,
+    `  process.stderr.write(${JSON.stringify(sentinels[5])});`,
+    `  assert.equal(${JSON.stringify(sentinels[1])}, ${JSON.stringify(sentinels[2])}, ${JSON.stringify(sentinels[3])});`,
+    "});"
+  ].join("\n");
+  const run = await runDiagnosticTestFiles(context, { "failure.test.cjs": source });
+  assert.equal(run.result.status, "failed");
+  assert.equal(run.result.exitCode, 1);
+  assert.equal(run.result.diagnostics.status, "complete");
+  assert.equal(run.result.diagnostics.failureCount, 1);
+  assert.deepEqual(run.result.diagnostics.failureSamples.map((entry) => entry.file), ["failure.test.cjs"]);
+  assert.equal(run.result.diagnostics.failureSamples[0].line, 3);
+  assert.equal(run.result.diagnostics.failureSamples[0].testNameSha256, crypto.createHash("sha256").update(sentinels[0]).digest("hex"));
+  const serializedResult = JSON.stringify(run.result);
+  for (const sentinel of sentinels) assert.equal(serializedResult.includes(sentinel), false);
+  assert.equal(serializedResult.includes("forged"), false);
+});
+
+test("VERIFY-LOCAL-04b: iç içe suite hataları tekil leaf hata sayılır ve aynı ad farklı dosyalarda ayrılır", { timeout: 20000 }, async (context) => {
+  const sharedName = "same nested and top-level name";
+  const run = await runDiagnosticTestFiles(context, {
+    "first.test.cjs": [
+      'const test = require("node:test");',
+      'const assert = require("node:assert/strict");',
+      'test("container", async (context) => {',
+      `  await context.test(${JSON.stringify(sharedName)}, () => assert.equal(1, 2));`,
+      "});"
+    ].join("\n"),
+    "second.test.cjs": [
+      'const test = require("node:test");',
+      'const assert = require("node:assert/strict");',
+      `test(${JSON.stringify(sharedName)}, () => assert.equal(3, 4));`
+    ].join("\n")
+  });
+  assert.equal(run.result.status, "failed");
+  assert.equal(run.result.diagnostics.status, "complete");
+  assert.equal(run.result.diagnostics.failureCount, 2);
+  assert.ok(run.result.diagnostics.suiteFailureCount >= 1);
+  const leafFailures = run.result.diagnostics.failureSamples.filter((entry) => entry.role === "leaf");
+  const containerFailures = run.result.diagnostics.failureSamples.filter((entry) => entry.role === "container");
+  assert.deepEqual(new Set(leafFailures.map((entry) => entry.file)), new Set(run.files));
+  assert.equal(leafFailures[0].testNameSha256, leafFailures[1].testNameSha256);
+  assert.equal(containerFailures.length, run.result.diagnostics.suiteFailureCount);
+});
+
+test("VERIFY-LOCAL-04c: Unicode ve aşırı uzun test adları ham metin olmadan hash sınırına uyar", { timeout: 20000 }, async (context) => {
+  const longName = `başarısızlık-${"ü漢🙂".repeat(1500)}`;
+  const source = [
+    'const test = require("node:test");',
+    'const assert = require("node:assert/strict");',
+    `test(${JSON.stringify(longName)}, () => assert.equal(1, 2));`
+  ].join("\n");
+  const run = await runDiagnosticTestFiles(context, { "unicode.test.cjs": source });
+  assert.equal(run.result.diagnostics.status, "complete");
+  assert.equal(run.result.diagnostics.failureCount, 1);
+  assert.equal(run.result.diagnostics.nameHashOmittedCount, 1);
+  assert.equal(run.result.diagnostics.failureSamples[0].testNameSha256, null);
+  assert.equal(run.result.diagnostics.failureSamples[0].testNameHashStatus, "omitted_too_large");
+  assert.equal(JSON.stringify(run.result).includes(longName), false);
+});
+
+test("VERIFY-LOCAL-04d: hata örnekleri sabit sayıda tutulur ve kesilme sonucu raporlanır", { timeout: 20000 }, async (context) => {
+  const cases = Array.from({ length: 35 }, (_, index) => `test(${JSON.stringify(`failure-${index}`)}, () => assert.equal(${index}, -1));`);
+  const source = ['const test = require("node:test");', 'const assert = require("node:assert/strict");', ...cases].join("\n");
+  const run = await runDiagnosticTestFiles(context, { "many-failures.test.cjs": source });
+  assert.equal(run.result.status, "failed");
+  assert.equal(run.result.diagnostics.status, "truncated");
+  assert.equal(run.result.diagnostics.failureCount, 35);
+  assert.equal(run.result.diagnostics.failureSamples.length, 20);
+  assert.equal(run.result.diagnostics.omittedFailureSamples, 15);
+  assert.equal(run.result.diagnostics.countsComplete, true);
+});
+
+test("VERIFY-LOCAL-04e: bozuk, aşırı uzun veya eksik reporter kaydı sınırlı tanıyı unavailable yapar", () => {
+  const allowedTestFiles = ["tests/é.test.js"];
+  const failureRecord = {
+    version: 1,
+    kind: "failure",
+    role: "leaf",
+    file: allowedTestFiles[0],
+    line: 8,
+    column: 4,
+    testNameSha256: "a".repeat(64),
+    testNameHashStatus: "available",
+    failureClass: "assertion"
+  };
+  const summaryRecord = {
+    version: 1,
+    kind: "summary",
+    status: "complete",
+    failureCount: 1,
+    suiteFailureCount: 0,
+    passedCount: 0,
+    skippedCount: 0,
+    todoCount: 0,
+    observedEvents: 1,
+    omittedEvents: 0,
+    failureSamples: 1,
+    omittedFailureSamples: 0,
+    unmappedFailureCount: 0,
+    testOutputBytes: 0,
+    nameHashOmittedCount: 0
+  };
+  const completeBytes = Buffer.from(`${JSON.stringify(failureRecord)}\n${JSON.stringify(summaryRecord)}\n`, "utf8");
+  const splitCollector = createTestDiagnosticsCollector({ stageId: "test-suite", projectRoot: os.tmpdir(), allowedTestFiles });
+  for (let offset = 0; offset < completeBytes.length; offset += 2) splitCollector.consume(completeBytes.subarray(offset, offset + 2));
+  const splitResult = splitCollector.finish({ primaryStatus: "failed" });
+  assert.equal(splitResult.status, "complete");
+  assert.equal(splitResult.failureSamples[0].file, allowedTestFiles[0]);
+
+  const oversized = createTestDiagnosticsCollector({ stageId: "test-suite", projectRoot: os.tmpdir(), allowedTestFiles });
+  oversized.consume(Buffer.from(`${"x".repeat(maximumDiagnosticRecordBytes + maximumDiagnosticPendingBytes)}\n`));
+  assert.equal(oversized.finish({ primaryStatus: "failed" }).reason, "record_byte_limit");
+
+  const malformed = createTestDiagnosticsCollector({ stageId: "test-suite", projectRoot: os.tmpdir(), allowedTestFiles });
+  malformed.consume(Buffer.from([0xc3, 0x28, 0x0a]));
+  assert.equal(malformed.finish({ primaryStatus: "failed" }).reason, "malformed_record");
+
+  const incomplete = createTestDiagnosticsCollector({ stageId: "test-suite", projectRoot: os.tmpdir(), allowedTestFiles });
+  incomplete.consume(completeBytes.subarray(0, completeBytes.length - 1));
+  assert.equal(incomplete.finish({ primaryStatus: "failed" }).reason, "missing_final_record");
+});
+
+test("VERIFY-LOCAL-04f: syntax error ve reporter arızası gerçek child sonucunu geçemez", { timeout: 20000 }, async (context) => {
+  const syntax = await runDiagnosticTestFiles(context, { "broken.test.cjs": "const test = require('node:test'); const = broken" });
+  assert.equal(syntax.result.status, "failed");
+  assert.equal(syntax.result.diagnostics.status, "complete");
+  assert.equal(syntax.result.diagnostics.failureCount, 1);
+  assert.equal(syntax.result.diagnostics.suiteFailureCount, 0);
+  assert.equal(syntax.result.diagnostics.failureSamples[0].file, "broken.test.cjs");
+  assert.equal(syntax.result.diagnostics.failureSamples[0].role, "leaf");
+  assert.equal(syntax.result.diagnostics.failureSamples[0].failureClass, "test_failure");
+
+  const reporter = await runDiagnosticTestFiles(context, {
+    "passes.test.cjs": 'const test = require("node:test"); test("safe", () => {});'
+  }, { reporterSource: "throw new Error('REPORTER_FAILURE_SENTINEL');" });
+  assert.notEqual(reporter.result.status, "passed");
+  assert.equal(reporter.result.diagnostics.status, "unavailable");
+  assert.equal(JSON.stringify(reporter.result).includes("REPORTER_FAILURE_SENTINEL"), false);
+});
+
+test("VERIFY-LOCAL-04g: test çıktısının byte hesabı mevcut output_limit sonucunu korur", { timeout: 20000 }, async (context) => {
+  const source = [
+    'const test = require("node:test");',
+    'test("bounded output", () => process.stdout.write("x".repeat(5000)));'
+  ].join("\n");
+  const run = await runDiagnosticTestFiles(context, { "large-output.test.cjs": source }, { maxOutputBytes: 1000 });
+  assert.equal(run.result.status, "output_limit");
+  assert.ok(run.result.outputBytes > 1000);
+  assert.equal(run.result.diagnostics.status, "unavailable");
+});
+
+test("VERIFY-LOCAL-04h: suite ve benchmark stage'leri gerçek reporter tanısını aşama sonucuna taşır", { timeout: 20000 }, async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "verify-local-stage-diagnostics-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const reporter = `--test-reporter=${pathToFileURL(path.join(projectRoot, "scripts", "verify-local-test-reporter.js")).href}`;
+  const fileNames = ["suite.test.cjs", "benchmark.test.cjs"];
+  for (const fileName of fileNames) {
+    fs.writeFileSync(path.join(root, fileName), 'const test = require("node:test"); test("visible result", () => {});', "utf8");
+  }
+  const stages = fileNames.map((fileName, index) => ({
+    id: index === 0 ? "test-suite" : "test-benchmark",
+    packageScript: "npm test",
+    command: "node --test fixture",
+    executable: process.execPath,
+    args: ["--test", reporter, "--test-reporter-destination=stdout", fileName],
+    timeoutMs: 10000,
+    testFiles: [fileName]
+  }));
+  const result = await executeVerificationStages(stages, { projectRoot: root, environment: createDiagnosticEnvironment() });
+  assert.equal(result.failure, null);
+  assert.deepEqual(result.stages.map((stage) => stage.diagnostics.stageId), ["test-suite", "test-benchmark"]);
+  assert.ok(result.stages.every((stage) => stage.status === "passed" && stage.diagnostics.status === "complete"));
+  assert.ok(result.stages.every((stage) => stage.diagnostics.passedCount === 1));
+
+  const failureSentinel = "STAGE_FAILURE_SENTINEL_6f4922f45568161a8cdf4ad2299f6d23";
+  fs.writeFileSync(path.join(root, "failed.test.cjs"), [
+    'const test = require("node:test");',
+    'const assert = require("node:assert/strict");',
+    `test(${JSON.stringify(failureSentinel)}, () => assert.equal(1, 2));`
+  ].join("\n"), "utf8");
+  const failedSequence = await executeVerificationStages([{
+    id: "test-suite",
+    packageScript: "npm test",
+    command: "node --test fixture",
+    executable: process.execPath,
+    args: ["--test", reporter, "--test-reporter-destination=stdout", "failed.test.cjs"],
+    timeoutMs: 10000,
+    testFiles: ["failed.test.cjs"]
+  }], { projectRoot: root, environment: createDiagnosticEnvironment() });
+  const failedStage = failedSequence.stages[0];
+  assert.equal(failedSequence.failure.class, "failed");
+  assert.equal(failedStage.status, "failed");
+  assert.equal(failedStage.exitCode, 1);
+  assert.equal(failedStage.diagnostics.status, "complete");
+  assert.equal(failedStage.diagnostics.failureCount, 1);
+  assert.equal(failedStage.diagnostics.failureSamples[0].file, "failed.test.cjs");
+  assert.equal(JSON.stringify(failedSequence).includes(failureSentinel), false);
+});
+
+test("VERIFY-LOCAL-04i: reporter channel timeout ve cancellation cleanup'i korur", { timeout: 20000 }, async (context) => {
+  const timeoutMarker = path.join(os.tmpdir(), `verify-local-reporter-timeout-${process.pid}-${Date.now()}`);
+  const partialMarker = path.join(os.tmpdir(), `verify-local-reporter-partial-${process.pid}-${Date.now()}`);
+  const cancelMarker = path.join(os.tmpdir(), `verify-local-reporter-cancel-${process.pid}-${Date.now()}`);
+  context.after(() => {
+    fs.rmSync(timeoutMarker, { force: true });
+    fs.rmSync(partialMarker, { force: true });
+    fs.rmSync(cancelMarker, { force: true });
+  });
+  const timeoutSource = [
+    'const fs = require("node:fs");',
+    'const test = require("node:test");',
+    `test("timeout", async () => { fs.writeFileSync(${JSON.stringify(timeoutMarker)}, "ready"); await new Promise(() => {}); });`
+  ].join("\n");
+  const timeoutRun = startDiagnosticTestFiles(context, { "timeout.test.cjs": timeoutSource }, { timeoutMs: 500 });
+  await waitForFile(timeoutMarker);
+  const timeout = await timeoutRun.result;
+  assert.equal(timeout.status, "timeout");
+  assert.equal(timeout.diagnostics.status, "unavailable");
+  assert.equal(timeout.processTreeCleanup.terminationRequested, true);
+
+  const partialSource = [
+    'const fs = require("node:fs");',
+    'const test = require("node:test");',
+    'const assert = require("node:assert/strict");',
+    'test("fails before timeout", () => assert.equal(1, 2));',
+    `test("keeps process open", async () => { fs.writeFileSync(${JSON.stringify(partialMarker)}, "ready"); await new Promise(() => {}); });`
+  ].join("\n");
+  const partialRun = startDiagnosticTestFiles(context, { "partial.test.cjs": partialSource }, { timeoutMs: 1000 });
+  await waitForFile(partialMarker);
+  const partial = await partialRun.result;
+  assert.equal(partial.status, "timeout");
+  assert.equal(partial.diagnostics.status, "unavailable");
+  assert.equal(partial.diagnostics.failureCount, null);
+  assert.equal(partial.diagnostics.failureSamples.length, 1);
+  assert.equal(partial.diagnostics.failureSamples[0].file, "partial.test.cjs");
+  assert.equal(partial.diagnostics.failureSamples[0].line, 4);
+
+  const controller = new AbortController();
+  const cancelSource = [
+    'const fs = require("node:fs");',
+    'const test = require("node:test");',
+    `test("cancel", async () => { fs.writeFileSync(${JSON.stringify(cancelMarker)}, "ready"); await new Promise(() => {}); });`
+  ].join("\n");
+  const cancelRun = startDiagnosticTestFiles(context, { "cancel.test.cjs": cancelSource }, { signal: controller.signal, timeoutMs: 10000 });
+  await waitForFile(cancelMarker);
+  controller.abort();
+  const cancelled = await cancelRun.result;
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.diagnostics.status, "unavailable");
+  assert.equal(cancelled.processTreeCleanup.terminationRequested, true);
 });
 
 test("VERIFY-LOCAL-05: timeout, cancellation, çıktı sınırı ve başlatma hatası ayrı sonuçlanır", { timeout: 30000 }, async () => {
@@ -562,7 +885,7 @@ test("VERIFY-LOCAL-09: başarılı deneme küçük JSON sonucu, stage durumları
     createContext: async (root, environment) => prepareSyntheticExecutionContext(root, environment),
     runCommand: async () => ({ status: "passed", exitCode: 0, durationMs: 1, outputBytes: 4 })
   });
-  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.schemaVersion, 3);
   assert.equal(report.status, "passed");
   assert.equal(report.exitCode, 0);
   assert.equal(report.source.unchangedAtCompletion, true);
@@ -702,7 +1025,14 @@ test("VERIFY-LOCAL-15a: an exited parent with a pipe-holding descendant cannot b
   let parentPid = null;
   let descendantPid = null;
   try {
-    const resultPromise = runCommand({ ...command, cwd: projectRoot, env: process.env, timeoutMs: 500, maxOutputBytes: 1000 });
+    const resultPromise = runCommand({
+      ...command,
+      cwd: projectRoot,
+      env: process.env,
+      timeoutMs: 500,
+      maxOutputBytes: 1000,
+      diagnostics: { stageId: "test-suite", projectRoot, allowedTestFiles: ["tests/verify-local.test.js"] }
+    });
     const markers = await waitForTreeMarkers(command);
     parentPid = markers.parentPid;
     descendantPid = markers.descendantPid;
@@ -713,6 +1043,7 @@ test("VERIFY-LOCAL-15a: an exited parent with a pipe-holding descendant cannot b
     assert.equal(result.processTreeCleanup.status, "unconfirmed");
     assert.equal(result.processTreeCleanup.method, "parent_already_exited");
     assert.equal(result.processTreeCleanup.forcedStdioClose, true);
+    assert.equal(result.diagnostics.status, "unavailable");
     assert.ok(result.durationMs < 4000);
     assert.equal(processIsRunning(descendantPid), true);
   } finally {

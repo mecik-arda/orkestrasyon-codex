@@ -493,13 +493,22 @@ function createConfigurationPath(projectRoot) {
 
 function readConfiguration(planPaths) {
   const parentInfo = readPathInformation(planPaths.codexDirectory, { allowMissing: true, requireDirectory: true });
-  if (parentInfo === null) return { exists: false, bytes: Buffer.alloc(0), identity: null, text: "" };
+  if (parentInfo === null) return { exists: false, bytes: Buffer.alloc(0), identity: null, parentIdentity: null, text: "" };
   const identity = readPathInformation(planPaths.configurationPath, { allowMissing: true });
-  if (identity === null) return { exists: false, bytes: Buffer.alloc(0), identity: null, text: "" };
+  if (identity === null) {
+    const latestParentInfo = readPathInformation(planPaths.codexDirectory, { allowMissing: true, requireDirectory: true });
+    if (!directoryIdentityMatches(parentInfo, latestParentInfo)) throw new Error("Codex project configuration changed while it was being read");
+    return { exists: false, bytes: Buffer.alloc(0), identity: null, parentIdentity: parentInfo, text: "" };
+  }
   const bytes = fs.readFileSync(planPaths.configurationPath);
+  const latestIdentity = readPathInformation(planPaths.configurationPath, { allowMissing: true });
+  const latestParentInfo = readPathInformation(planPaths.codexDirectory, { allowMissing: true, requireDirectory: true });
+  if (!fileInformationMatches(identity, latestIdentity) || !directoryIdentityMatches(parentInfo, latestParentInfo)) {
+    throw new Error("Codex project configuration changed while it was being read");
+  }
   const text = bytes.toString("utf8");
   if (!Buffer.from(text, "utf8").equals(bytes)) throw new Error("Codex TOML configuration is not valid UTF-8");
-  return { exists: true, bytes, identity, text };
+  return { exists: true, bytes, identity, parentIdentity: parentInfo, text };
 }
 
 function existingManagedValues(parsed) {
@@ -525,6 +534,7 @@ function createPlan(projectRoot) {
     originalBytes: configuration.bytes,
     originalHash: crypto.createHash("sha256").update(configuration.bytes).digest("hex"),
     originalIdentity: configuration.identity,
+    originalParentIdentity: configuration.parentIdentity,
     parsed,
     desiredValues,
     changes,
@@ -620,21 +630,29 @@ function renderManagedBlock(projectRoot, newline) {
   ].join(newline);
 }
 
-function configurationSummary(plan, action, status) {
+function configurationSummary(plan, action, status, details = {}) {
+  const projectMcpReady = status === "ready" || status === "written" || status === "unchanged";
   return {
-    ok: status === "ready" || status === "written" || status === "unchanged",
+    ok: projectMcpReady,
     action,
-    projectMcpReady: status === "ready" || status === "unchanged",
+    projectMcpReady: status === "ready" || status === "unchanged" || status === "written",
     status,
+    publicationState: details.publicationState || (status === "written" ? "published" : "not_attempted"),
+    failureStage: details.failureStage || null,
+    cleanupStatus: details.cleanupStatus || "not_needed",
+    backupStatus: details.backupStatus || "not_created",
+    lockStatus: details.lockStatus || "not_used",
+    coordinationLock: details.coordinationLock || "not_used",
     checks: {
       projectConfigPath: "verified",
       tomlSyntax: "verified",
       serverEntrypoint: "verified",
-      managedHadesEntry: status === "ready" || status === "unchanged" ? "matches" : "needs_update",
+      managedHadesEntry: status === "ready" || status === "unchanged" ? "matches" : status === "written" ? "updated" : "needs_update",
       userGlobalConfig: "not_read"
     },
     changes: plan.changes,
-    preservedUnknownHadesFieldCount: plan.unknownFields.length
+    preservedUnknownHadesFieldCount: plan.unknownFields.length,
+    ...details
   };
 }
 
@@ -659,12 +677,53 @@ function fileInformationMatches(expected, actual) {
     && expected.nlink === actual.nlink;
 }
 
-function assertConfigurationUnchanged(plan) {
+function directoryIdentityMatches(expected, actual) {
+  return expected === null ? actual === null : actual !== null
+    && expected.dev === actual.dev
+    && expected.ino === actual.ino
+    && expected.mode === actual.mode;
+}
+
+function createOperationError(error, details) {
+  const operationError = error instanceof Error ? error : new Error("Codex project configuration update failed");
+  Object.assign(operationError, details);
+  return operationError;
+}
+
+function assertConfigurationUnchanged(plan, expectedParentIdentity = plan.originalParentIdentity) {
   const latest = readConfiguration(plan);
-  if (!fileInformationMatches(plan.originalIdentity, latest.identity)
+  if (!directoryIdentityMatches(expectedParentIdentity, latest.parentIdentity)
+    || !fileInformationMatches(plan.originalIdentity, latest.identity)
     || crypto.createHash("sha256").update(latest.bytes).digest("hex") !== plan.originalHash) {
-    throw new Error("Codex project configuration changed while the update was being prepared");
+    throw createOperationError(new Error("Codex project configuration changed while the update was being prepared"), {
+      publicCode: "stale_plan",
+      failureStage: "snapshot_validation",
+      publicationState: "not_published"
+    });
   }
+}
+
+function identityFromStat(stat) {
+  return { dev: stat.dev, ino: stat.ino, mode: stat.mode };
+}
+
+function readOwnedFileIdentity(filePath) {
+  const stat = fs.lstatSync(filePath);
+  if (!stat.isFile() || isPathReparsePoint(stat)) throw new Error("Codex configuration operation file identity is uncertain");
+  return identityFromStat(stat);
+}
+
+function ownedFileIdentityMatches(expected, actual) {
+  return expected !== null && actual !== null
+    && expected.dev === actual.dev
+    && expected.ino === actual.ino
+    && expected.mode === actual.mode;
+}
+
+function removeOwnedFile(filePath, expectedIdentity) {
+  const actualIdentity = readOwnedFileIdentity(filePath);
+  if (!ownedFileIdentityMatches(expectedIdentity, actualIdentity)) throw new Error("Codex configuration operation file identity changed");
+  fs.unlinkSync(filePath);
 }
 
 function createBackup(plan) {
@@ -674,13 +733,54 @@ function createBackup(plan) {
   if (backupDirectoryInfo === null) fs.mkdirSync(backupDirectory);
   readPathInformation(backupDirectory, { requireDirectory: true });
   const backupPath = path.join(backupDirectory, `config.toml.${Date.now()}.${crypto.randomUUID()}.bak`);
-  fs.copyFileSync(plan.configurationPath, backupPath, fs.constants.COPYFILE_EXCL);
-  const backupBytes = fs.readFileSync(backupPath);
-  if (!backupBytes.equals(plan.originalBytes)) {
-    fs.rmSync(backupPath, { force: true });
-    throw new Error("Codex project configuration backup verification failed");
+  let descriptor;
+  let descriptorOpened = false;
+  let descriptorCloseFailed = false;
+  let backupIdentity = null;
+  try {
+    descriptor = fs.openSync(backupPath, "wx", 0o600);
+    descriptorOpened = true;
+    backupIdentity = identityFromStat(fs.fstatSync(descriptor));
+    fs.writeFileSync(descriptor, plan.originalBytes);
+    fs.fsyncSync(descriptor);
+    const descriptorToClose = descriptor;
+    descriptor = undefined;
+    try {
+      fs.closeSync(descriptorToClose);
+    } catch (error) {
+      descriptorCloseFailed = true;
+      throw error;
+    }
+    if (!ownedFileIdentityMatches(backupIdentity, readOwnedFileIdentity(backupPath))
+      || !fs.readFileSync(backupPath).equals(plan.originalBytes)) {
+      throw new Error("Codex project configuration backup verification failed");
+    }
+    return { path: backupPath, identity: backupIdentity };
+  } catch (error) {
+    let cleanupStatus = descriptorCloseFailed ? "failed" : "not_needed";
+    let backupStatus = descriptorOpened ? "cleanup_unverified" : "not_created";
+    if (descriptor !== undefined) {
+      const descriptorToClose = descriptor;
+      descriptor = undefined;
+      try {
+        fs.closeSync(descriptorToClose);
+      } catch {
+        cleanupStatus = "failed";
+      }
+    }
+    if (descriptorOpened && backupIdentity !== null) {
+      try {
+        removeOwnedFile(backupPath, backupIdentity);
+        backupStatus = "removed_after_failure";
+        if (cleanupStatus === "not_needed") cleanupStatus = "complete";
+      } catch {
+        backupStatus = "cleanup_failed";
+        cleanupStatus = "failed";
+      }
+    }
+    if (backupStatus === "cleanup_unverified") cleanupStatus = "uncertain";
+    throw createOperationError(error, { backupStatus, cleanupStatus });
   }
-  return backupPath;
 }
 
 async function acquireConfigurationLock(lockPath) {
@@ -693,41 +793,194 @@ async function acquireConfigurationLock(lockPath) {
   throw new Error("Codex project configuration lock unavailable");
 }
 
-function writeAtomically(plan, bytes) {
+function writeAtomically(plan, bytes, expectedParentIdentity) {
   const temporaryPath = `${plan.configurationPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
   let descriptor;
-  let published = false;
+  let descriptorOpened = false;
+  let temporaryIdentity = null;
+  let temporaryExists = false;
+  let temporaryCleanupAttempted = false;
+  let backup = null;
+  let publicationState = "not_published";
+  let failureStage = "temporary_create";
+  let primaryError = null;
+  let cleanupStatus = "not_needed";
+  let backupStatus = "not_created";
   try {
     descriptor = fs.openSync(temporaryPath, "wx", 0o600);
+    descriptorOpened = true;
+    temporaryExists = true;
+    temporaryIdentity = identityFromStat(fs.fstatSync(descriptor));
+    failureStage = "temporary_write";
     fs.writeFileSync(descriptor, bytes);
+    failureStage = "temporary_sync";
     fs.fsyncSync(descriptor);
-    fs.closeSync(descriptor);
+    const descriptorToClose = descriptor;
     descriptor = undefined;
-    assertConfigurationUnchanged(plan);
-    createBackup(plan);
-    if (plan.originalExists) fs.renameSync(temporaryPath, plan.configurationPath);
-    else fs.linkSync(temporaryPath, plan.configurationPath);
-    published = true;
-    if (!plan.originalExists) fs.unlinkSync(temporaryPath);
+    failureStage = "temporary_close";
+    fs.closeSync(descriptorToClose);
+    if (!ownedFileIdentityMatches(temporaryIdentity, readOwnedFileIdentity(temporaryPath))) {
+      throw new Error("Codex configuration temporary file identity changed");
+    }
+    failureStage = "snapshot_validation";
+    assertConfigurationUnchanged(plan, expectedParentIdentity);
+    failureStage = "backup";
+    backup = createBackup(plan);
+    backupStatus = backup === null ? "not_needed" : "verified";
+    failureStage = "snapshot_validation_after_backup";
+    assertConfigurationUnchanged(plan, expectedParentIdentity);
+    failureStage = "publication";
+    if (plan.originalExists) {
+      fs.renameSync(temporaryPath, plan.configurationPath);
+      temporaryExists = false;
+    } else {
+      fs.linkSync(temporaryPath, plan.configurationPath);
+    }
+    publicationState = "published";
+    if (!plan.originalExists) {
+      failureStage = "published_temporary_cleanup";
+      temporaryCleanupAttempted = true;
+      removeOwnedFile(temporaryPath, temporaryIdentity);
+      temporaryExists = false;
+    }
+    failureStage = "post_publication_verification";
+    const latest = readConfiguration(plan);
+    if (!directoryIdentityMatches(expectedParentIdentity, latest.parentIdentity)
+      || !latest.exists || !latest.bytes.equals(bytes)) {
+      throw new Error("Codex project configuration publication could not be verified");
+    }
+  } catch (error) {
+    primaryError = error;
   } finally {
-    if (descriptor !== undefined) fs.closeSync(descriptor);
-    if (!published) fs.rmSync(temporaryPath, { force: true });
+    if (descriptor !== undefined) {
+      const descriptorToClose = descriptor;
+      descriptor = undefined;
+      try {
+        fs.closeSync(descriptorToClose);
+      } catch (error) {
+        if (primaryError === null) {
+          primaryError = error;
+          failureStage = "temporary_close";
+        } else {
+          cleanupStatus = "failed";
+        }
+      }
+    }
+    if (temporaryExists && !temporaryCleanupAttempted && temporaryIdentity !== null) {
+      temporaryCleanupAttempted = true;
+      try {
+        removeOwnedFile(temporaryPath, temporaryIdentity);
+        temporaryExists = false;
+        if (cleanupStatus === "not_needed") cleanupStatus = "complete";
+      } catch {
+        cleanupStatus = "failed";
+      }
+    }
+    if (temporaryExists && temporaryIdentity === null) cleanupStatus = "uncertain";
+    if (temporaryExists && temporaryCleanupAttempted) cleanupStatus = "failed";
+    if (backup !== null && publicationState === "not_published") {
+      try {
+        removeOwnedFile(backup.path, backup.identity);
+        backupStatus = "removed_before_publication";
+      } catch {
+        backupStatus = "cleanup_failed";
+        cleanupStatus = "failed";
+      }
+    }
   }
+  if (primaryError !== null) {
+    const backupCleanupStatus = primaryError.cleanupStatus;
+    const finalCleanupStatus = cleanupStatus === "failed" || cleanupStatus === "uncertain"
+      ? cleanupStatus
+      : backupCleanupStatus === "failed" || backupCleanupStatus === "uncertain" ? backupCleanupStatus : cleanupStatus;
+    throw createOperationError(primaryError, {
+      publicCode: primaryError.publicCode || "configuration_update_failed",
+      failureStage,
+      publicationState,
+      cleanupStatus: finalCleanupStatus,
+      backupStatus: primaryError.backupStatus || backupStatus
+    });
+  }
+  return { publicationState, cleanupStatus: cleanupStatus === "not_needed" ? "complete" : cleanupStatus, backupStatus };
 }
 
 export async function publishCodexProjectConfiguration(plan) {
   const needsWrite = !plan.originalBytes.equals(plan.nextBytes);
-  if (!needsWrite) return configurationSummary(plan, "write", "unchanged");
-  fs.mkdirSync(plan.codexDirectory, { recursive: true });
-  readPathInformation(plan.codexDirectory, { requireDirectory: true });
-  const lock = await acquireConfigurationLock(path.join(plan.codexDirectory, "config.toml.lock"));
-  try {
-    assertConfigurationUnchanged(plan);
-    writeAtomically(plan, plan.nextBytes);
-  } finally {
-    if (!lock.release()) throw new Error("Codex project configuration lock release is uncertain");
+  let expectedParentIdentity = plan.originalParentIdentity;
+  if (expectedParentIdentity === null) {
+    try {
+      fs.mkdirSync(plan.codexDirectory);
+    } catch (error) {
+      throw createOperationError(error, { publicCode: "stale_plan", failureStage: "parent_creation", publicationState: "not_published" });
+    }
+    expectedParentIdentity = readPathInformation(plan.codexDirectory, { requireDirectory: true });
+  } else {
+    const latestParentIdentity = readPathInformation(plan.codexDirectory, { allowMissing: true, requireDirectory: true });
+    if (!directoryIdentityMatches(expectedParentIdentity, latestParentIdentity)) {
+      throw createOperationError(new Error("Codex project configuration changed while the update was being prepared"), {
+        publicCode: "stale_plan",
+        failureStage: "parent_validation",
+        publicationState: "not_published"
+      });
+    }
   }
-  return configurationSummary(plan, "write", "written");
+  let lock;
+  let result;
+  let operationError = null;
+  let publicationState = needsWrite ? "not_published" : "not_needed";
+  let lockStatus = "not_acquired";
+  try {
+    lock = await acquireConfigurationLock(path.join(plan.codexDirectory, "config.toml.lock"));
+    lockStatus = "held";
+    assertConfigurationUnchanged(plan, expectedParentIdentity);
+    if (needsWrite) {
+      const outcome = writeAtomically(plan, plan.nextBytes, expectedParentIdentity);
+      publicationState = outcome.publicationState;
+      result = configurationSummary(plan, "write", "written", { ...outcome, lockStatus: "released" });
+    } else {
+      result = configurationSummary(plan, "write", "unchanged", {
+        publicationState: "not_needed",
+        backupStatus: "not_created",
+        cleanupStatus: "not_needed",
+        lockStatus: "released",
+        coordinationLock: "used"
+      });
+    }
+  } catch (error) {
+    operationError = error;
+    publicationState = error.publicationState || publicationState;
+  } finally {
+    if (lock) {
+      try {
+        if (!lock.release()) lockStatus = "uncertain";
+        else lockStatus = "released";
+      } catch {
+        lockStatus = "uncertain";
+      }
+    }
+  }
+  if (operationError !== null) {
+    throw createOperationError(operationError, {
+      publicCode: operationError.publicCode || "configuration_update_failed",
+      failureStage: operationError.failureStage || "configuration_update",
+      publicationState,
+      cleanupStatus: operationError.cleanupStatus || "not_needed",
+      backupStatus: operationError.backupStatus || "not_created",
+      lockStatus
+    });
+  }
+  if (lockStatus === "uncertain") {
+    throw createOperationError(new Error("Codex project configuration lock release is uncertain"), {
+      publicCode: "lock_release_uncertain",
+      failureStage: "lock_release",
+      publicationState,
+      projectMcpReady: result.projectMcpReady,
+      cleanupStatus: result.cleanupStatus,
+      backupStatus: result.backupStatus,
+      lockStatus
+    });
+  }
+  return { ...result, lockStatus };
 }
 
 export async function applyCodexProjectConfiguration(projectRoot) {

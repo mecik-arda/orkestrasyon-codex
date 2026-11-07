@@ -68,14 +68,18 @@ export function buildCodexDiagnostics(projectRoot, environment = process.env, pl
   return report;
 }
 
+export function buildDiagnosticFailureReport() {
+  return { schemaVersion: 1, status: "diagnostic_failed", error: "diagnostic_failed" };
+}
+
 export function main() {
   try {
     const projectRoot = getCodexProjectRoot(fileURLToPath(import.meta.url));
     const report = buildCodexDiagnostics(projectRoot);
     process.stdout.write(`${JSON.stringify(report)}\n`);
     if (report.status !== "ready") process.exitCode = 1;
-  } catch (error) {
-    process.stderr.write(`${JSON.stringify({ schemaVersion: 1, status: "diagnostic_failed", error: error instanceof Error ? error.message : "diagnostic_failed" })}\n`);
+  } catch {
+    process.stderr.write(`${JSON.stringify(buildDiagnosticFailureReport())}\n`);
     process.exitCode = 1;
   }
 }

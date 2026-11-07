@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildCodexDiagnostics } from "../scripts/codex-diagnostics.js";
+import { buildCodexDiagnostics, buildDiagnosticFailureReport } from "../scripts/codex-diagnostics.js";
 import { prepareCodexProjectConfiguration } from "../scripts/codex-project-config.js";
 
 function createReadyProject() {
@@ -58,4 +58,11 @@ test("Codex diagnostics reports missing prerequisites and an unmanaged project e
   assert.equal(report.prerequisites.codexCli, false);
   assert.equal(report.prerequisites.git, false);
   assert.equal(fs.existsSync(path.join(root, ".codex")), false);
+});
+
+test("Codex diagnostic failure report does not propagate exception text", () => {
+  const secretSentinel = "diagnostic-path-and-secret-sentinel";
+  const report = buildDiagnosticFailureReport(new Error(secretSentinel));
+  assert.deepEqual(report, { schemaVersion: 1, status: "diagnostic_failed", error: "diagnostic_failed" });
+  assert.equal(JSON.stringify(report).includes(secretSentinel), false);
 });

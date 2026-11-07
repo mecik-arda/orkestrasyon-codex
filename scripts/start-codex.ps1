@@ -21,5 +21,13 @@ if ($null -eq $codexExecutable) {
 
 Set-Location -LiteralPath $projectRoot
 $forwardedArguments = @($args)
+$codexExtension = [System.IO.Path]::GetExtension($codexExecutable.Source)
+if ($codexExtension -ieq ".cmd" -or $codexExtension -ieq ".bat") {
+  foreach ($forwardedArgument in $forwardedArguments) {
+    if ([string]::IsNullOrEmpty($forwardedArgument) -or $forwardedArgument.Contains('"') -or $forwardedArgument.Contains('%')) {
+      throw "Codex CLI command shim cannot safely preserve empty, quoted, or percent-expanded arguments."
+    }
+  }
+}
 & $codexExecutable.Source @forwardedArguments
 exit $LASTEXITCODE

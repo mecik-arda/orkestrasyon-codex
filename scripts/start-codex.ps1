@@ -1,26 +1,25 @@
-$environmentNames = @(
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_MODEL",
-  "ANTHROPIC_DEFAULT_OPUS_MODEL",
-  "ANTHROPIC_DEFAULT_SONNET_MODEL",
-  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-  "CLAUDE_CODE_SUBAGENT_MODEL",
-  "CLAUDE_CODE_EFFORT_LEVEL",
-  "ENABLE_TOOL_SEARCH"
-)
+$ErrorActionPreference = "Stop"
 
-foreach ($environmentName in $environmentNames) {
-  $environmentValue = [Environment]::GetEnvironmentVariable($environmentName, "User")
-  if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
-    Set-Item -Path "Env:$environmentName" -Value $environmentValue
+$projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
+$serverEntryPoint = Join-Path $projectRoot "subagent-bridge\src\server.js"
+
+foreach ($requiredExecutable in @("node", "git")) {
+  $resolvedExecutable = Get-Command -Name $requiredExecutable -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($null -eq $resolvedExecutable) {
+    throw "Required executable not found: $requiredExecutable"
   }
 }
 
-if ([string]::IsNullOrWhiteSpace($env:ANTHROPIC_AUTH_TOKEN)) {
-  throw "ANTHROPIC_AUTH_TOKEN kullanıcı ortamında tanımlı değil."
+if (-not (Test-Path -LiteralPath $serverEntryPoint -PathType Leaf)) {
+  throw "Hades MCP entrypoint not found: $serverEntryPoint"
 }
 
-$projectRoot = Split-Path -Parent $PSScriptRoot
+$codexExecutable = Get-Command -Name "codex" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($null -eq $codexExecutable) {
+  throw "Codex CLI not found. Install Codex CLI and add it to PATH."
+}
+
 Set-Location -LiteralPath $projectRoot
-& "C:\Users\user\.codex\.sandbox-bin\codex.exe" --model "gpt-5.6-sol" --cd $projectRoot
+$forwardedArguments = @($args)
+& $codexExecutable.Source @forwardedArguments
+exit $LASTEXITCODE

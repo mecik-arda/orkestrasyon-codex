@@ -60,20 +60,20 @@ The runtime policy is loaded from `~/.config/subagent-bridge/config.json`; execu
 
 ## Verified baseline
 
-The package is hades-orchestrator 2.2.0, the runtime is Node.js 20.9+ and ESM; CI uses Node.js 22/24. The canonical record is under `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, with an optional view at `<workspace>/.hades/runs.jsonl`. Latest recorded full local validation: 2026-11-05, with 1,079 of 1,083 tests passing, four Windows-conditional skips and zero failures; the required benchmark completed in 11.4 seconds. Synthetic smoke, synthetic-config verify, and verify:ci passed on that source state. These are dated local results.
+The package is hades-orchestrator 2.2.0, the runtime is Node.js 20.9+ and ESM; CI uses Node.js 22/24. The canonical record is under `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, with an optional view at `<workspace>/.hades/runs.jsonl`. Latest recorded full local validation: 2026-11-07, `npm run verify:local` passed all five serial stages across 93 test files; its required benchmark completed in 13.165 seconds. Source snapshot `c7aa7df5a4f627723f6d06791c7ccfa9f29f373a84cd623807cd68ff7c0fa6dd` remained unchanged during the runner. An earlier run on a preceding snapshot had one unexplained suite failure that was not reproduced; its cause is unknown and is not recorded as fixed. Synthetic smoke and temporary config/Vault verify passed without provider credentials or real Vault access. These are dated local results, not live Desktop Hades or provider-access evidence.
 
 ## Quick start
 
 ```powershell
 npm ci
+npm run codex:check
+npm run codex:diagnose
 npm run codex:configure
-npm test
-npm run verify
-npm run smoke
+npm run verify:local
 npm run runs:recent
 ```
 
-For daily use, open the repository root as a trusted local project in Codex Desktop. Run `npm run codex:configure` to refresh the tracked `.codex/config.toml` Hades MCP registration for the current checkout; `npm run codex:check` reports whether it matches this machine but does not restart a running server. After changing server code or registration, use Codex Desktop's restart action for this project's Hades MCP server, then verify the live workspace identity and tool/health surface. `AGENTS.md` provides the project operating rules. Codex starts the MCP server from the repository workspace and exposes its tools to the orchestration session. Provider credentials stay outside the repository. The tracked configuration contains machine-specific executable and workspace paths. See the [Codex migration report](docs/reports/CODEX_GECISI_VE_OPENCODE_ROTA_DURUMU_2026-10-18.md) for disabled routes and future provider work.
+For daily use, open the repository root as a trusted local project in Codex Desktop. `npm run codex:check` inspects the tracked project MCP entry without writing; `npm run codex:diagnose` reports local prerequisites and managed-entry status without reading user-global Codex configuration, starting Hades, querying providers, or accessing a Vault. If the managed Hades entry needs updating, run `npm run codex:configure`; it preserves unrelated TOML settings and reports only managed-entry metadata. `npm run verify:local` runs the serial local suite with synthetic configuration and Vault fixtures. After changing server code or registration, restart this project's Hades MCP server through Codex Desktop, then inspect its workspace identity and tool/resource surface. Those observations are operational checks, not attestations of the running source revision or effective configuration. `AGENTS.md` provides the project operating rules. Provider credentials stay outside the repository. The tracked configuration contains machine-specific executable and workspace paths. See the [Codex migration report](docs/reports/CODEX_GECISI_VE_OPENCODE_ROTA_DURUMU_2026-10-18.md) for route status and setup limits.
 
 ## Architecture
 
@@ -344,10 +344,10 @@ Requirements: Node.js 20.9+ (22/24 recommended), the official standalone Codex C
 
 ```powershell
 npm ci
+npm run codex:check
+npm run codex:diagnose
 npm run codex:configure
-npm test
-npm run verify
-npm run smoke
+npm run verify:local
 ```
 
 Set the DeepSeek Windows user environment key with `scripts/set-deepseek-api-key.ps1`; the script prompts without echoing the key. Restart Codex Desktop so the MCP process inherits the updated environment. Never place the key in repository files or command history.
@@ -362,6 +362,8 @@ In daily usage, Codex Desktop opens this repository as a trusted local project a
 npm start                     Start the local MCP stdio bridge
 npm run codex:configure       Register Hades MCP in this local Codex project
 npm run codex:check           Inspect the local Codex MCP registration
+npm run codex:diagnose        Check managed project setup without probing providers or personal state
+npm run verify:local          Run serial tests and smoke/verify with temporary synthetic config and Vault
 npm run pilot                 DeepSeek Flash synthetic pilot
 npm run pilot:flash           DeepSeek Flash synthetic pilot
 npm run pilot:edit:deepseek   Disabled until structured patch validation is implemented
@@ -535,14 +537,14 @@ Paket hades-orchestrator 2.2.0, çalışma zamanı Node.js 20.9+ ve ESM’dir; C
 
 ```powershell
 npm ci
+npm run codex:check
+npm run codex:diagnose
 npm run codex:configure
-npm test
-npm run verify
-npm run smoke
+npm run verify:local
 npm run runs:recent
 ```
 
-Günlük kullanım için depo kökünü Codex Desktop içinde ayrı ve güvenilen yerel proje olarak açın. `npm run codex:configure` Git'te takip edilen `.codex/config.toml` dosyasındaki Hades MCP kaydını bu çalışma kopyasına göre yeniler; `npm run codex:check` bu makinedeki kaydı denetler, çalışan sunucuyu yeniden başlatmaz. Sunucu kodu veya kaydı değiştiğinde Codex Desktop içindeki bu projenin Hades MCP sunucusuna Restart uygulayın; ardından canlı workspace identity ile araç/health yüzeyini doğrulayın. `AGENTS.md` proje çalışma kurallarını sağlar. Codex MCP sunucusunu depo çalışma alanında başlatır ve araçlarını orkestrasyon oturumuna açar. Sağlayıcı kimlik bilgileri repoda tutulmaz. Takip edilen yapılandırma makineye özgü executable ve çalışma alanı yolları içerir. Etkin ve emekli rotalar ile kalan kabul kapıları [Codex Desktop geçiş planında](docs/plans/CODEX_DESKTOP_UCTAN_UCA_GECIS_PLANI_2026-10-18.md) ve [uygulama raporunda](docs/reports/CODEX_DESKTOP_GECIS_UYGULAMA_DURUMU_2026-10-18.md) izlenir.
+Günlük kullanım için depo kökünü Codex Desktop içinde ayrı ve güvenilen yerel proje olarak açın. `npm run codex:check` proje MCP kaydını salt okunur denetler; `npm run codex:diagnose` yerel config/entrypoint ve PATH önkoşullarını kontrol eder, kullanıcı-genel config'i, Hades'i, sağlayıcıyı veya Vault'u okumaz. Yalnız managed kayıt güncel değilse `npm run codex:configure` çalıştırın; komut diğer TOML ayarlarını koruyarak Hades kaydını günceller. Yerel uçtan uca doğrulama için `npm run verify:local` kullanın; bu komut sentetik config/Vault ve credential taşımayan test ortamı kullanır. Sunucu kodu veya kaydı değiştiğinde Codex Desktop içinden bu projenin Hades MCP sunucusunu yeniden başlatın; ardından canlı workspace identity ve araç/resource yüzeyini operasyonel olarak kontrol edin. Bu gözlemler çalışan commit veya etkin config attestation'ı değildir. `AGENTS.md` proje çalışma kurallarını sağlar. Sağlayıcı kimlik bilgileri repoda tutulmaz. Takip edilen yapılandırma makineye özgü executable ve çalışma alanı yolları içerir. Etkin ve emekli rotalar ile kalan kabul kapıları [Codex Desktop geçiş planında](docs/plans/CODEX_DESKTOP_UCTAN_UCA_GECIS_PLANI_2026-10-18.md) ve [uygulama raporunda](docs/reports/CODEX_DESKTOP_GECIS_UYGULAMA_DURUMU_2026-10-18.md) izlenir.
 
 ## Mimari
 
@@ -790,10 +792,10 @@ Gereksinimler: Node.js 20.9+ (22/24 önerilir), resmi standalone Codex CLI ve Gi
 
 ```powershell
 npm ci
+npm run codex:check
+npm run codex:diagnose
 npm run codex:configure
-npm test
-npm run verify
-npm run smoke
+npm run verify:local
 ```
 
 DeepSeek Windows kullanıcı ortam değişkeni `scripts/set-deepseek-api-key.ps1` ile anahtar ekrana basılmadan ayarlanır. Ardından Codex Desktop yeniden başlatılmalıdır ki MCP süreci güncel ortamı alsın. Anahtarı proje dosyasına veya komut geçmişine yapıştırmayın.
@@ -808,6 +810,8 @@ Günlük kullanımda Codex Desktop depo kökünü güvenilen yerel proje olarak 
 npm start                     Local MCP stdio bridge'i başlatır
 npm run codex:configure       Bu yerel Codex projesine Hades MCP kaydını kurar
 npm run codex:check           Yerel Codex MCP kaydını denetler
+npm run codex:diagnose        Provider/Vault erişimi olmadan yerel Codex proje kaydını denetler
+npm run verify:local          Sentetik config/Vault ile seri yerel uçtan uca doğrulama
 npm run pilot                 DeepSeek Flash sentetik pilotu
 npm run pilot:flash           DeepSeek Flash sentetik pilotu
 npm run pilot:edit:deepseek   Yapılandırılmış patch doğrulaması tamamlanana dek kapalı

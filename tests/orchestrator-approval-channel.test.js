@@ -14,7 +14,7 @@ import { createSubagentMcpServer, isOrchestratorApprovalEnabled } from "../subag
 import { createProviderEnvironment } from "../subagent-bridge/src/services/execution-service.js";
 import { provisionDisposableWorkspace } from "../subagent-bridge/src/services/disposable-workspace.js";
 
-async function createStdioApprovalClient(workspace, providerCallCountPath) {
+async function createStdioApprovalClient(workspace, providerCallCountPath, readOnlyCallCountPath) {
   const adapterModule = pathToFileURL(path.resolve("subagent-bridge/src/adapters/agent-adapter-base.js")).href;
   const resultModule = pathToFileURL(path.resolve("subagent-bridge/src/schemas/core-schemas.js")).href;
   const runtimeModule = pathToFileURL(path.resolve("subagent-bridge/src/runtime/bridge-runtime.js")).href;
@@ -30,7 +30,10 @@ async function createStdioApprovalClient(workspace, providerCallCountPath) {
     codex: { timeoutMs: 30000, allowedModes: ["read_only", "edit"] },
     reliability: { maxAttempts: 1, maxSchemaRepairAttempts: 0, baseRetryDelayMs: 1, maxRetryDelayMs: 2, maxTotalDurationMs: 30000, maxRetryCostUsd: 1, maxRetryCostReserveUsd: 0.1, maxUnknownAttemptCostUsd: 0.1 },
     orchestration: {
-      taskProfiles: { create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false } },
+      taskProfiles: {
+        create_profile: { target: "codex", model: "gpt-5.6-sol", mode: "edit", priority: 1, cacheable: false },
+        inspect_profile: { target: "codex", model: "gpt-5.6-sol", mode: "read_only", priority: 1, cacheable: false }
+      },
       scheduler: { maxQueuedPerWorkspace: 10, staleLockMs: 60000, leaseHeartbeatMs: 1000 },
       readOnlyCache: { enabled: false, ttlMs: 1000, maxEntryBytes: 1024 }
     },
@@ -46,18 +49,33 @@ async function createStdioApprovalClient(workspace, providerCallCountPath) {
     `import { StdioServerTransport } from ${JSON.stringify(transportModule)};`,
     `const workspace = ${JSON.stringify(workspace)};`,
     `const providerCallCountPath = ${JSON.stringify(providerCallCountPath)};`,
+    `const readOnlyCallCountPath = ${JSON.stringify(readOnlyCallCountPath)};`,
     `const configuration = ${JSON.stringify(configuration)};`,
+    "if (['DEEPSEEK_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ORCHESTRATOR_CONFIG'].some((name) => Object.hasOwn(process.env, name))) process.exit(88);",
     "const codexAdapter = createAdapter('codex', { canRead: true, canWrite: true, supportsSandbox: true, supportsModelSelection: true });",
     "codexAdapter.execute = async (request) => { const selectedPath = /^Düzenlenebilecek dosyalar: ([^\\n]+)/mu.exec(request.prompt)?.[1]; if (!selectedPath) throw new Error('selected file missing'); fs.appendFileSync(providerCallCountPath, '1', 'utf8'); const outputPath = path.join(request.workspace, ...selectedPath.split('/')); fs.mkdirSync(path.dirname(outputPath), { recursive: true }); fs.writeFileSync(outputPath, 'created\\n', 'utf8'); return createSuccessSubagentResult('codex', request.model, { result: 'Updated selected file', durationMs: 1 }); };",
+    "const editExecute = codexAdapter.execute;",
+    "codexAdapter.execute = async (request) => { if (request.mode !== 'read_only') return editExecute(request); fs.appendFileSync(readOnlyCallCountPath, '1', 'utf8'); return createSuccessSubagentResult('codex', request.model, { result: 'Synthetic read-only result', durationMs: 1 }); };",
     "const runtime = createBridgeRuntime({ configuration, adapters: { codex: codexAdapter }, sleep: async () => {}, orchestratorApprovalEnabled: true });",
     "const server = createSubagentMcpServer({ runtime, configuration, trustedWorkspace: workspace, enableOrchestratorApproval: true });",
     "await server.connect(new StdioServerTransport());"
   ].join("\n");
+  const environment = Object.fromEntries(Object.entries({
+    PATH: process.env.Path || process.env.PATH,
+    SystemRoot: process.env.SystemRoot,
+    WINDIR: process.env.WINDIR,
+    ComSpec: process.env.ComSpec,
+    PATHEXT: process.env.PATHEXT,
+    TEMP: os.tmpdir(),
+    TMP: os.tmpdir(),
+    SUBAGENT_BRIDGE_TRUSTED_WORKSPACE: workspace,
+    SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL: "1"
+  }).filter(([, value]) => typeof value === "string"));
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["--input-type=module", "--eval", childSource],
     cwd: workspace,
-    env: { ...process.env }
+    env: environment
   });
   const client = new Client({ name: "prepared-edit-stdio-test", version: "1.0.0" });
   await client.connect(transport);
@@ -363,13 +381,15 @@ test("WP5B-CHANNEL-07: approve_prepared_edit MCP taşıması stale kaynak ve rec
 test("WP5B-CHANNEL-STDIO-01: stdio MCP onay, red, stale kaynak ve recovery kapılarını taşır", async (t) => {
   const root = fs.mkdtempSync(path.join(process.cwd(), ".tmp-mcp-stdio-prepared-edit-"));
   const providerCallCountPath = `${root}.provider-call-count`;
+  const readOnlyCallCountPath = `${root}.read-only-call-count`;
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
   t.after(() => {
     fs.rmSync(root, { recursive: true, force: true });
     fs.rmSync(providerCallCountPath, { force: true });
+    fs.rmSync(readOnlyCallCountPath, { force: true });
   });
   const approvedSourcePath = path.join(root, "src", "approved-value.txt");
-  const client = await createStdioApprovalClient(root, providerCallCountPath);
+  const client = await createStdioApprovalClient(root, providerCallCountPath, readOnlyCallCountPath);
   try {
     const { tools } = await client.listTools();
     const approvalTool = tools.find((tool) => tool.name === "approve_prepared_edit");
@@ -378,6 +398,22 @@ test("WP5B-CHANNEL-STDIO-01: stdio MCP onay, red, stale kaynak ve recovery kapı
     const emptyApproval = await client.callTool({ name: "approve_prepared_edit", arguments: {} });
     assert.equal(emptyApproval.isError, true);
     assert.equal(fs.existsSync(providerCallCountPath), false);
+    const readOnlyResult = await client.callTool({
+      name: "run_task_profile",
+      arguments: {
+        profile: "inspect_profile",
+        taskId: "stdio-read-only-e2e-test",
+        prompt: "Return the synthetic result",
+        files: [],
+        acceptanceCriteria: ["Return the synthetic result"]
+      }
+    });
+    assert.equal(readOnlyResult.isError, false);
+    assert.equal(readOnlyResult.structuredContent.exitCode, 0);
+    assert.equal(readOnlyResult.structuredContent.result, "Synthetic read-only result");
+    assert.equal(readOnlyResult.structuredContent.accessMode, "read_only");
+    assert.equal(fs.readFileSync(readOnlyCallCountPath, "utf8"), "1");
+    assert.equal(fs.existsSync(path.join(root, "src", "read-only-created.txt")), false);
     const rejectPreview = await client.callTool({
       name: "run_task_profile",
       arguments: {

@@ -12,6 +12,7 @@
     "p0:e2e": "node scripts/p0-portability-e2e.js",
     "codex:configure": "node scripts/configure-codex-project.js --write",
     "codex:check": "node scripts/configure-codex-project.js --check",
+    "codex:diagnose": "node scripts/codex-diagnostics.js",
     "canary:parallel": "node scripts/canary-parallel-routes.js",
     "canary:parallel:codex-ref": "node scripts/canary-parallel-codex-ref.js",
     "canary:parallel:codex-remote": "node scripts/canary-parallel-codex-remote-write.js",

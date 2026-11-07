@@ -713,32 +713,323 @@ function metricRecords(metricsDirectory, periodStart = 0) {
   return { records, invalidRecordCount };
 }
 
-function directEditFeedbackState(records) {
-  const editRuns = records.filter((record) => !record.recordType && record.mode === "edit" && record.outcomeStatus === "completed" && record.executionIdHash);
-  const feedbackByExecution = new Map(records
-    .filter((record) => record.recordType === "direct_edit_feedback" && record.executionIdHash)
-    .map((record) => [record.executionIdHash, record]));
-  const dispositionByExecution = new Map(records
-    .filter((record) => record.recordType === "direct_edit_disposition" && record.executionIdHash)
-    .map((record) => [record.executionIdHash, record]));
-  return { editRuns, feedbackByExecution, dispositionByExecution };
+const feedbackMetricLimits = Object.freeze({
+  files: 64,
+  bytes: 64 * 1024 * 1024,
+  records: 100000,
+  recordBytes: 256 * 1024,
+  identities: 50000,
+  chunkBytes: 16 * 1024
+});
+
+const feedbackRecordTypes = Object.freeze({
+  direct_edit_feedback: directEditFeedbackOutcomes,
+  direct_edit_disposition: directEditDispositions,
+  routing_feedback: routingFeedbackOutcomes,
+  routing_disposition: routingDispositions
+});
+
+const unrelatedFeedbackRecordTypes = new Set([
+  "live_observation",
+  "health_snapshot",
+  "model_fit_evaluation",
+  "memory_hook_feedback",
+  "memory_hook_session",
+  "memory_hook_disposition",
+  "memory_hook_attribution_conflict",
+  "memory_hook_historical_attribution",
+  "unknown_record",
+  "cost_reservation",
+  "cost_settlement",
+  "cost_reservation_expiry",
+  "parallel_batch_plan",
+  "parallel_batch_start",
+  "parallel_batch_task",
+  "parallel_batch_finish",
+  "parallel_batch_budget",
+  "parallel_batch_cancel",
+  "parallel_batch_recovery",
+  "parallel_route_canary"
+]);
+
+function feedbackSourceError() {
+  return new Error("feedback source is incomplete or unsafe");
 }
 
-function routingFeedbackState(records) {
-  const profileRuns = records.filter((record) => !record.recordType && record.profile && record.executionIdHash && record.mode === "read_only" && record.outcomeStatus === "completed");
-  const feedbackByExecution = new Map(records
-    .filter((record) => record.recordType === "routing_feedback" && record.executionIdHash)
-    .map((record) => [record.executionIdHash, record]));
-  const dispositionByExecution = new Map(records
-    .filter((record) => record.recordType === "routing_disposition" && record.executionIdHash)
-    .map((record) => [record.executionIdHash, record]));
-  return { profileRuns, feedbackByExecution, dispositionByExecution };
+function feedbackFileSnapshot(status) {
+  return [status.dev, status.ino, status.mode, status.nlink, status.size, status.mtimeNs, status.ctimeNs].map(String).join(":");
+}
+
+function canonicalMetricValue(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalMetricValue).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalMetricValue(value[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function validFeedbackExecutionRecord(record) {
+  const validBackend = typeof record.backend === "string" && tokenPattern.test(record.backend);
+  const validMode = ["read_only", "edit", "not_applicable"].includes(record.mode);
+  const validOutcome = ["completed", "failed"].includes(record.outcomeStatus);
+  const validRecordedAt = typeof record.recordedAt === "string" && isoPattern.test(record.recordedAt) && Number.isFinite(Date.parse(record.recordedAt));
+  const validProfile = record.profile === undefined || record.profile === null || (typeof record.profile === "string" && tokenPattern.test(record.profile));
+  return validBackend && validMode && validOutcome && validRecordedAt && validProfile;
+}
+
+function validateFeedbackSourceRecord(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record)) throw feedbackSourceError();
+  if (typeof record.recordType === "string") {
+    const allowedValues = feedbackRecordTypes[record.recordType];
+    if (!allowedValues) {
+      if (unrelatedFeedbackRecordTypes.has(record.recordType)) return null;
+      throw feedbackSourceError();
+    }
+    const isDisposition = record.recordType.endsWith("disposition");
+    const expectedKeys = isDisposition
+      ? ["recordType", "recordedAt", "backend", "executionIdHash", "disposition", "reason"]
+      : ["recordType", "recordedAt", "backend", "executionIdHash", "outcome"];
+    const actualKeys = Object.keys(record).sort();
+    expectedKeys.sort();
+    if (actualKeys.length !== expectedKeys.length || !actualKeys.every((key, index) => key === expectedKeys[index])
+      || typeof record.executionIdHash !== "string" || !hashPattern.test(record.executionIdHash)
+      || typeof record.recordedAt !== "string" || !isoPattern.test(record.recordedAt) || !Number.isFinite(Date.parse(record.recordedAt))
+      || record.backend !== (record.recordType.startsWith("routing_") ? "routing-evaluation" : "direct-edit-baseline")) {
+      throw feedbackSourceError();
+    }
+    if (isDisposition) {
+      if (!allowedValues.includes(record.disposition) || typeof record.reason !== "string" || !tokenPattern.test(record.reason)) throw feedbackSourceError();
+    } else if (!allowedValues.includes(record.outcome)) {
+      throw feedbackSourceError();
+    }
+    return { kind: record.recordType, identity: record.executionIdHash, record };
+  }
+  if (Object.hasOwn(record, "executionIdHash")) {
+    if (typeof record.executionIdHash !== "string" || !hashPattern.test(record.executionIdHash)) throw feedbackSourceError();
+    if (Object.hasOwn(record, "schemaVersion")) {
+      if (record.schemaVersion !== 2 || !validFeedbackExecutionRecord(record)) throw feedbackSourceError();
+    } else if (!validFeedbackExecutionRecord(record)) {
+      throw feedbackSourceError();
+    }
+    return { kind: "execution", identity: record.executionIdHash, record };
+  }
+  if (record.runIdHash && record.taskIdHash && record.agent === "deepseek"
+    && typeof record.runIdHash === "string" && hashPattern.test(record.runIdHash)
+    && typeof record.taskIdHash === "string" && hashPattern.test(record.taskIdHash)) return null;
+  throw feedbackSourceError();
+}
+
+function readFeedbackMetricFile(filePath, expectedSnapshot) {
+  let descriptor;
+  try {
+    const noFollow = fs.constants.O_NOFOLLOW || 0;
+    descriptor = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+    const openedSnapshot = fs.fstatSync(descriptor, { bigint: true });
+    if (!openedSnapshot.isFile() || openedSnapshot.nlink !== 1n || feedbackFileSnapshot(openedSnapshot) !== feedbackFileSnapshot(expectedSnapshot)) {
+      throw feedbackSourceError();
+    }
+    const size = Number(expectedSnapshot.size);
+    if (!Number.isSafeInteger(size) || size < 0) throw feedbackSourceError();
+    const buffer = Buffer.alloc(size);
+    let offset = 0;
+    while (offset < size) {
+      const bytesRead = fs.readSync(descriptor, buffer, offset, Math.min(feedbackMetricLimits.chunkBytes, size - offset), offset);
+      if (bytesRead <= 0) throw feedbackSourceError();
+      offset += bytesRead;
+    }
+    const afterRead = fs.fstatSync(descriptor, { bigint: true });
+    const currentPath = fs.lstatSync(filePath, { bigint: true });
+    if (feedbackFileSnapshot(afterRead) !== feedbackFileSnapshot(openedSnapshot)
+      || feedbackFileSnapshot(currentPath) !== feedbackFileSnapshot(openedSnapshot)
+      || currentPath.isSymbolicLink() || currentPath.nlink !== 1n) throw feedbackSourceError();
+    return buffer;
+  } catch {
+    throw feedbackSourceError();
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        throw feedbackSourceError();
+      }
+    }
+  }
+}
+
+function readFeedbackMetricIndex(metricsDirectory) {
+  let directorySnapshot;
+  let canonicalRoot;
+  try {
+    directorySnapshot = fs.lstatSync(metricsDirectory, { bigint: true });
+    if (!directorySnapshot.isDirectory() || directorySnapshot.isSymbolicLink()) throw feedbackSourceError();
+    canonicalRoot = fs.realpathSync(metricsDirectory);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { runs: new Map(), runConflicts: new Set(), records: new Map(), conflicts: new Set() };
+    }
+    throw feedbackSourceError();
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(metricsDirectory, { withFileTypes: true });
+  } catch {
+    throw feedbackSourceError();
+  }
+  const candidates = entries.filter((entry) => entry.name.endsWith(".jsonl")).sort((left, right) => left.name.localeCompare(right.name));
+  if (candidates.length > feedbackMetricLimits.files) throw feedbackSourceError();
+  let totalBytes = 0;
+  const files = candidates.map((entry) => {
+    const filePath = path.join(metricsDirectory, entry.name);
+    try {
+      const snapshot = fs.lstatSync(filePath, { bigint: true });
+      const canonicalPath = fs.realpathSync(filePath);
+      if (!entry.isFile() || !snapshot.isFile() || snapshot.isSymbolicLink() || snapshot.nlink !== 1n
+        || path.dirname(canonicalPath) !== canonicalRoot) throw feedbackSourceError();
+      const size = Number(snapshot.size);
+      if (!Number.isSafeInteger(size) || size < 0) throw feedbackSourceError();
+      totalBytes += size;
+      if (totalBytes > feedbackMetricLimits.bytes) throw feedbackSourceError();
+      return { name: entry.name, filePath, snapshot, snapshotKey: feedbackFileSnapshot(snapshot), size };
+    } catch {
+      throw feedbackSourceError();
+    }
+  });
+  const runs = new Map();
+  const runConflicts = new Set();
+  const records = new Map();
+  const conflicts = new Set();
+  let recordCount = 0;
+  const retainedIdentities = new Set();
+  const retainIdentity = (identity) => {
+    retainedIdentities.add(identity);
+    if (retainedIdentities.size > feedbackMetricLimits.identities) throw feedbackSourceError();
+  };
+  for (const file of files) {
+    const buffer = readFeedbackMetricFile(file.filePath, file.snapshot);
+    if (buffer.length !== file.size || (buffer.length > 0 && buffer[buffer.length - 1] !== 10)) throw feedbackSourceError();
+    let start = 0;
+    while (start < buffer.length) {
+      const newline = buffer.indexOf(10, start);
+      if (newline < 0) throw feedbackSourceError();
+      let end = newline;
+      if (end > start && buffer[end - 1] === 13) end -= 1;
+      const lineBytes = end - start;
+      if (lineBytes <= 0 || lineBytes > feedbackMetricLimits.recordBytes) throw feedbackSourceError();
+      recordCount += 1;
+      if (recordCount > feedbackMetricLimits.records) throw feedbackSourceError();
+      let parsed;
+      try {
+        parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(start, end)));
+      } catch {
+        throw feedbackSourceError();
+      }
+      const entry = validateFeedbackSourceRecord(parsed);
+      if (entry) {
+        if (entry.kind === "execution") {
+          const previous = runs.get(entry.identity);
+          const canonical = canonicalMetricValue(entry.record);
+          if (!previous) {
+            retainIdentity(entry.identity);
+            runs.set(entry.identity, { record: entry.record, canonical });
+          } else if (previous.canonical !== canonical) {
+            runConflicts.add(entry.identity);
+          }
+        } else {
+          const identityKey = `${entry.kind}:${entry.identity}`;
+          const previous = records.get(identityKey);
+          const canonical = canonicalMetricValue(entry.record);
+          if (!previous) {
+            retainIdentity(entry.identity);
+            records.set(identityKey, { record: entry.record, canonical });
+          } else if (previous.canonical !== canonical) {
+            conflicts.add(identityKey);
+          }
+        }
+      }
+      start = newline + 1;
+    }
+  }
+  let afterEntries;
+  try {
+    afterEntries = fs.readdirSync(metricsDirectory, { withFileTypes: true })
+      .filter((entry) => entry.name.endsWith(".jsonl"))
+      .map((entry) => entry.name)
+      .sort();
+    const beforeNames = files.map((file) => file.name).sort();
+    const afterDirectorySnapshot = fs.lstatSync(metricsDirectory, { bigint: true });
+    if (JSON.stringify(afterEntries) !== JSON.stringify(beforeNames)
+      || feedbackFileSnapshot(afterDirectorySnapshot) !== feedbackFileSnapshot(directorySnapshot)) throw feedbackSourceError();
+    for (const file of files) {
+      const after = fs.lstatSync(file.filePath, { bigint: true });
+      if (feedbackFileSnapshot(after) !== file.snapshotKey) throw feedbackSourceError();
+    }
+  } catch {
+    throw feedbackSourceError();
+  }
+  return { runs, runConflicts, records, conflicts };
+}
+
+function recordsOfType(index, recordType) {
+  const prefix = `${recordType}:`;
+  return new Map([...index.records].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key.slice(prefix.length), value.record]));
+}
+
+function assertNoFeedbackConflicts(index, recordTypes) {
+  if (index.runConflicts.size > 0 || [...index.conflicts].some((key) => recordTypes.some((recordType) => key.startsWith(`${recordType}:`)))) {
+    throw new Error("feedback source contains conflicting identities");
+  }
+}
+
+function feedbackIdsFor(executionHashes) {
+  const sortedHashes = [...executionHashes].sort();
+  const feedbackIds = new Map();
+  for (let index = 0; index < sortedHashes.length; index += 1) {
+    const executionIdHash = sortedHashes[index];
+    const previous = sortedHashes[index - 1] || "";
+    const next = sortedHashes[index + 1] || "";
+    const commonPrefixLength = (left, right) => {
+      let length = 0;
+      while (length < left.length && left[length] === right[length]) length += 1;
+      return length;
+    };
+    const sharedPrefixLength = Math.max(commonPrefixLength(executionIdHash, previous), commonPrefixLength(executionIdHash, next));
+    feedbackIds.set(executionIdHash, executionIdHash.slice(0, Math.max(12, sharedPrefixLength + 1)));
+  }
+  return feedbackIds;
+}
+
+function resolveFeedbackExecution(index, feedbackId, missingMessage, ambiguousMessage) {
+  const normalizedId = feedbackId.toLowerCase();
+  const matchingHashes = [...index.runs.keys()].filter((executionIdHash) => executionIdHash.startsWith(normalizedId));
+  if (matchingHashes.length === 0) throw new Error(missingMessage);
+  if (matchingHashes.length > 1) throw new Error(ambiguousMessage);
+  const executionIdHash = matchingHashes[0];
+  if (index.runConflicts.has(executionIdHash)) throw new Error("feedback execution identity is conflicting");
+  return { executionIdHash, record: index.runs.get(executionIdHash).record };
+}
+
+function directEditFeedbackState(index) {
+  assertNoFeedbackConflicts(index, ["direct_edit_feedback", "direct_edit_disposition"]);
+  const feedbackByExecution = recordsOfType(index, "direct_edit_feedback");
+  const dispositionByExecution = recordsOfType(index, "direct_edit_disposition");
+  const editRuns = [...index.runs.values()].map((entry) => entry.record)
+    .filter((record) => record.mode === "edit" && record.outcomeStatus === "completed" && !index.runConflicts.has(record.executionIdHash));
+  return { editRuns, feedbackByExecution, dispositionByExecution, feedbackIds: feedbackIdsFor(index.runs.keys()) };
+}
+
+function routingFeedbackState(index) {
+  assertNoFeedbackConflicts(index, ["routing_feedback", "routing_disposition"]);
+  const feedbackByExecution = recordsOfType(index, "routing_feedback");
+  const dispositionByExecution = recordsOfType(index, "routing_disposition");
+  const profileRuns = [...index.runs.values()].map((entry) => entry.record)
+    .filter((record) => record.profile && record.mode === "read_only" && record.outcomeStatus === "completed" && !index.runConflicts.has(record.executionIdHash));
+  return { profileRuns, feedbackByExecution, dispositionByExecution, feedbackIds: feedbackIdsFor(index.runs.keys()) };
 }
 
 export function listPendingDirectEditFeedback(configuration) {
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
-  const { records } = metricRecords(metricsDirectory);
-  const { editRuns, feedbackByExecution, dispositionByExecution } = directEditFeedbackState(records);
+  const index = readFeedbackMetricIndex(metricsDirectory);
+  const { editRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = directEditFeedbackState(index);
   const retentionDays = configuration.observability?.maxMetricRetentionDays;
   const cutoff = Number.isInteger(retentionDays) && retentionDays > 0 ? Date.now() - retentionDays * 86400000 : null;
   return editRuns
@@ -750,7 +1041,7 @@ export function listPendingDirectEditFeedback(configuration) {
     })
     .sort((left, right) => Date.parse(right.recordedAt) - Date.parse(left.recordedAt))
     .map((record) => ({
-      feedbackId: record.executionIdHash.slice(0, 12),
+      feedbackId: feedbackIds.get(record.executionIdHash),
       backend: record.backend || "unknown",
       recordedAt: record.recordedAt,
       outcomeStatus: record.outcomeStatus,
@@ -761,13 +1052,13 @@ export function listPendingDirectEditFeedback(configuration) {
 
 export function listDirectEditDispositions(configuration) {
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
-  const { records } = metricRecords(metricsDirectory);
-  const { dispositionByExecution } = directEditFeedbackState(records);
+  const index = readFeedbackMetricIndex(metricsDirectory);
+  const { dispositionByExecution, feedbackIds } = directEditFeedbackState(index);
   const counts = Object.fromEntries(directEditDispositions.map((disposition) => [disposition, 0]));
   const entries = [...dispositionByExecution.values()].map((record) => {
     if (record.disposition in counts) counts[record.disposition] += 1;
     return {
-      feedbackId: record.executionIdHash.slice(0, 12),
+      feedbackId: feedbackIds.get(record.executionIdHash),
       disposition: record.disposition,
       reason: record.reason,
       recordedAt: record.recordedAt
@@ -783,12 +1074,11 @@ export async function recordDirectEditDisposition(configuration, feedbackId, dis
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
   fs.mkdirSync(metricsDirectory, { recursive: true });
   return withMetricLock(path.join(metricsDirectory, "direct-edit-feedback.lock"), async () => {
-    const { records } = metricRecords(metricsDirectory);
-    const { editRuns, feedbackByExecution, dispositionByExecution } = directEditFeedbackState(records);
-    const matches = editRuns.filter((record) => record.executionIdHash.startsWith(feedbackId.toLowerCase()));
-    if (matches.length === 0) throw new Error("direct edit feedback ID not found");
-    if (matches.length > 1) throw new Error("direct edit feedback ID is ambiguous");
-    const executionIdHash = matches[0].executionIdHash;
+    const index = readFeedbackMetricIndex(metricsDirectory);
+    const { editRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = directEditFeedbackState(index);
+    const resolved = resolveFeedbackExecution(index, feedbackId, "direct edit feedback ID not found", "direct edit feedback ID is ambiguous");
+    const executionIdHash = resolved.executionIdHash;
+    if (!editRuns.some((record) => record.executionIdHash === executionIdHash)) throw new Error("direct edit feedback ID not found");
     if (feedbackByExecution.has(executionIdHash)) throw new Error("direct edit feedback already labeled");
     if (dispositionByExecution.has(executionIdHash)) throw new Error("direct edit disposition already recorded");
     await appendRedactedRunMetric(configuration, {
@@ -799,7 +1089,7 @@ export async function recordDirectEditDisposition(configuration, feedbackId, dis
       disposition,
       reason
     });
-    return { recorded: true, feedbackId: executionIdHash.slice(0, 12), disposition, reason };
+    return { recorded: true, feedbackId: feedbackIds.get(executionIdHash), disposition, reason };
   });
 }
 
@@ -812,8 +1102,8 @@ export async function classifyLegacyDirectEditFeedback(configuration, { before, 
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
   fs.mkdirSync(metricsDirectory, { recursive: true });
   return withMetricLock(path.join(metricsDirectory, "direct-edit-feedback.lock"), async () => {
-    const { records } = metricRecords(metricsDirectory);
-    const { editRuns, feedbackByExecution, dispositionByExecution } = directEditFeedbackState(records);
+    const index = readFeedbackMetricIndex(metricsDirectory);
+    const { editRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = directEditFeedbackState(index);
     const eligible = editRuns
       .filter((record) => !feedbackByExecution.has(record.executionIdHash) && !dispositionByExecution.has(record.executionIdHash))
       .filter((record) => Number.isFinite(Date.parse(record.recordedAt)) && Date.parse(record.recordedAt) < cutoff)
@@ -828,7 +1118,7 @@ export async function classifyLegacyDirectEditFeedback(configuration, { before, 
         disposition,
         reason
       });
-      classifiedFeedbackIds.push(record.executionIdHash.slice(0, 12));
+      classifiedFeedbackIds.push(feedbackIds.get(record.executionIdHash));
     }
     return { classified: classifiedFeedbackIds.length, disposition, reason, cutoff: new Date(cutoff).toISOString(), classifiedFeedbackIds };
   });
@@ -840,12 +1130,11 @@ export async function recordDirectEditFeedback(configuration, feedbackId, outcom
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
   fs.mkdirSync(metricsDirectory, { recursive: true });
   return withMetricLock(path.join(metricsDirectory, "direct-edit-feedback.lock"), async () => {
-    const { records } = metricRecords(metricsDirectory);
-    const { editRuns, feedbackByExecution, dispositionByExecution } = directEditFeedbackState(records);
-    const matches = editRuns.filter((record) => record.executionIdHash.startsWith(feedbackId.toLowerCase()));
-    if (matches.length === 0) throw new Error("direct edit feedback ID not found");
-    if (matches.length > 1) throw new Error("direct edit feedback ID is ambiguous");
-    const executionIdHash = matches[0].executionIdHash;
+    const index = readFeedbackMetricIndex(metricsDirectory);
+    const { editRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = directEditFeedbackState(index);
+    const resolved = resolveFeedbackExecution(index, feedbackId, "direct edit feedback ID not found", "direct edit feedback ID is ambiguous");
+    const executionIdHash = resolved.executionIdHash;
+    if (!editRuns.some((record) => record.executionIdHash === executionIdHash)) throw new Error("direct edit feedback ID not found");
     if (feedbackByExecution.has(executionIdHash)) throw new Error("direct edit feedback already recorded");
     const disposition = dispositionByExecution.get(executionIdHash);
     if (disposition && disposition.disposition !== "eligible_real_user") {
@@ -859,20 +1148,20 @@ export async function recordDirectEditFeedback(configuration, feedbackId, outcom
       outcome
     };
     await appendRedactedRunMetric(configuration, metric);
-    return { recorded: true, feedbackId: executionIdHash.slice(0, 12), outcome };
+    return { recorded: true, feedbackId: feedbackIds.get(executionIdHash), outcome };
   });
 }
 
 export function listPendingRoutingFeedback(configuration) {
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
-  const { records } = metricRecords(metricsDirectory);
-  const { profileRuns, feedbackByExecution, dispositionByExecution } = routingFeedbackState(records);
+  const index = readFeedbackMetricIndex(metricsDirectory);
+  const { profileRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = routingFeedbackState(index);
   return profileRuns
     .filter((record) => dispositionByExecution.get(record.executionIdHash)?.disposition === "eligible_real_user")
     .filter((record) => !feedbackByExecution.has(record.executionIdHash))
     .sort((left, right) => Date.parse(right.recordedAt) - Date.parse(left.recordedAt))
     .map((record) => ({
-      feedbackId: record.executionIdHash.slice(0, 12),
+      feedbackId: feedbackIds.get(record.executionIdHash),
       profile: record.profile,
       backend: record.backend || "unknown",
       modelHash: record.modelHash,
@@ -885,14 +1174,14 @@ export function listPendingRoutingFeedback(configuration) {
 
 export function listRoutingCandidates(configuration) {
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
-  const { records } = metricRecords(metricsDirectory);
-  const { profileRuns, feedbackByExecution, dispositionByExecution } = routingFeedbackState(records);
+  const index = readFeedbackMetricIndex(metricsDirectory);
+  const { profileRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = routingFeedbackState(index);
   return profileRuns
     .filter((record) => !dispositionByExecution.has(record.executionIdHash))
     .filter((record) => !feedbackByExecution.has(record.executionIdHash))
     .sort((left, right) => Date.parse(right.recordedAt) - Date.parse(left.recordedAt))
     .map((record) => ({
-      feedbackId: record.executionIdHash.slice(0, 12),
+      feedbackId: feedbackIds.get(record.executionIdHash),
       profile: record.profile,
       backend: record.backend || "unknown",
       modelHash: record.modelHash,
@@ -910,12 +1199,11 @@ export async function recordRoutingDisposition(configuration, feedbackId, dispos
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
   fs.mkdirSync(metricsDirectory, { recursive: true });
   return withMetricLock(path.join(metricsDirectory, "routing-feedback.lock"), async () => {
-    const { records } = metricRecords(metricsDirectory);
-    const { profileRuns, feedbackByExecution, dispositionByExecution } = routingFeedbackState(records);
-    const matches = profileRuns.filter((record) => record.executionIdHash.startsWith(feedbackId.toLowerCase()));
-    if (matches.length === 0) throw new Error("routing feedback ID not found");
-    if (matches.length > 1) throw new Error("routing feedback ID is ambiguous");
-    const executionIdHash = matches[0].executionIdHash;
+    const index = readFeedbackMetricIndex(metricsDirectory);
+    const { profileRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = routingFeedbackState(index);
+    const resolved = resolveFeedbackExecution(index, feedbackId, "routing feedback ID not found", "routing feedback ID is ambiguous");
+    const executionIdHash = resolved.executionIdHash;
+    if (!profileRuns.some((record) => record.executionIdHash === executionIdHash)) throw new Error("routing feedback ID not found");
     if (feedbackByExecution.has(executionIdHash)) throw new Error("routing feedback already recorded");
     if (dispositionByExecution.has(executionIdHash)) throw new Error("routing disposition already recorded");
     await appendRedactedRunMetric(configuration, {
@@ -926,7 +1214,7 @@ export async function recordRoutingDisposition(configuration, feedbackId, dispos
       disposition,
       reason
     });
-    return { recorded: true, feedbackId: executionIdHash.slice(0, 12), disposition, reason };
+    return { recorded: true, feedbackId: feedbackIds.get(executionIdHash), disposition, reason };
   });
 }
 
@@ -936,12 +1224,11 @@ export async function recordRoutingFeedback(configuration, feedbackId, outcome) 
   const metricsDirectory = path.join(configuration.statePaths.logs, "metrics");
   fs.mkdirSync(metricsDirectory, { recursive: true });
   return withMetricLock(path.join(metricsDirectory, "routing-feedback.lock"), async () => {
-    const { records } = metricRecords(metricsDirectory);
-    const { profileRuns, feedbackByExecution, dispositionByExecution } = routingFeedbackState(records);
-    const matches = profileRuns.filter((record) => record.executionIdHash.startsWith(feedbackId.toLowerCase()));
-    if (matches.length === 0) throw new Error("routing feedback ID not found");
-    if (matches.length > 1) throw new Error("routing feedback ID is ambiguous");
-    const executionIdHash = matches[0].executionIdHash;
+    const index = readFeedbackMetricIndex(metricsDirectory);
+    const { profileRuns, feedbackByExecution, dispositionByExecution, feedbackIds } = routingFeedbackState(index);
+    const resolved = resolveFeedbackExecution(index, feedbackId, "routing feedback ID not found", "routing feedback ID is ambiguous");
+    const executionIdHash = resolved.executionIdHash;
+    if (!profileRuns.some((record) => record.executionIdHash === executionIdHash)) throw new Error("routing feedback ID not found");
     if (feedbackByExecution.has(executionIdHash)) throw new Error("routing feedback already recorded");
     if (dispositionByExecution.get(executionIdHash)?.disposition !== "eligible_real_user") throw new Error("routing record is not eligible for outcome labeling");
     const metric = {
@@ -952,7 +1239,7 @@ export async function recordRoutingFeedback(configuration, feedbackId, outcome) 
       outcome
     };
     await appendRedactedRunMetric(configuration, metric);
-    return { recorded: true, feedbackId: executionIdHash.slice(0, 12), outcome };
+    return { recorded: true, feedbackId: feedbackIds.get(executionIdHash), outcome };
   });
 }
 

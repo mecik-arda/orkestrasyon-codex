@@ -432,6 +432,8 @@ Legacy outcome labels remain `legacy_unattributed` in the canonical M2 view. The
 
 ## Reliability and metrics
 
+Routing and direct-edit feedback operations use a separate bounded JSONL snapshot. Duplicate execution rows with identical canonical content count once; conflicting rows or feedback records for the same identity fail closed. Prefix IDs are extended when needed to remain unique, and writes resolve the supplied ID against the current full identity set while holding the feedback lock. The reader rejects incomplete, malformed, unsupported, linked, oversized, or concurrently changed sources without exposing their paths or contents. This feedback snapshot detects cooperative source changes during its scan; it does not guarantee atomicity against writers that ignore the feedback lock or mutate the files after the scan.
+
 DeepSeek results are validated with Zod; transient read-only failures use bounded retry, circuit breaker and a separate atomic pilot budget capped at 1 USD. The local 2026-10-19 stdio read-only pilot passed strict result validation. The separate 2026-11-03 P4 live Hades read-only and disposable-edit acceptances passed only their bounded tasks; the edit did not change the source workspace. Usage-based estimates are not provider invoices, and these acceptances do not attest the current Desktop Hades source revision.
 
 ```text
@@ -889,6 +891,8 @@ Proje kapsamlı üretilen Codex hook'ları mutlak interpreter ve orchestrator ku
 `npm run video:collect -- --url=<watch-adresi> [--out=<dosya>]` herkese açık bir YouTube videosu için yalnız altyazı ve oEmbed künyesini yerel `yt-dlp` ile indirir, video kimliğini doğrular, 2 MB altyazı ve 400 bin karakter transcript sınırlarını uygular ve hashlı `untrusted_video_transcript` zarfını yazdırır. Antigravity salt-okunur çağrıları ayrıca JSON carrier'ı `--json-schema` ile zorlar ve doğrulama düştüğünde tek denemelik sınırlı carrier onarımına izin verir. İç içe JSON carrier zarfları en fazla iki derinlikte çözülür; dış katman boşken iç `webEvidence` korunur ve geçersiz kanıt strict şemada reddedilir.
 
 ## Güvenilirlik ve metrikler
+
+Routing ve direct-edit geri bildirim işlemleri ayrı, sınırlı bir JSONL snapshot kullanır. Kanonik içeriği aynı yinelenen execution satırları tek kayıt sayılır; aynı kimlikte çelişen run veya feedback kayıtları fail-closed reddedilir. Prefix kimlikleri gerektiğinde benzersiz kalacak kadar uzatılır; yazım mevcut tam kimlik kümesine karşı feedback kilidi altında çözülür. Eksik, bozuk, desteklenmeyen, linkli, sınır aşan veya tarama sırasında değişen kaynaklar yol ve içerik göstermeden reddedilir. Bu geri bildirim snapshot’ı tarama sırasındaki kaynak değişikliklerini saptar; feedback kilidini yok sayan yazarlara veya tarama sonrası değişikliklere karşı atomik bütünlük garantisi vermez.
 
 DeepSeek sonucu Zod ile doğrulanır; geçici hatalarda retry, circuit breaker ve atomik maliyet rezervasyonu uygulanır.
 

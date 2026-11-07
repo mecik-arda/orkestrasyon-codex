@@ -20,6 +20,7 @@
     "smoke": "node scripts/smoke-mcp.js",
     "smoke:vault": "node scripts/smoke-mcp.js --real-vault --confirm-real-vault-read",
     "review:diagnose": "node scripts/diagnose-review-source.js",
+    "secret-preflight:evaluate": "node scripts/evaluate-secret-preflight.js",
     "metrics": "node scripts/report-metrics.js",
     "budget": "node scripts/report-metrics.js --budget-only",
     "replay": "node scripts/replay-run.js",

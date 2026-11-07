@@ -142,6 +142,27 @@ test("RMT-07: repeat groups contain only exact repeated matched spans", (t) => {
   assert.equal(uniqueMatch.repeatGroupId, undefined);
 });
 
+test("RMT-08: a leading BOM preserves character and byte offsets", (t) => {
+  const candidate = "A9mX2qT7vB4nC8sD1eF5hJ0kL3pR6wY9zQ2cN7mK";
+  const prefix = "\uFEFFconst ";
+  const { file } = traceWorkspaceFile(t, "bom.js", `${prefix}${candidate} = 1;`);
+  const occurrence = file.matchTrace.occurrences.find((item) => item.signal === "high_entropy");
+  const serializedTrace = JSON.stringify(file.matchTrace);
+
+  assert.equal(file.matchTrace.complete, true);
+  assert.equal(file.matchTrace.aggregateEquivalent, true);
+  assert.equal(file.matchTrace.productionAggregateEquivalent, true);
+  assert.equal(file.matchTrace.productionDecision, "blocked");
+  assert.equal(occurrence.line, 1);
+  assert.equal(occurrence.column, prefix.length + 1);
+  assert.equal(occurrence.charStart, prefix.length);
+  assert.equal(occurrence.charEnd, prefix.length + candidate.length);
+  assert.equal(occurrence.byteStart, Buffer.byteLength(prefix, "utf8"));
+  assert.equal(occurrence.byteEnd - occurrence.byteStart, Buffer.byteLength(candidate, "utf8"));
+  assert.equal(occurrence.contextClass, "identifier");
+  assert.equal(serializedTrace.includes(candidate), false);
+});
+
 test("RMT-03: private identifiers, syntax failures, unsupported sources, limits, and path safety remain fail-closed", (t) => {
   const identifier = "A9mX2qT7vB4nC8sD1eF5hJ0kL3pR6wY9zQ2cN7mK";
   const privateResult = traceWorkspaceFile(t, "private.js", `class Sample { #${identifier} = 1; }`);

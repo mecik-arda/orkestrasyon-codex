@@ -1,7 +1,7 @@
 {
   "taskId": "task-YYYY-NNNN",
   "objective": "Görevin açık ve ölçülebilir amacı",
-  "workspace": "C:\\Users\\user\\Desktop\\Yazılım_Siber\\proje",
+  "workspace": "/path/to/workspace",
   "files": [],
   "contextFiles": [],
   "acceptanceCriteria": [

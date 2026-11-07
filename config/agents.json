@@ -12,7 +12,7 @@
     },
     "codex": {
       "enabled": true,
-      "executable": "C:\\Users\\user\\AppData\\Local\\Programs\\OpenAI\\Codex\\bin\\codex.exe",
+      "executable": "codex",
       "timeoutMs": 900000,
       "maxRetries": 1,
       "defaultMode": "read_only",
@@ -23,7 +23,7 @@
     },
     "antigravity": {
       "enabled": true,
-      "executable": "C:\\Users\\user\\AppData\\Local\\agy\\bin\\agy.exe",
+      "executable": "agy",
       "timeoutMs": 900000,
       "maxRetries": 1,
       "maxOutputBytes": 8388608,

@@ -1,7 +1,7 @@
 {
   "configVersion": 3,
   "allowedRoots": [
-    "C:\\Users\\user\\Desktop\\Yazılım_Siber"
+    "."
   ],
   "agentRules": "config/agent-rules.md",
   "skills": {

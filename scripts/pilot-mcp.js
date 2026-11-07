@@ -2,7 +2,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const projectRoot = "C:\\Users\\user\\Desktop\\Yazılım_Siber\\orkestrasyon";
+const projectRoot = process.env.ORCHESTRATOR_PROJECT_ROOT || process.cwd();
 const workspace = path.join(projectRoot, "pilot-workspace");
 const modelIndex = process.argv.indexOf("--model");
 const model = modelIndex >= 0 ? process.argv[modelIndex + 1] : "deepseek_flash";

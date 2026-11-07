@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { classifySecretLikeContent } from "../memory.js";
 import { classifyJavaScriptOrTypeScriptSource } from "./review-source-syntax-classifier.js";
+import { createRedactedReviewSourceMatchTrace } from "./review-source-match-trace.js";
 
 export const REVIEW_SOURCE_MANIFEST_VERSION = 1;
 export const REVIEW_SOURCE_MAX_FILES = 50;
@@ -126,7 +127,7 @@ function assertSafeComponents(rootPath, filePath) {
   }
 }
 
-function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex, syntaxAwareJavaScriptEnabled, trace = null) {
+function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex, syntaxAwareJavaScriptEnabled, trace = null, includeMatchTrace = false) {
   let descriptor;
   try {
     if (trace) trace.currentStage = "path_and_workspace_safety";
@@ -182,9 +183,36 @@ function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex, sy
       throw new ReviewSourceManifestError("review_scope_invalid_encoding");
     }
     markCompletedDiagnosticStage(trace, "utf8_and_nul_validation");
+    let legacyClassification = null;
+    let syntaxClassification = null;
+    if (!syntaxAwareJavaScriptEnabled || includeMatchTrace) legacyClassification = classifySecretLikeContent(text);
+    if (includeMatchTrace && trace) {
+      syntaxClassification = classifyJavaScriptOrTypeScriptSource({ fileName: relativePath, source: text });
+      trace.matchTrace = createRedactedReviewSourceMatchTrace({
+        relativePath,
+        source: text,
+        sourceSha256: sourceMetadata.sha256,
+        legacyClassification,
+        syntaxClassification
+      });
+      trace.matchTrace.productionClassifier = syntaxAwareJavaScriptEnabled ? "syntax_aware_classifier" : "legacy_secret_classifier";
+      trace.matchTrace.productionDecision = syntaxAwareJavaScriptEnabled
+        ? syntaxClassification.status === "complete" && syntaxClassification.findings.length === 0 ? "clean" : "blocked"
+        : legacyClassification.matches ? "blocked" : "clean";
+      trace.matchTrace.productionAggregateEquivalent = !syntaxAwareJavaScriptEnabled
+        && trace.matchTrace.aggregateEquivalent
+        && trace.matchTrace.traceAggregate.signal === legacyClassification.signal
+        && trace.matchTrace.traceAggregate.highEntropyCandidateCount === legacyClassification.highEntropyCandidateCount;
+      trace.matchTrace.syntaxClassification = {
+        status: syntaxClassification.status,
+        decision: syntaxClassification.decision,
+        reason: syntaxClassification.reason,
+        findingCount: syntaxClassification.findings.length
+      };
+    }
     if (trace) trace.currentStage = syntaxAwareJavaScriptEnabled ? "syntax_aware_classifier" : "legacy_secret_classifier";
     if (syntaxAwareJavaScriptEnabled) {
-      const syntaxClassification = classifyJavaScriptOrTypeScriptSource({ fileName: relativePath, source: text });
+      syntaxClassification ??= classifyJavaScriptOrTypeScriptSource({ fileName: relativePath, source: text });
       if (syntaxClassification.status !== "complete") {
         throw new ReviewSourceManifestError("review_scope_syntax_analysis_blocked");
       }
@@ -195,12 +223,11 @@ function readSourceFile(rootPath, rootStatus, relativePath, sortedScopeIndex, sy
         });
       }
     } else {
-      const secretClassification = classifySecretLikeContent(text);
-      if (secretClassification.matches) {
+      if (legacyClassification.matches) {
         throw new ReviewSourceManifestError("review_scope_secret_detected", {
           sortedScopeIndex,
-          signal: secretClassification.signal,
-          highEntropyCandidateCount: secretClassification.highEntropyCandidateCount
+          signal: legacyClassification.signal,
+          highEntropyCandidateCount: legacyClassification.highEntropyCandidateCount
         });
       }
     }
@@ -253,7 +280,8 @@ function createDiagnosticFile(inputIndex, relativePath) {
     failureClass: null,
     failedCheck: null,
     signal: null,
-    highEntropyCandidateCount: null
+    highEntropyCandidateCount: null,
+    matchTrace: null
   };
 }
 
@@ -437,12 +465,13 @@ export function diagnoseReviewSourceScope(trustedWorkspace, requestedPaths, opti
     entry.file.diagnosticAttempted = true;
     let sourceEntry = null;
     try {
-      sourceEntry = readSourceFile(rootPath, rootStatus, entry.path, sortedIndex + 1, syntaxAwareJavaScriptEnabled, trace);
+      sourceEntry = readSourceFile(rootPath, rootStatus, entry.path, sortedIndex + 1, syntaxAwareJavaScriptEnabled, trace, options?.includeMatchTrace === true);
       entry.file.status = "clean";
       entry.file.completedChecks = [...trace.completedStages];
       entry.file.unrunChecks = [];
       entry.file.sizeBytes = sourceEntry.sizeBytes;
       entry.file.sha256 = sourceEntry.sha256;
+      entry.file.matchTrace = trace.matchTrace || null;
       snapshotEntries.push({ path: entry.path, sizeBytes: sourceEntry.sizeBytes, sha256: sourceEntry.sha256 });
       inspectedEntries.push({ relativePath: entry.path, text: sourceEntry.text, sizeBytes: sourceEntry.sizeBytes, sha256: sourceEntry.sha256 });
     } catch (error) {
@@ -456,6 +485,7 @@ export function diagnoseReviewSourceScope(trustedWorkspace, requestedPaths, opti
       entry.file.unrunChecks = failedStageIndex < 0 ? ["later_source_checks"] : diagnosticStages.slice(failedStageIndex + 1);
       entry.file.sizeBytes = trace.sourceMetadata?.sizeBytes ?? null;
       entry.file.sha256 = trace.sourceMetadata?.sha256 ?? null;
+      entry.file.matchTrace = trace.matchTrace || null;
       if (failureClass === "review_scope_secret_detected") {
         entry.file.signal = error.diagnostic?.signal || null;
         entry.file.highEntropyCandidateCount = Number.isInteger(error.diagnostic?.highEntropyCandidateCount)

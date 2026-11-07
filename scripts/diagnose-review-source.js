@@ -24,9 +24,14 @@ function sha256(value) {
 }
 
 function parseArguments(argumentsList) {
-  const parsed = { workspace: null, files: [], expectedSnapshotSha256: null, expectedPolicySha256: null };
+  const parsed = { workspace: null, files: [], expectedSnapshotSha256: null, expectedPolicySha256: null, includeMatchTrace: false };
   for (let index = 0; index < argumentsList.length; index += 1) {
     const argument = argumentsList[index];
+    if (argument === "--trace-matches") {
+      if (parsed.includeMatchTrace) return { ok: false, errorCode: "duplicate_trace_option" };
+      parsed.includeMatchTrace = true;
+      continue;
+    }
     if (!["--workspace", "--file", "--expected-snapshot", "--expected-policy"].includes(argument)) {
       return { ok: false, errorCode: "unknown_option" };
     }
@@ -154,9 +159,9 @@ function createDiagnosticResult(argumentsList, currentDirectory) {
     return { result: createSafeFailure("review_diagnostic_policy_unavailable"), exitCode: 1 };
   }
 
-  const { workspace, files, expectedSnapshotSha256, expectedPolicySha256 } = parsedArguments.value;
+  const { workspace, files, expectedSnapshotSha256, expectedPolicySha256, includeMatchTrace } = parsedArguments.value;
   const workspacePath = path.resolve(currentDirectory, workspace);
-  const result = diagnoseReviewSourceScope(workspacePath, files, { syntaxAwareJavaScriptEnabled });
+  const result = diagnoseReviewSourceScope(workspacePath, files, { syntaxAwareJavaScriptEnabled, includeMatchTrace });
   result.policy = {
     ...result.policy,
     source: initialPolicyBinding.source,

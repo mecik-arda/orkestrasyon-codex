@@ -9,21 +9,23 @@ const allowedVerificationValues = new Set(["user-provided", "verified", "provisi
 const allowedStageValues = new Set(["draft", "published"]);
 const utcIsoPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const hashPattern = /^[a-f0-9]{64}$/;
-const secretPatterns = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----/i,
-  /\bsk-[A-Za-z0-9_-]{16,}\b/,
-  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/i,
-  /\bAKIA[0-9A-Z]{16}\b/,
-  /\bASIA[0-9A-Z]{16}\b/,
-  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
-  /\bglpat-[A-Za-z0-9_-]{16,}\b/,
-  /\bnpm_[A-Za-z0-9]{30,}\b/,
-  /\bxox[baprs]-[A-Za-z0-9-]{12,}\b/i,
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/,
-  /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/i,
-  /\b(?:api[_-]?key|token|password|secret|client_secret|private_key)\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i,
-  /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql):\/\/[^\s"']+/i
+const secretMatchers = [
+  { id: "private_key_header", pattern: /-----BEGIN [A-Z ]*PRIVATE KEY-----/i },
+  { id: "provider_token_prefix", pattern: /\bsk-[A-Za-z0-9_-]{16,}\b/ },
+  { id: "github_token_prefix", pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}\b/i },
+  { id: "aws_access_key_prefix", pattern: /\bAKIA[0-9A-Z]{16}\b/ },
+  { id: "aws_session_key_prefix", pattern: /\bASIA[0-9A-Z]{16}\b/ },
+  { id: "github_pat_prefix", pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}\b/ },
+  { id: "gitlab_token_prefix", pattern: /\bglpat-[A-Za-z0-9_-]{16,}\b/ },
+  { id: "npm_token_prefix", pattern: /\bnpm_[A-Za-z0-9]{30,}\b/ },
+  { id: "slack_token_prefix", pattern: /\bxox[baprs]-[A-Za-z0-9-]{12,}\b/i },
+  { id: "jwt_shape", pattern: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/ },
+  { id: "bearer_value", pattern: /\bBearer\s+[A-Za-z0-9._~+/=-]{12,}\b/i },
+  { id: "credential_assignment", pattern: /\b(?:api[_-]?key|token|password|secret|client_secret|private_key)\s*[:=]\s*["']?[A-Za-z0-9._~+/=-]{12,}/i },
+  { id: "database_connection_url", pattern: /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql):\/\/[^\s"']+/i }
 ];
+const highEntropyTokenPattern = /[A-Za-z0-9+/_=-]{32,}/g;
+const maximumSecretTraceOccurrences = 4096;
 const emailPattern = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/;
 const turkishPhonePattern = /(?<!\d)(?:\+?90[\s.-]?)?0?5\d{2}[\s.-]?\d{3}[\s.-]?\d{2}[\s.-]?\d{2}(?!\d)/;
 const turkishNationalIdPattern = /(?<!\d)[1-9]\d{10}(?!\d)/g;
@@ -138,16 +140,23 @@ function readLockOwner(lockPath) {
 }
 
 function countHighEntropyTokens(content) {
-  const candidates = content.match(/[A-Za-z0-9+/_=-]{32,}/g) || [];
-  return candidates.reduce((total, candidate) => {
-    const frequencies = new Map();
-    for (const character of candidate) frequencies.set(character, (frequencies.get(character) || 0) + 1);
-    const entropy = [...frequencies.values()].reduce((total, count) => {
-      const probability = count / candidate.length;
-      return total - probability * Math.log2(probability);
-    }, 0);
-    return total + (entropy >= 4.2 ? 1 : 0);
+  return [...content.matchAll(highEntropyTokenPattern)]
+    .reduce((total, match) => total + (calculateShannonEntropy(match[0]) >= 4.2 ? 1 : 0), 0);
+}
+
+function calculateShannonEntropy(value) {
+  const frequencies = new Map();
+  for (const character of value) frequencies.set(character, (frequencies.get(character) || 0) + 1);
+  return [...frequencies.values()].reduce((total, count) => {
+    const probability = count / value.length;
+    return total - probability * Math.log2(probability);
   }, 0);
+}
+
+function findAllPatternMatches(content, pattern) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const matcher = new RegExp(pattern.source, flags);
+  return [...content.matchAll(matcher)];
 }
 
 export function hasSecretLikeContent(content) {
@@ -170,8 +179,52 @@ export function classifySecretLikeContent(content) {
   };
 }
 
+export function traceSecretLikeContent(content) {
+  const aggregate = classifySecretLikeContent(content);
+  const occurrences = [];
+  let truncated = false;
+  for (const matcher of secretMatchers) {
+    for (const match of findAllPatternMatches(content, matcher.pattern)) {
+      if (occurrences.length >= maximumSecretTraceOccurrences) {
+        truncated = true;
+        break;
+      }
+      occurrences.push({
+        matcherId: matcher.id,
+        signal: "known_signature",
+        start: match.index,
+        end: match.index + match[0].length,
+        length: match[0].length,
+        entropy: null
+      });
+    }
+    if (truncated) break;
+  }
+  if (!truncated) {
+    for (const match of content.matchAll(highEntropyTokenPattern)) {
+      const entropy = calculateShannonEntropy(match[0]);
+      if (entropy >= 4.2) {
+        if (occurrences.length >= maximumSecretTraceOccurrences) {
+          truncated = true;
+          break;
+        }
+        occurrences.push({
+          matcherId: "high_entropy_token",
+          signal: "high_entropy",
+          start: match.index,
+          end: match.index + match[0].length,
+          length: match[0].length,
+          entropy
+        });
+      }
+    }
+  }
+  occurrences.sort((left, right) => left.start - right.start || left.end - right.end || left.matcherId.localeCompare(right.matcherId));
+  return { aggregate, occurrences, complete: !truncated };
+}
+
 function hasSecretPatternContent(content) {
-  return secretPatterns.some((pattern) => pattern.test(content));
+  return secretMatchers.some(({ pattern }) => pattern.test(content));
 }
 
 function detectInjectionCategories(content) {

@@ -58,7 +58,7 @@ function addFinding(findingsByKey, lineStarts, kind, node, sourceFile) {
   const end = Math.max(start, node.getEnd());
   const key = `${kind}:${start}:${end}`;
   if (findingsByKey.has(key)) return;
-  findingsByKey.set(key, { kind, ...sourceLocation(lineStarts, start) });
+  findingsByKey.set(key, { kind, ...sourceLocation(lineStarts, start), startOffset: start, endOffset: end });
 }
 
 function addClassificationFindings(findingsByKey, lineStarts, classification, node, sourceFile) {

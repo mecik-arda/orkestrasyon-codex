@@ -75,6 +75,8 @@ npm run runs:recent
 
 For daily use, open the repository root as a trusted local project in Codex Desktop. `npm run codex:check` inspects the tracked project MCP entry without writing; `npm run codex:diagnose` reports local prerequisites and managed-entry status without reading user-global Codex configuration, starting Hades, querying providers, or accessing a Vault. If the managed Hades entry needs updating, run `npm run codex:configure`; it preserves unrelated TOML settings and reports only managed-entry metadata. The updater locks and revalidates even a no-op plan. On an ambiguous post-publication cleanup or lock result, inspect the current state with `codex:check` before deciding whether another write is needed. `npm run verify:local` runs the serial local suite with synthetic configuration and Vault fixtures. After changing server code or registration, restart this project's Hades MCP server through Codex Desktop, then inspect its workspace identity and tool/resource surface. Those observations are operational checks, not attestations of the running source revision or effective configuration. `AGENTS.md` provides the project operating rules. Provider credentials stay outside the repository. The tracked configuration contains machine-specific executable and workspace paths. See the [Codex migration report](docs/reports/CODEX_GECISI_VE_OPENCODE_ROTA_DURUMU_2026-10-18.md) for route status and setup limits.
 
+Codex Desktop Git worktrees are separate checkouts, and ignored dependencies such as `node_modules` are not shared with the main checkout. Before a worktree starts Hades MCP, run `npm ci` from that worktree root. The runtime policy's `allowedRoots` must also contain that worktree's canonical root; trusting the project in Codex does not add it to Hades' workspace allowlist. If startup still fails, inspect the MCP process error for a missing Node package and then check workspace authorization. See the [worktree startup incident report](docs/reports/CODEX_DESKTOP_MCP_WORKTREE_STARTUP_HATASI_2026-11-08.md).
+
 ## Architecture
 
 ```text
@@ -805,6 +807,8 @@ DeepSeek Windows kullanıcı ortam değişkeni `scripts/set-deepseek-api-key.ps1
 ## Başlatma
 
 Günlük kullanımda Codex Desktop depo kökünü güvenilen yerel proje olarak açar ve Hades MCP sunucusunu proje yapılandırmasından yükler. MCP süreci etkin çalışma alanı bağlamını alır; araçlar çalışmadan önce yol izin verilen ve reddedilen köklerle karşılaştırılarak doğrulanır.
+
+Codex Desktop Git worktree'leri ayrı checkout'lardır; `.gitignore` kapsamındaki `node_modules` ana checkout'tan paylaşılmaz. Worktree içinden Hades MCP başlatmadan önce worktree kökünde `npm ci` çalıştır. Hades kullanıcı policy'sindeki `allowedRoots` listesine de worktree'nin canonical kökünü ekle; Codex'te projeye güvenmek Hades allowlist'ini kendiliğinden genişletmez. Başlangıç yine başarısızsa MCP süreç hatasında eksik Node paketi ve workspace izin kökü reddini ayrı ayrı kontrol et. Ayrıntılar [worktree MCP başlangıç raporunda](docs/reports/CODEX_DESKTOP_MCP_WORKTREE_STARTUP_HATASI_2026-11-08.md) kayıtlıdır.
 
 ## Komut referansı
 

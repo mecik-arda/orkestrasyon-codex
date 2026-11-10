@@ -221,3 +221,13 @@ Kullanıcı Hades MCP'yi yeniden başlattığını bildirdi. Salt okunur kontrol
 Canlı katalog 21 araç gösterdi; paralel batch ve entegrasyon araçları sunulmuyordu. run_codex_subagent ve run_task_profile görünür durumdaydı. Bu salt okunur katalog gözlemi, gizli/başka oturum durumuna veya çalıştırma yoluna dair ek kanıt sayılmaz.
 
 Bu operasyonel gözlem, önceki opt-in kapatma işleminin ardından pilot yüzeyinin yeniden başlatma sonrasında katalogdan kalktığını destekler. P2/P3/P4 plan kapsamındaki işlevsel kabuller kayıtlı tamamlanmış durumdadır; Claude P1b başarısız geçmişi korunarak ertelenmiştir. Bağımsız kaynak incelemesinin kapsam açığı kapanmamıştır. Bu not kaynak kodu, kişisel config'i veya katalog durumunu değiştirmez ve bağımsız denetim ya da genel geçişin koşulsuz kapanışı anlamına gelmez.
+
+## 10. 2026-11-11 ana checkout Hades resource doğrulaması
+
+Bu oturumda Git kökü ve çalışma dizini `C:\Users\ardam\Desktop\Yazılım_Siber\orkestrasyon-codex` ile eşleşti. İlk `resources/list` çağrısı yanlış `hades_orchestrator` sunucu kimliğiyle `unknown MCP server` hatası verdi. Tek düzeltilmiş çağrı yapılandırmadaki exact `hades-orchestrator` kimliğiyle başarılı oldu; ardından yalnız `hades://workspace/identity/v1` ve `hades://rules/attestation/v1` okundu.
+
+Identity resource'u `status=verified` döndürdü. `processCwdSha256` ve `trustedWorkspaceSha256` değerleri `dc3d26eb65bfc4ef48a71103bfb33d44b73e7a1873139d2c6d7917b97248e68b` idi; aynı oturumda kanonik Git kökünün UTF-8 SHA-256 değeri de eşleşti. Bu, Hades resource yüzeyinin doğru hedef workspace için yanıt verdiğine dair operasyonel kanıttır.
+
+Rules resource'u `comparison=match` ve manifest SHA-256 `12fc701c8de57f7640e0f907da889381db4b66ff3aa218e328f1382c848caa1a` döndürdü. `sourceClass=mcp_resource` ve `startup_context.status=unavailable` sınırları geçerlidir: bu kayıt çalışan commit'i, etkin config'i veya başlangıçta kuralların yüklendiğini kriptografik olarak doğrulamaz. Doğrudan initialize protokol yanıtı ayrıca kaydedilmedi.
+
+Bu kontrolde config, kaynak veya Git değiştirilmedi; provider, health, probe ya da görev aracı çağrılmadı. Hades bağlantı ve hedef workspace gözlemi, bağımsız kaynak incelemesi veya genel geçiş kapanışı değildir.

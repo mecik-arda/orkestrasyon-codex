@@ -1,5 +1,9 @@
 # Codex Desktop geçiş uygulama durumu
 
+## 2026-11-17 — Daemon bağımsız proje çalışma dizini
+
+Public tabanlı izole dalda config updater checkout’a ait mutlak `cwd` üretir; `node`, göreli sunucu girişi ve `.` güven köküyle birlikte çalışır. Eksik veya göreli çalışma dizini hazır sayılmaz, doğru eski mutlak kayıtlar byte-identical no-op kalabilir. Dağıtım şablonu kişisel yol içermez; kullanıcı her checkout için `codex:configure` çalıştırır. Tam doğrulama kaydı ve kapsam sınırları [başlangıç onarım raporundadır](CODEX_MCP_CALISMA_DIZINI_VE_ACCOUNT_READ_ONARIMI_2026-11-17.md).
+
 ## 2026-11-07 — Codex launcher probe ve fixture doğrulaması
 
 `tests/start-codex-launcher.test.js` için Windows PowerShell probe'u artık yalnız script dosyası çalıştırma engelini gösteren yapısal PowerShell security exception, `UnauthorizedAccess` ve açık policy-ret mesajı birlikte mevcutsa policy-blocked sayar. Spawn hatası, timeout, genel `AuthorizationManager` reddi, beklenmeyen nonzero exit veya marker yokluğu test başarısızlığıdır; bunlar sessiz skip'e çevrilmez. Probe PATH'i Windows System32 ile, launcher fixture PATH'i yalnız fake Node/Git/Codex araçlarıyla kurulur; credential ve kullanıcı PATH'i child'a aktarılmaz.

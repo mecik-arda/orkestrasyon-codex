@@ -1,5 +1,9 @@
 # Codex–Hades entegrasyonu: yeniden değerlendirme
 
+## 2026-11-17 — Başlangıç onarımı ve public aktarım
+
+Yerel onarımda eski oturum için native `account/read`, `thread/resume`, Hades bağlantısı ve iki resource okuması başarılı oldu; kullanıcı normal CLI açılışını ayrıca doğruladı. Bu gözlem çalışan commit/config attestation’ı değildir. Public aktarım yalnız güncel uzak tabandaki ilgili updater, regresyon ve belgelere uygulanır; eski ayrışmış geçmişler veya kullanıcıya ait yollar aktarılmaz. `.codex`-relative `cwd=".."` varsayımı geçerli değildir. Güncel davranış ve test kanıtı [başlangıç onarım raporundadır](CODEX_MCP_CALISMA_DIZINI_VE_ACCOUNT_READ_ONARIMI_2026-11-17.md).
+
 ## 2026-11-08: Sonraki eval teslimi
 
 Karar değişmedi: AST sınıflandırıcı üretim varsayılanı kapalı kalır; bağımsız Sol follow-up incelemesi kullanıcı kararıyla ertelenmiştir ve tamamlanmış sayılmaz. Sabit sentetik corpus ölçümünde benign etiketli sekiz örneğin legacy bulgusu AST'de bulgusuz kaldı; dört risk etiketli örnek de statik bulgusuz sonuç verdi. Bu ölçüm genel etkinleştirme veya kaynak teslimi için yeterli değildir; hedefli eval testleri 16/16 geçti.

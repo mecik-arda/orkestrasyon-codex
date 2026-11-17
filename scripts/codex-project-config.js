@@ -17,14 +17,14 @@ const environmentNames = [
 ];
 
 const managedServerValues = [
-  { key: ["mcp_servers", "hades-orchestrator", "command"], value: () => process.execPath },
-  { key: ["mcp_servers", "hades-orchestrator", "args"], value: (root) => [path.join(root, "subagent-bridge", "src", "server.js")] },
+  { key: ["mcp_servers", "hades-orchestrator", "command"], value: () => "node" },
+  { key: ["mcp_servers", "hades-orchestrator", "args"], value: () => ["subagent-bridge/src/server.js"] },
   { key: ["mcp_servers", "hades-orchestrator", "cwd"], value: (root) => root },
   { key: ["mcp_servers", "hades-orchestrator", "env_vars"], value: () => [...environmentNames] },
   { key: ["mcp_servers", "hades-orchestrator", "startup_timeout_sec"], value: () => 30 },
   { key: ["mcp_servers", "hades-orchestrator", "tool_timeout_sec"], value: () => 3600 },
   { key: ["mcp_servers", "hades-orchestrator", "required"], value: () => true },
-  { key: ["mcp_servers", "hades-orchestrator", "env", "SUBAGENT_BRIDGE_TRUSTED_WORKSPACE"], value: (root) => root },
+  { key: ["mcp_servers", "hades-orchestrator", "env", "SUBAGENT_BRIDGE_TRUSTED_WORKSPACE"], value: () => "." },
   { key: ["mcp_servers", "hades-orchestrator", "env", "SUBAGENT_BRIDGE_ORCHESTRATOR_APPROVAL"], value: () => "1" }
 ];
 
@@ -478,6 +478,28 @@ function getManagedValues(projectRoot) {
   return managedServerValues.map(({ key, value }) => ({ key, value: value(projectRoot) }));
 }
 
+function sameResolvedPath(actual, expected) {
+  if (typeof actual !== "string" || !path.isAbsolute(actual)) return false;
+  const normalizedActual = path.resolve(actual);
+  const normalizedExpected = path.resolve(expected);
+  return process.platform === "win32"
+    ? normalizedActual.toLocaleLowerCase("en-US") === normalizedExpected.toLocaleLowerCase("en-US")
+    : normalizedActual === normalizedExpected;
+}
+
+function managedValueMatches(key, actual, expected, projectRoot) {
+  if (JSON.stringify(actual) === JSON.stringify(expected)) return true;
+  const managedKey = key.slice(2).join(".");
+  const serverEntryPoint = path.join(projectRoot, "subagent-bridge", "src", "server.js");
+  if (managedKey === "command") return sameResolvedPath(actual, process.execPath);
+  if (managedKey === "args") return Array.isArray(actual) && actual.length === 1 && sameResolvedPath(actual[0], serverEntryPoint);
+  if (managedKey === "cwd") return sameResolvedPath(actual, projectRoot);
+  if (managedKey === "env.SUBAGENT_BRIDGE_TRUSTED_WORKSPACE") {
+    return actual === "." || sameResolvedPath(actual, projectRoot);
+  }
+  return false;
+}
+
 function keyId(key) {
   return key.join("\u0000");
 }
@@ -523,7 +545,7 @@ function createPlan(projectRoot) {
   const currentValues = existingManagedValues(parsed);
   const changes = desiredValues.map(({ key, value }) => {
     const current = currentValues.get(keyId(key));
-    return { key: key.slice(2).join("."), operation: current === undefined ? "add" : JSON.stringify(current.value) === JSON.stringify(value) ? "match" : "update" };
+    return { key: key.slice(2).join("."), operation: current === undefined ? "add" : managedValueMatches(key, current.value, value, planPaths.projectRoot) ? "match" : "update" };
   });
   const unknownFields = [...currentValues.values()]
     .filter((assignment) => !desiredValues.some((entry) => keyId(entry.key) === keyId(assignment.key)))
@@ -564,7 +586,7 @@ function createNextText(plan) {
   ];
   for (const entry of desiredValues) {
     const existing = existingValues.get(keyId(entry.key));
-    if (existing && JSON.stringify(existing.value) === JSON.stringify(entry.value)) continue;
+    if (existing && managedValueMatches(entry.key, existing.value, entry.value, plan.projectRoot)) continue;
     const rendered = `${existing?.prefix || `${"  ".repeat(Math.max(0, entry.key.length - 3))}${entry.key.at(-1)} = `}${renderTomlValue(entry.value)}${existing?.inlineComment ? ` ${existing.inlineComment}` : ""}`;
     if (existing) {
       if (existing.lineEnd !== existing.lineStart) throw new Error("Cannot safely update a multiline managed TOML value");

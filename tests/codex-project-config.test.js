@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -14,6 +14,8 @@ import {
 } from "../scripts/codex-project-config.js";
 
 const processFixturePath = fileURLToPath(new URL("./fixtures/codex-project-config-process.js", import.meta.url));
+const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const trackedConfigurationPath = path.join(repositoryRoot, ".codex", "config.toml");
 
 function createProject() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex project ü & "));
@@ -28,6 +30,26 @@ function createOutdatedConfiguredProject() {
   fs.mkdirSync(configDirectory);
   fs.writeFileSync(path.join(configDirectory, "config.toml"), 'model = "gpt-6.1-sol"\n', "utf8");
   return root;
+}
+
+function createTrackedConfigurationProject() {
+  const root = createProject();
+  const configDirectory = path.join(root, ".codex");
+  fs.mkdirSync(configDirectory);
+  const trackedConfiguration = execFileSync("git", ["show", "HEAD:.codex/config.toml"], {
+    cwd: repositoryRoot,
+    encoding: "utf8"
+  });
+  fs.writeFileSync(path.join(configDirectory, "config.toml"), trackedConfiguration, "utf8");
+  return root;
+}
+
+function createAbsoluteManagedConfiguration(root) {
+  const plan = prepareCodexProjectConfiguration(root);
+  return plan.nextBytes.toString("utf8")
+    .replace('command = "node"', `command = ${JSON.stringify(process.execPath)}`)
+    .replace('args = ["subagent-bridge/src/server.js"]', `args = [${JSON.stringify(path.join(root, "subagent-bridge", "src", "server.js"))}]`)
+    .replace('SUBAGENT_BRIDGE_TRUSTED_WORKSPACE = "."', `SUBAGENT_BRIDGE_TRUSTED_WORKSPACE = ${JSON.stringify(root)}`);
 }
 
 function removeProject(root) {
@@ -95,6 +117,9 @@ test("Codex config check is read-only and configure creates an isolated managed 
   const configDirectory = path.join(root, ".codex");
   assert.equal(inspectCodexProjectConfiguration(root).status, "needs_update");
   assert.equal(fs.existsSync(configDirectory), false);
+  const plan = prepareCodexProjectConfiguration(root);
+  assert.equal(plan.nextBytes.toString("utf8").includes(`cwd = ${JSON.stringify(root)}`), true);
+  assert.equal(fs.existsSync(configDirectory), false);
   const written = await applyCodexProjectConfiguration(root);
   assert.equal(written.status, "written");
   assert.equal(written.projectMcpReady, true);
@@ -113,7 +138,129 @@ test("Codex config check is read-only and configure creates an isolated managed 
   assert.equal(fs.existsSync(path.join(configDirectory, ".local-config-backups")), false);
   const checked = inspectCodexProjectConfiguration(root);
   assert.equal(checked.status, "ready", JSON.stringify(checked.changes));
-  assert.equal(firstBytes.toString("utf8").includes(JSON.stringify(root)), true);
+  const text = firstBytes.toString("utf8");
+  assert.match(text, /command = "node"/u);
+  assert.match(text, /args = \["subagent-bridge\/src\/server\.js"\]/u);
+  assert.equal(text.includes(`cwd = ${JSON.stringify(root)}`), true);
+  assert.match(text, /SUBAGENT_BRIDGE_TRUSTED_WORKSPACE = "\."/u);
+  assert.equal(text.includes(JSON.stringify(root)), true);
+});
+
+test("configuration without a working-directory anchor requires only that managed field", async (context) => {
+  const root = createProject();
+  context.after(() => removeProject(root));
+  await applyCodexProjectConfiguration(root);
+  const configPath = path.join(root, ".codex", "config.toml");
+  const configuration = fs.readFileSync(configPath, "utf8").replace(/^cwd = .*\r?\n/mu, "");
+  fs.writeFileSync(configPath, configuration, "utf8");
+  const checked = inspectCodexProjectConfiguration(root);
+  assert.equal(checked.status, "needs_update");
+  assert.deepEqual(checked.changes.filter((change) => change.operation !== "match"), [
+    { key: "cwd", operation: "add" }
+  ]);
+});
+
+test("tracked portable template requires a checkout anchor before becoming ready", async (context) => {
+  const firstRoot = createTrackedConfigurationProject();
+  const secondRoot = createTrackedConfigurationProject();
+  context.after(() => removeProject(firstRoot));
+  context.after(() => removeProject(secondRoot));
+  for (const root of [firstRoot, secondRoot]) {
+    const configPath = path.join(root, ".codex", "config.toml");
+    const original = fs.readFileSync(configPath, "utf8");
+    const checked = inspectCodexProjectConfiguration(root);
+    assert.equal(checked.status, "needs_update");
+    assert.equal(checked.projectMcpReady, false);
+    assert.deepEqual(checked.changes.filter(change => change.operation !== "match"), [{ key: "cwd", operation: "add" }]);
+    const applied = await applyCodexProjectConfiguration(root);
+    assert.equal(applied.status, "written");
+    const configuration = fs.readFileSync(configPath, "utf8");
+    assert.equal(configuration.includes(`cwd = ${JSON.stringify(root)}`), true);
+    assert.equal(configuration.includes(original.match(/^model = .*$/mu)[0]), true);
+    assert.equal(configuration.includes('required = true'), true);
+    assert.equal(inspectCodexProjectConfiguration(root).status, "ready");
+  }
+});
+
+test("relative daemon-dependent working directories are repaired rather than accepted", async (context) => {
+  for (const relativeCwd of ["..", ".", "nested"]) {
+    const root = createProject();
+    context.after(() => removeProject(root));
+    await applyCodexProjectConfiguration(root);
+    const configPath = path.join(root, ".codex", "config.toml");
+    const configuration = fs.readFileSync(configPath, "utf8").replace(`cwd = ${JSON.stringify(root)}`, `cwd = ${JSON.stringify(relativeCwd)}`);
+    fs.writeFileSync(configPath, configuration, "utf8");
+    const checked = inspectCodexProjectConfiguration(root);
+    assert.equal(checked.status, "needs_update", relativeCwd);
+    assert.deepEqual(checked.changes.filter(change => change.operation !== "match"), [{ key: "cwd", operation: "update" }]);
+    await applyCodexProjectConfiguration(root);
+    const repaired = fs.readFileSync(configPath, "utf8");
+    assert.equal(repaired.includes(`cwd = ${JSON.stringify(root)}`), true);
+    assert.equal(inspectCodexProjectConfiguration(root).status, "ready");
+  }
+});
+
+test("a correct absolute managed config remains byte-identical and is a no-op", async (context) => {
+  const root = createProject();
+  context.after(() => removeProject(root));
+  const configDirectory = path.join(root, ".codex");
+  fs.mkdirSync(configDirectory);
+  const configPath = path.join(configDirectory, "config.toml");
+  const absoluteConfiguration = createAbsoluteManagedConfiguration(root);
+  fs.writeFileSync(configPath, absoluteConfiguration, "utf8");
+  const originalBytes = fs.readFileSync(configPath);
+  const originalIdentity = fs.statSync(configPath);
+  assert.equal(inspectCodexProjectConfiguration(root).status, "ready");
+  assert.deepEqual(fs.readFileSync(configPath), originalBytes);
+  const inspectedIdentity = fs.statSync(configPath);
+  assert.equal(inspectedIdentity.ino, originalIdentity.ino);
+  assert.equal(inspectedIdentity.mtimeMs, originalIdentity.mtimeMs);
+  const result = await applyCodexProjectConfiguration(root);
+  assert.equal(result.status, "unchanged");
+  assert.equal(result.publicationState, "not_needed");
+  assert.deepEqual(fs.readFileSync(configPath), originalBytes);
+  const currentIdentity = fs.statSync(configPath);
+  assert.equal(currentIdentity.ino, originalIdentity.ino);
+  assert.equal(currentIdentity.mtimeMs, originalIdentity.mtimeMs);
+});
+
+test("same-basename paths from another checkout are not treated as managed matches", (context) => {
+  const firstRoot = createProject();
+  const secondRoot = createProject();
+  context.after(() => removeProject(firstRoot));
+  context.after(() => removeProject(secondRoot));
+  const wrongConfigurations = [
+    {
+      source: createAbsoluteManagedConfiguration(firstRoot).replace(
+        JSON.stringify(path.join(firstRoot, "subagent-bridge", "src", "server.js")),
+        JSON.stringify(path.join(secondRoot, "subagent-bridge", "src", "server.js"))
+      ),
+      field: "args"
+    },
+    {
+      source: createAbsoluteManagedConfiguration(firstRoot).replace(
+        `cwd = ${JSON.stringify(firstRoot)}`,
+        `cwd = ${JSON.stringify(secondRoot)}`
+      ),
+      field: "cwd"
+    },
+    {
+      source: createAbsoluteManagedConfiguration(firstRoot).replace(
+        `SUBAGENT_BRIDGE_TRUSTED_WORKSPACE = ${JSON.stringify(firstRoot)}`,
+        `SUBAGENT_BRIDGE_TRUSTED_WORKSPACE = ${JSON.stringify(secondRoot)}`
+      ),
+      field: "env.SUBAGENT_BRIDGE_TRUSTED_WORKSPACE"
+    }
+  ];
+  const configDirectory = path.join(firstRoot, ".codex");
+  fs.mkdirSync(configDirectory);
+  const configPath = path.join(configDirectory, "config.toml");
+  for (const candidate of wrongConfigurations) {
+    fs.writeFileSync(configPath, candidate.source, "utf8");
+    const result = inspectCodexProjectConfiguration(firstRoot);
+    assert.equal(result.status, "needs_update", candidate.field);
+    assert.equal(result.changes.find((change) => change.key === candidate.field)?.operation, "update", candidate.field);
+  }
 });
 
 test("configuration failure reports redact exception text and distinguish unchanged lock uncertainty", () => {
@@ -403,7 +550,7 @@ test("publication remains reported when first-file cleanup or lock release fails
   assert.equal(inspectCodexProjectConfiguration(lockRoot).status, "ready");
 });
 
-test("separate checkout roots produce separate managed workspace bindings", async (context) => {
+test("managed configuration binds each checkout to its own absolute working directory", async (context) => {
   const firstRoot = createProject();
   const secondRoot = createProject();
   context.after(() => removeProject(firstRoot));
@@ -412,7 +559,10 @@ test("separate checkout roots produce separate managed workspace bindings", asyn
   await applyCodexProjectConfiguration(secondRoot);
   const firstConfig = fs.readFileSync(path.join(firstRoot, ".codex", "config.toml"), "utf8");
   const secondConfig = fs.readFileSync(path.join(secondRoot, ".codex", "config.toml"), "utf8");
-  assert.equal(firstConfig.includes(JSON.stringify(firstRoot)), true);
-  assert.equal(secondConfig.includes(JSON.stringify(secondRoot)), true);
   assert.notEqual(firstConfig, secondConfig);
+  for (const [root, configuration] of [[firstRoot, firstConfig], [secondRoot, secondConfig]]) {
+    assert.equal(configuration.includes(`cwd = ${JSON.stringify(root)}`), true);
+    assert.match(configuration, /args = \["subagent-bridge\/src\/server\.js"\]/u);
+    assert.match(configuration, /SUBAGENT_BRIDGE_TRUSTED_WORKSPACE = "\."/u);
+  }
 });

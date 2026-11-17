@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { validateWorkspace } from "../../config.js";
-import { ANTIGRAVITY_MODEL_MAP } from "../../adapters/antigravity-adapter.js";
+import { ANTIGRAVITY_ACTIVE_MODEL_ALIASES, ANTIGRAVITY_MODEL_MAP } from "../../adapters/antigravity-adapter.js";
 import { detectWebIntent } from "../../web-evidence.js";
 import { validateClaudeSonnetAcceptanceOutput } from "../../services/claude-sonnet-acceptance.js";
 import { p2PreparedEditPolicy } from "../../services/p2-prepared-edit-policy.js";
@@ -39,7 +39,7 @@ const riskSignalsSchema = z.object({
 }).strict();
 
 export const antigravityProbeFields = {
-  probeModels: z.array(z.enum(["gemini_pro", "gemini_flash", "gemini_flash_3_7", "gemini_flash_3_8", "claude_sonnet"])).max(5).default([]),
+  probeModels: z.array(z.enum(Object.keys(ANTIGRAVITY_MODEL_MAP))).max(5).default([]),
   probeCapabilities: z.array(z.enum(["modelAccess", "toolFreeResponse", "workspaceRead", "webRead", "sandboxStartup"])).max(5).default([]),
   workspaceReadTarget: z.enum(["temp_workspace", "trusted_workspace"]).default("temp_workspace")
 };
@@ -75,7 +75,7 @@ export const publicToolSchemas = {
   prepareP2AcceptanceEdit: z.object({}).strict(),
   runAntigravity: z.object({
     prompt: z.string().min(1).max(60000),
-    model: z.enum(["gemini_flash", "gemini_flash_3_8", "claude_sonnet"]),
+    model: z.enum(ANTIGRAVITY_ACTIVE_MODEL_ALIASES),
     mode: readOnlyModeSchema,
     timeout_seconds: timeoutSecondsSchema,
     workspace: z.string().min(1).optional(),

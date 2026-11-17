@@ -63,6 +63,17 @@ test("AG-AC-02: model alias mapping çalışır", () => {
   const sonnet = resolveModel("claude_sonnet");
   assert.equal(sonnet.valid, true);
   assert.equal(sonnet.model, ANTIGRAVITY_MODEL_MAP.claude_sonnet);
+
+  for (const [alias, expectedModel] of [
+    ["gemini_flash_3_8_medium", "gemini-3.8-flash-medium"],
+    ["claude_opus", "claude-opus-4-6-thinking"],
+    ["gpt_oss_120b", "gpt-oss-120b-medium"]
+  ]) {
+    const resolved = resolveModel(alias);
+    assert.equal(resolved.valid, true);
+    assert.equal(resolved.model, expectedModel);
+    assert.equal(ANTIGRAVITY_MODEL_MAP[alias], expectedModel);
+  }
 });
 
 test("AG-AC-03: invalid model alias reddedilir", () => {
@@ -76,6 +87,10 @@ test("AG-AC-03: invalid model alias reddedilir", () => {
 
   const nil = resolveModel(null);
   assert.equal(nil.valid, false);
+
+  for (const inheritedAlias of ["constructor", "__proto__", "toString"]) {
+    assert.equal(resolveModel(inheritedAlias).valid, false);
+  }
 });
 
 test("AG-DISABLED-01: erişilemeyen modeller adapter çağrısında provider öncesi reddedilir", async () => {

@@ -268,8 +268,13 @@ The canonical executable is `%LOCALAPPDATA%\agy\bin\agy.exe` and is invoked as `
 ```text
 gemini_flash      → gemini-3.8-flash-high
 gemini_flash_3_8  → gemini-3.8-flash-high
+gemini_flash_3_8_medium → gemini-3.8-flash-medium
 claude_sonnet     → claude-sonnet-4-6
+claude_opus       → claude-opus-4-6-thinking
+gpt_oss_120b      → gpt-oss-120b-medium
 ```
+
+These aliases are explicit choices for `run_antigravity_subagent`; they do not change task-profile defaults. On 2026-11-18, the installed Antigravity CLI catalog listed all three added model IDs. A bounded live read-only call succeeded once for Claude Opus 4.6 and GPT-OSS 120B; the existing Claude Sonnet route also succeeded once. Gemini 3.8 Flash Medium resolved to the requested ID but returned `rate_limited`, so its live response was not validated. Google's [model catalog](https://antigravity.google/docs/models) lists Claude 4.6 and GPT-OSS 120B for removal on 2026-11-18; keep their use opt-in and re-check the current CLI catalog and account availability before relying on them. Gemini 4 Carbon, Argon and Hydrogen were unavailable in the installed CLI catalog and are not accepted run aliases.
 
 `gemini_pro` and `gemini_flash_3_7` are disabled for normal run calls after live access probes reported unavailable. They remain accepted only by the explicit `check_antigravity_subagent` capability-probe schema, to allow future access diagnostics; they are absent from active run aliases and task-profile fallbacks. Probe permission does not enable model execution.
 
@@ -718,8 +723,13 @@ Kanonik executable `%LOCALAPPDATA%\agy\bin\agy.exe` olup PATH üzerinden `agy` �
 ```text
 gemini_flash      → gemini-3.8-flash-high
 gemini_flash_3_8  → gemini-3.8-flash-high
+gemini_flash_3_8_medium → gemini-3.8-flash-medium
 claude_sonnet     → claude-sonnet-4-6
+claude_opus       → claude-opus-4-6-thinking
+gpt_oss_120b      → gpt-oss-120b-medium
 ```
+
+Bu alias'lar `run_antigravity_subagent` için açık model seçimleridir; task-profile varsayılanlarını değiştirmez. 2026-11-18 tarihinde kurulu Antigravity CLI kataloğu eklenen üç model kimliğini de listeliyordu. Sınırlı canlı salt-okunur çağrı Claude Opus 4.6 ve GPT-OSS 120B için birer kez başarılı oldu; mevcut Claude Sonnet rotası da bir kez başarılı oldu. Gemini 3.8 Flash Medium istenen kimliğe çözümlendi ancak `rate_limited` döndürdü; canlı yanıtı doğrulanmadı. Google'ın [model kataloğu](https://antigravity.google/docs/models), Claude 4.6 ve GPT-OSS 120B için kaldırılma tarihi olarak 2026-11-18'i listeliyor. Bu modelleri varsayılan yapmayın; kullanmadan önce güncel CLI kataloğunu ve hesap erişimini kontrol edin. Gemini 4 Carbon, Argon ve Hydrogen kurulu CLI kataloğunda kullanılamıyordu ve run alias'ı olarak kabul edilmez.
 
 `gemini_pro` ve `gemini_flash_3_7` normal çalıştırma çağrılarında devre dışıdır. Erişim probe'larında unavailable döndüklerinden etkin run araçlarından ve task-profile fallback'lerinden çıkarılmışlardır. Gelecekteki erişim kontrolü için açıkça çağrılan `check_antigravity_subagent` probe şeması bu iki alias'ı kabul etmeye devam eder; probe edilebilir olmaları çalıştırılabilir oldukları anlamına gelmez.
 

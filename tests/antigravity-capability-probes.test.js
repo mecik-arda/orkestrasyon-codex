@@ -480,6 +480,9 @@ assert.deepEqual(fs.readFileSync(sentinelPath), sentinelBefore);
 test("CAP-MCP-01: MCP probe girdisi kapalı enum ve strict sınırlarla doğrulanır", () => {
   assert.deepEqual(antigravityProbeSchema.parse({}), { probeModels: [], probeCapabilities: [], workspaceReadTarget: "temp_workspace" });
   assert.equal(antigravityProbeSchema.safeParse({ probeModels: ["gemini_flash_3_8"], probeCapabilities: ["modelAccess"] }).success, true);
+  for (const model of ["gemini_flash_3_8_medium", "claude_opus", "gpt_oss_120b"]) {
+    assert.equal(antigravityProbeSchema.safeParse({ probeModels: [model], probeCapabilities: ["modelAccess"] }).success, true, model);
+  }
   assert.equal(antigravityProbeSchema.safeParse({ probeModels: ["gemini_flash_3_8"], probeCapabilities: ["sandboxStartup"], workspaceReadTarget: "trusted_workspace" }).success, true);
   assert.equal(antigravityProbeSchema.safeParse({ probeModels: ["gemini_flash_3_6"], probeCapabilities: ["modelAccess"] }).success, false);
   assert.equal(antigravityProbeSchema.safeParse({ probeModels: ["gemini_flash_3_8"], probeCapabilities: ["promptInjection"] }).success, false);

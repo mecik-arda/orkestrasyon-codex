@@ -12,7 +12,10 @@ const ANTIGRAVITY_MODEL_MAP = {
   gemini_flash: "gemini-3.8-flash-high",
   gemini_flash_3_7: "gemini-3.7-flash-high",
   gemini_flash_3_8: "gemini-3.8-flash-high",
-  claude_sonnet: "claude-sonnet-4-6"
+  gemini_flash_3_8_medium: "gemini-3.8-flash-medium",
+  claude_sonnet: "claude-sonnet-4-6",
+  claude_opus: "claude-opus-4-6-thinking",
+  gpt_oss_120b: "gpt-oss-120b-medium"
 };
 const ANTIGRAVITY_DISABLED_MODEL_ALIASES = new Set(["gemini_pro", "gemini_flash_3_7"]);
 const ANTIGRAVITY_ACTIVE_MODEL_ALIASES = Object.keys(ANTIGRAVITY_MODEL_MAP).filter((alias) => !ANTIGRAVITY_DISABLED_MODEL_ALIASES.has(alias));
@@ -363,14 +366,13 @@ function resolveModel(alias) {
   if (!alias || typeof alias !== "string") {
     return { valid: false, error: "model alias must be a non-empty string" };
   }
-  const model = ANTIGRAVITY_MODEL_MAP[alias];
-  if (!model) {
+  if (!Object.hasOwn(ANTIGRAVITY_MODEL_MAP, alias)) {
     return {
       valid: false,
       error: `unsupported model alias: "${alias}". Supported for execution: ${ANTIGRAVITY_ACTIVE_MODEL_ALIASES.join(", ")}`
     };
   }
-  return { valid: true, model };
+  return { valid: true, model: ANTIGRAVITY_MODEL_MAP[alias] };
 }
 
 function createDisabledModelError(alias) {

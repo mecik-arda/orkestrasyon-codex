@@ -293,7 +293,7 @@ export function createSubagentMcpServer({ runtime, configuration, trustedWorkspa
 
   server.registerTool("run_antigravity_subagent", {
     title: "Antigravity subagent çalıştır",
-    description: "Antigravity CLI üzerinden yalnızca erişilebilir Gemini Flash 3.8 veya Claude Sonnet modelleriyle görev devreder. Erişilemeyen Gemini Pro ve Gemini Flash 3.7 çalıştırma şemasında devre dışıdır; erişim durumu check_antigravity_subagent ile ayrıca probe edilebilir. İsteğe bağlı workspace yalnızca salt okunur modda ve izinli kökler altında kullanılabilir. Host source-bundle reviewScope transport'u desteklenmez.",
+    description: "Antigravity CLI üzerinden açık model seçimiyle Gemini 3.8 Flash High/Medium, Claude Sonnet 4.6, Claude Opus 4.6 veya GPT-OSS 120B rotasına salt okunur görev devreder. Gerçek erişim CLI kataloğuna ve hesap kotasına bağlıdır; task-profile varsayılanları değişmez. check_antigravity_subagent model eşlemelerini ve isteğe bağlı canlı erişim kontrolünü sunar. İsteğe bağlı workspace izinli köklerle sınırlıdır. Host source-bundle reviewScope transport'u desteklenmez.",
     inputSchema: publicToolInputSchema(publicToolSchemas.runAntigravity),
     annotations: executionAnnotations
   }, safe(handlers.runAntigravity));

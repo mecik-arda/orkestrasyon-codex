@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -36,7 +36,11 @@ function createTrackedConfigurationProject() {
   const root = createProject();
   const configDirectory = path.join(root, ".codex");
   fs.mkdirSync(configDirectory);
-  fs.copyFileSync(trackedConfigurationPath, path.join(configDirectory, "config.toml"));
+  const trackedConfiguration = execFileSync("git", ["show", "HEAD:.codex/config.toml"], {
+    cwd: repositoryRoot,
+    encoding: "utf8"
+  });
+  fs.writeFileSync(path.join(configDirectory, "config.toml"), trackedConfiguration, "utf8");
   return root;
 }
 

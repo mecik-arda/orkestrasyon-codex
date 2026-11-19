@@ -401,6 +401,8 @@ export function createDeepSeekApiAdapter(configuration, options = {}) {
             totalCostUsd: observedCostUsd,
             reservedCostUsd: reservation.reservedUsd,
             usage: { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens },
+            outputIntegrity: "complete",
+            ...(request.reviewSourcePayload ? { reviewSourceDeliveryStatus: "complete_to_api" } : {}),
             diagnostics: createDiagnostics(null, Date.now() - startedAt)
           }
         });

@@ -4,7 +4,7 @@ import childProcess from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createAdapter } from "../subagent-bridge/src/adapters/agent-adapter-base.js";
 import { createExecutionId, createExecutionHandle } from "../subagent-bridge/src/services/execution-service.js";
 import { checkCapability } from "../subagent-bridge/src/services/capability-service.js";
@@ -66,6 +66,7 @@ test("AG-AC-02: model alias mapping çalışır", () => {
 
   for (const [alias, expectedModel] of [
     ["gemini_flash_3_8_medium", "gemini-3.8-flash-medium"],
+    ["gemini_flash_3_8_low", "gemini-3.8-flash-low"],
     ["claude_opus", "claude-opus-4-6-thinking"],
     ["gpt_oss_120b", "gpt-oss-120b-medium"]
   ]) {
@@ -375,6 +376,8 @@ test("AG-AC-16e: stream-json read_url eventinden yalnız izin durumunu çıkarı
   const used = extractAntigravityStreamTrace(usedStream);
   assert.equal(used.webReadStatus, "used");
   assert.equal(JSON.stringify(used).includes("RAW_PAGE_SENTINEL"), false);
+  assert.equal(extractAntigravityStreamTrace(usedStream.replace("RAW_PAGE_SENTINEL", "")).webReadStatus, "failed");
+  assert.equal(extractAntigravityStreamTrace(usedStream.replace('"status":"SUCCESS"', '"status":"ERROR"')).resultText, null);
 
   const internalToolNotInvoked = [
     JSON.stringify({ event: "init", init: { tools: ["read_url_content", "read_file"] } }),
@@ -396,6 +399,51 @@ test("AG-AC-16e: stream-json read_url eventinden yalnız izin durumunu çıkarı
     JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "plain" } })
   ].join("\n");
   assert.equal(extractAntigravityStreamTrace(unavailableStream).webReadStatus, "unavailable");
+});
+
+test("Antigravity web kanıtının URL'si aynı denemede açılan kaynakla eşleşir", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agy-web-source-binding-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const settingsDirectory = path.join(root, ".gemini", "antigravity-cli");
+  fs.mkdirSync(settingsDirectory, { recursive: true });
+  fs.writeFileSync(path.join(settingsDirectory, "settings.json"), "{}");
+  const adapterUrl = new URL("../subagent-bridge/src/adapters/antigravity-adapter.js", import.meta.url);
+  const runtimeUrl = new URL("../subagent-bridge/src/runtime/bridge-runtime.js", import.meta.url);
+  const fixturePath = fileURLToPath(new URL("./fixtures/antigravity-provider-fixture.js", import.meta.url));
+  const script = `
+    import path from "node:path";
+    import { createAntigravityAdapter } from ${JSON.stringify(adapterUrl.href)};
+    import { createBridgeRuntime } from ${JSON.stringify(runtimeUrl.href)};
+    const [root, fixturePath] = process.argv.slice(1);
+    const outcomes = [];
+    for (const scenario of ["web-source-match", "web-source-mismatch", "web-source-missing"]) {
+      const configuration = {
+        allowedRoots: [root],
+        statePaths: { state: path.join(root, "state"), logs: path.join(root, "logs"), cache: path.join(root, "cache") },
+        antigravity: { executable: process.execPath, execArgs: [fixturePath, scenario], defaultSandbox: false },
+        reliability: { maxAttempts: 1 }
+      };
+      const adapter = createAntigravityAdapter(configuration);
+      const runtime = createBridgeRuntime({ configuration, adapters: { antigravity: adapter } });
+      outcomes.push(await runtime.run({ target: "gemini_flash", mode: "read_only", trustedWorkspace: root, prompt: "Read the public source.", webEvidenceRequired: true, caller: "test", delegationDepth: 0 }));
+    }
+    process.stdout.write(JSON.stringify(outcomes));
+  `;
+  const output = childProcess.execFileSync(process.execPath, ["--input-type=module", "--eval", script, root, fixturePath], {
+    env: { ...process.env, HOME: root, USERPROFILE: root, TEMP: root, TMP: root },
+    encoding: "utf8",
+    timeout: 12000
+  });
+  const [accepted, ...rejected] = JSON.parse(output);
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.webEvidence.verificationStatus, "unverified");
+  for (const result of rejected) {
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "web_evidence_invalid");
+    assert.equal(result.metrics.diagnostics.webEvidenceFailureCode, "web_source_not_observed");
+    assert.equal(result.webEvidence, undefined);
+  }
+  assert.doesNotMatch(output, /example\.com|example\.org|RAW_WEB_PAGE_SENTINEL/);
 });
 
 test("AG-AC-16b: carrier şeması zorunlu alanları ve serbest kanıt alanını tanımlar", () => {

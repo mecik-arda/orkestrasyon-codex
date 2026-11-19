@@ -70,7 +70,8 @@ test("WP2-RUNTIME-01: provider web evidence runtime'da envelope'a normalize edil
     observedRequests.push(request);
     return createSuccessSubagentResult("antigravity", request.model, {
       result: "provider report",
-      webEvidence: evidenceInput()
+      webEvidence: evidenceInput(),
+      metrics: { webReadStatus: "used" }
     });
   });
   const runtime = createBridgeRuntime({ configuration: createConfiguration(root), adapters: { antigravity: adapter }, sleep: async () => {} });
@@ -92,7 +93,8 @@ test("WP2-RUNTIME-02: açık provider JSON taşıyıcısı yalnız temiz result 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "web-evidence-wrapper-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const adapter = createFakeAdapter(async (request) => createSuccessSubagentResult("antigravity", request.model, {
-    result: JSON.stringify({ result: "wrapped report", webEvidence: evidenceInput({ sourceUrl: "https://example.com/research" }) })
+    result: JSON.stringify({ result: "wrapped report", webEvidence: evidenceInput({ sourceUrl: "https://example.com/research" }) }),
+    metrics: { webReadStatus: "used" }
   }));
   const runtime = createBridgeRuntime({ configuration: createConfiguration(root), adapters: { antigravity: adapter }, sleep: async () => {} });
 
@@ -195,7 +197,7 @@ test("WP2-RUNTIME-08: varsayilan antigravity okumasinda kisitsiz duz metin webEv
   assert.equal(carrierMarkup.reason, "web_evidence_invalid");
 });
 
-test("WP2-RUNTIME-10: webEvidenceRequired profili duz metni reddeder, carrier kabul eder", async (t) => {
+test("WP2-RUNTIME-10: webEvidenceRequired profili ayni denemede gecerli carrier ve gercek arac izi ister", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "web-evidence-profile-strict-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const strictProfiles = {
@@ -208,16 +210,33 @@ test("WP2-RUNTIME-10: webEvidenceRequired profili duz metni reddeder, carrier ka
   assert.equal(rejected.reason, "web_evidence_invalid");
 
   const observedCarrierRequests = [];
+  const carrierCandidates = [
+    { webEvidence: null, webReadStatus: "used", failureCode: "web_evidence_missing" },
+    { webEvidence: evidenceInput(), webReadStatus: "not_invoked", failureCode: "web_read_not_observed" },
+    { webEvidence: evidenceInput(), webReadStatus: "used", failureCode: null }
+  ];
   const carrierAdapter = createFakeAdapter(async (request) => {
     observedCarrierRequests.push(request);
-    return createSuccessSubagentResult("antigravity", request.model, { result: JSON.stringify({ result: "profile report", webEvidence: null }) });
+    const candidate = carrierCandidates[observedCarrierRequests.length - 1];
+    return createSuccessSubagentResult("antigravity", request.model, {
+      result: JSON.stringify({ result: "profile report", webEvidence: candidate.webEvidence }),
+      metrics: { webReadStatus: candidate.webReadStatus }
+    });
   });
   const carrierRuntime = createBridgeRuntime({ configuration: createConfiguration(root, strictProfiles), adapters: { antigravity: carrierAdapter }, sleep: async () => {} });
-  const accepted = await carrierRuntime.run(runRequest(root, { target: "profile", profile: "web_research_fast", webEvidenceRequired: undefined }));
-  assert.equal(accepted.ok, true, JSON.stringify(accepted));
-  assert.equal(accepted.result, "profile report");
-  assert.equal(accepted.webEvidence, null);
-  assert.equal(observedCarrierRequests[0].webReadTrace, true);
+  for (const candidate of carrierCandidates) {
+    const result = await carrierRuntime.run(runRequest(root, { target: "profile", profile: "web_research_fast", webEvidenceRequired: undefined }));
+    assert.equal(result.ok, candidate.failureCode === null, JSON.stringify(result));
+    if (candidate.failureCode === null) {
+      assert.equal(result.result, "profile report");
+      assert.equal(result.webEvidence.verificationStatus, "unverified");
+    } else {
+      assert.equal(result.reason, "web_evidence_invalid");
+      assert.equal(result.metrics.diagnostics.webEvidenceFailureCode, candidate.failureCode);
+      assert.equal(result.webEvidence, undefined);
+    }
+  }
+  assert.ok(observedCarrierRequests.every((request) => request.webReadTrace === true));
 
   const looseProfiles = {
     local_read: { target: "gemini_flash", mode: "read_only", cacheable: false }
@@ -281,7 +300,10 @@ test("WP2-RUNTIME-16: iç içe carrier kanıtı adapter sonrası strict şemadan
       webEvidence: null
     }
   }));
-  const validAdapter = createFakeAdapter(async (request) => createSuccessSubagentResult("antigravity", request.model, { result: nestedValid }));
+  const validAdapter = createFakeAdapter(async (request) => createSuccessSubagentResult("antigravity", request.model, {
+    result: nestedValid,
+    metrics: { webReadStatus: "used" }
+  }));
   const validRuntime = createBridgeRuntime({ configuration: createConfiguration(root), adapters: { antigravity: validAdapter }, sleep: async () => {} });
   const accepted = await validRuntime.run(runRequest(root));
   assert.equal(accepted.ok, true, JSON.stringify(accepted));
@@ -319,7 +341,10 @@ test("WP2-RUNTIME-13: webEvidenceRepairPrompt ile tek denemelik carrier onarimi 
     calls += 1;
     prompts.push(request.prompt);
     if (calls === 1) return createSuccessSubagentResult("antigravity", request.model, { result: "FIRST_REPLY_SENTINEL without carrier" });
-    return createSuccessSubagentResult("antigravity", request.model, { result: JSON.stringify({ result: "repaired summary", webEvidence: null }) });
+    return createSuccessSubagentResult("antigravity", request.model, {
+      result: JSON.stringify({ result: "repaired summary", webEvidence: evidenceInput() }),
+      metrics: { webReadStatus: "used" }
+    });
   });
   const configuration = createConfiguration(root);
   configuration.reliability.maxAttempts = 2;
@@ -328,7 +353,7 @@ test("WP2-RUNTIME-13: webEvidenceRepairPrompt ile tek denemelik carrier onarimi 
   const repaired = await runtime.run(runRequest(root, { prompt: "ORIGINAL_TASK_SENTINEL inspect files and summarize", webEvidenceRepairPrompt: "Return the carrier JSON.", maxWebEvidenceRepairAttempts: 1 }));
   assert.equal(repaired.ok, true, JSON.stringify(repaired));
   assert.equal(repaired.result, "repaired summary");
-  assert.equal(repaired.webEvidence, null);
+  assert.equal(repaired.webEvidence.verificationStatus, "unverified");
   assert.equal(calls, 2);
   assert.match(prompts[1], /carrier repair/i);
   assert.match(prompts[1], /ORIGINAL_TASK_SENTINEL/);
@@ -363,6 +388,24 @@ test("WP2-RUNTIME-13: webEvidenceRepairPrompt ile tek denemelik carrier onarimi 
   }));
   assert.equal(traceFailure.reason, "timeout");
   assert.equal(traceFailure.metrics.webReadStatus, "used");
+
+  let staleTraceCalls = 0;
+  const staleTraceAdapter = createFakeAdapter(async (request) => {
+    staleTraceCalls += 1;
+    return createSuccessSubagentResult("antigravity", request.model, {
+      result: JSON.stringify({ result: "research summary", webEvidence: staleTraceCalls === 1 ? null : evidenceInput() }),
+      metrics: { webReadStatus: staleTraceCalls === 1 ? "used" : "not_invoked" }
+    });
+  });
+  const staleTraceRuntime = createBridgeRuntime({ configuration, adapters: { antigravity: staleTraceAdapter }, sleep: async () => {} });
+  const staleTraceResult = await staleTraceRuntime.run(runRequest(root, {
+    webEvidenceRepairPrompt: "Return the carrier JSON.",
+    maxWebEvidenceRepairAttempts: 1
+  }));
+  assert.equal(staleTraceCalls, 2);
+  assert.equal(staleTraceResult.ok, false);
+  assert.equal(staleTraceResult.reason, "web_evidence_invalid");
+  assert.equal(staleTraceResult.metrics.diagnostics.webEvidenceFailureCode, "web_read_not_observed");
 
   let exhaustedCalls = 0;
   const alwaysPlain = createFakeAdapter(async (request) => {
@@ -426,14 +469,14 @@ test("WP2-RUNTIME-14: null adaptor sonucu web evidence hatasi olarak siniflanir"
   assert.equal(result.error, "provider returned invalid web evidence (provider_result_missing)");
 });
 
-test("WP2-RUNTIME-15: webEvidence alani olmayan carrier null olarak kabul edilir", async (t) => {
+test("WP2-RUNTIME-15: yerel okumada webEvidence alani olmayan carrier null olarak kabul edilir", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "web-evidence-missing-field-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const adapter = createFakeAdapter(async (request) => createSuccessSubagentResult("antigravity", request.model, {
     result: JSON.stringify({ result: "kanit yok, duz analiz" })
   }));
   const runtime = createBridgeRuntime({ configuration: createConfiguration(root), adapters: { antigravity: adapter }, sleep: async () => {} });
-  const result = await runtime.run(runRequest(root, { prompt: "Inspect files and summarize" }));
+  const result = await runtime.run(runRequest(root, { prompt: "Inspect files and summarize", webEvidenceRequired: false }));
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.result, "kanit yok, duz analiz");
   assert.equal(result.webEvidence, null);
@@ -565,7 +608,7 @@ test("WP2-RUNTIME-06: evidence kullanılmayan Antigravity salt-okunur carrier nu
   }));
   const runtime = createBridgeRuntime({ configuration: createConfiguration(root), adapters: { antigravity: adapter }, sleep: async () => {} });
 
-  const result = await runtime.run(runRequest(root));
+  const result = await runtime.run(runRequest(root, { webEvidenceRequired: false }));
 
   assert.equal(result.ok, true);
   assert.equal(result.result, "workspace report");

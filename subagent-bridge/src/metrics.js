@@ -11,6 +11,7 @@ import {
   outputSizeBucketValues,
   processSignalValues,
   providerCodeValues,
+  reviewContractDeliveryStatusValues,
   retryDecisionValues,
   retryStopReasonValues,
   taskCompletionValues,
@@ -43,7 +44,6 @@ const modelFitFixtureVersionPattern = /^[a-z0-9][a-z0-9-]{2,63}$/;
 const hashPattern = /^[a-f0-9]{64}$/;
 const modelFitTaskClassValues = ["candidate_generation", "sourced_analysis", "strict_schema", "controlled_edit_readiness", "critical_review"];
 const reviewScopeStatuses = ["not_requested", "complete", "blocked"];
-const reviewDeliveryStatuses = ["not_attempted", "complete_to_cli", "failed"];
 const reviewEligibilityStatuses = ["eligible_for_orchestrator_evaluation", "unverified", "unavailable"];
 
 function sanitizeDurationMs(value) {
@@ -219,7 +219,7 @@ function sanitizeTimestamp(value) {
 function sanitizeReviewContract(value) {
   if (!value || typeof value !== "object" || ![1, 2].includes(value.version)) return null;
   if (!reviewScopeStatuses.includes(value.sourceScopeStatus)
-    || !reviewDeliveryStatuses.includes(value.sourceDeliveryStatus)
+    || !reviewContractDeliveryStatusValues.includes(value.sourceDeliveryStatus)
     || !reviewEligibilityStatuses.includes(value.reviewEligibility)) return null;
   if (value.version === 2
     && (!outputIntegrityValues.includes(value.outputIntegrity) || !taskCompletionValues.includes(value.taskCompletion))) return null;

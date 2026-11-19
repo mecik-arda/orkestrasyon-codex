@@ -412,7 +412,7 @@ function createReviewContract({
   reviewResultValidated = false
 } = {}) {
   const eligible = sourceScopeStatus === "complete"
-    && sourceDeliveryStatus === "complete_to_cli"
+    && (sourceDeliveryStatus === "complete_to_cli" || sourceDeliveryStatus === "complete_to_api")
     && outputIntegrity === "complete"
     && taskCompletion === "completed"
     && reviewResultValidated
@@ -506,6 +506,9 @@ function deriveHostTaskOutcome(result) {
   if (result?.timedOut === true || ["timeout", "cancelled"].includes(failureClass)) {
     return { outputIntegrity: "unknown", taskCompletion: stdoutBytes > 0 ? "partial" : "unavailable" };
   }
+  if (result?.backend === "deepseek" && result.ok === true && result.metrics?.outputIntegrity === "complete") {
+    return { outputIntegrity: "complete", taskCompletion: result.result?.trim() ? "completed" : "unavailable" };
+  }
   if (Number.isInteger(result?.exitCode) && stdoutBytes !== null) {
     if (result.ok === true && result.exitCode === 0 && typeof result.result === "string" && result.result.trim()) {
       return { outputIntegrity: "complete", taskCompletion: "completed" };
@@ -567,6 +570,8 @@ function classifyWebEvidenceValidationFailure(error) {
   const message = error instanceof Error ? error.message : "";
   if (message === "provider result is missing") return "provider_result_missing";
   if (message === "provider result contains restricted content") return "result_contains_restricted_content";
+  if (message === "web evidence is missing") return "web_evidence_missing";
+  if (message === "web read was not observed on this attempt") return "web_read_not_observed";
   if (/source URL (?:rejected|invalid)/i.test(message)) return "source_url_rejected";
   if (/excerpt/i.test(message)) return "excerpt_rejected";
   if (/verification is host controlled/i.test(message)) return "evidence_metadata_rejected";
@@ -880,7 +885,7 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
       caller: input.caller,
       reviewEvidenceRequirement: input.reviewEvidenceRequirement,
       ...(input.reviewScope ? { reviewScope: input.reviewScope } : {}),
-      ...(route.backend === "antigravity" && (input.webEvidenceRequired === true || profile?.webEvidenceRequired === true) ? { webReadTrace: true } : {}),
+      ...(route.backend === "antigravity" && input.mode === "read_only" && (input.webEvidenceRequired === true || profile?.webEvidenceRequired === true) ? { webReadTrace: true } : {}),
       ...(input.maxOutputBytes !== undefined ? { maxOutputBytes: input.maxOutputBytes } : {}),
       ...(input.maxOutputTokens !== undefined ? { maxOutputTokens: input.maxOutputTokens } : {}),
       ...(input.claudeSonnetAcceptancePilot === true ? { claudeSonnetAcceptancePilot: true, noWorkspaceContext: true } : {}),
@@ -1128,6 +1133,8 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
             providerAdmissionLeaseMs = Date.now() - providerStartedAt;
           }
           result = withProviderAdmissionLease(result, providerAdmissionLeaseMs);
+          const completedApiReviewDelivery = route.backend === "deepseek" && result?.ok === true
+            && result.metrics?.reviewSourceDeliveryStatus === "complete_to_api";
           if (request.webReadTrace && typeof result?.metrics?.webReadStatus === "string") {
             if (result.metrics.webReadStatus === "used" || observedWebReadStatus !== "used") {
               observedWebReadStatus = result.metrics.webReadStatus;
@@ -1144,6 +1151,10 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
             if (!result || typeof result !== "object") throw new Error("provider result is missing");
             if ((webEvidenceMode === "strict" || webEvidenceMode === "repair") && result.ok === true && Object.hasOwn(result, "result") && !Object.hasOwn(result, "webEvidence")) {
               throw new Error("web evidence carrier is required");
+            }
+            if (request.webReadTrace && result.ok === true) {
+              if (!result.webEvidence) throw new Error("web evidence is missing");
+              if (result.metrics?.webReadStatus !== "used") throw new Error("web read was not observed on this attempt");
             }
           } catch (error) {
             const adapterDiagnostics = result?.metrics?.diagnostics || {};
@@ -1277,7 +1288,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
             ...(request.webReadTrace ? { webReadStatus: observedWebReadStatus || "not_observed" } : {})
           });
           if (reviewSourceManifest) {
-            const sourceDeliveryStatus = result.metrics?.stdinWriteStatus === "complete" ? "complete_to_cli" : "failed";
+            const sourceDeliveryStatus = route.backend === "deepseek"
+              ? (completedApiReviewDelivery ? "complete_to_api" : "failed")
+              : (result.metrics?.stdinWriteStatus === "complete" ? "complete_to_cli" : "failed");
             lastResult.reviewContract = createReviewContract({
               sourceManifest: reviewSourceManifest,
               sourceScopeStatus: "complete",

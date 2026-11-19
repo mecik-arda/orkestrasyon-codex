@@ -64,7 +64,7 @@ Doğrudan şu iki salt okunur giriş çalıştırıldı:
 
 Yapılandırılmış zincir:
 
-- Node: C:\nvm4w\nodejs\node.exe
+- Node: Yerel Windows kurulumu
 - Server: ana repository içindeki subagent-bridge\src\server.js
 - cwd: ana repository kökü
 - SUBAGENT_BRIDGE_TRUSTED_WORKSPACE: ana repository kökü
@@ -216,7 +216,39 @@ Erişim tarihi: 7 Kasım 2026.
 
 Proje config'inin varlığı tek başına etkin config yüklemesini kanıtlamaz. Bu nedenle dosya denetimi, canlı resource gözlemi, sentetik stdio kontrolü ve geçmiş kabul kanıtları bu raporda ayrı tutulmuştur.
 
+## 11. 2026-11-19 checkout başlatma ve Antigravity alias kapanış kontrolü
 
+Bu kontrol `codex/hades-codex-startup-fix` dalında, HEAD `fd2bca63ed36db1572e42979e7e3f278def5131d` üzerinde yapıldı. Başlangıç çalışma ağacı kullanıcı değişiklikleri içeriyordu; doğrulama runner'ı bunları silmeden başlangıç ve bitiş snapshot'larını karşılaştırdı. Snapshot SHA-256 `39d40b4fb5c8fc7baba09e12e617398895efbeea64d3913d383605dc9ccede73` iki uçta aynı kaldı.
+
+Codex launcher regresyonu artık launcher'ı checkout dışındaki geçici çağıran dizininden başlatıp alt sürecin `cwd` değerinin proje kökü olduğunu doğrular. Antigravity adapter ve MCP şemasına `gemini_flash_3_8_low` → `gemini-3.8-flash-low` eşlemesi eklendi; alias eşleme ve probe şema testleri güncellendi. README'de her checkout için ayrı proje yapılandırması gerektiği açıklanır. Takip edilen `.codex/config.toml` içindeki yerel mutlak cwd kullanıcı ayarıdır ve public şablon değişikliği olarak değerlendirilmemelidir.
+
+İlk tam `verify:local` koşusu `tests/parallel-batch-state.test.js` içindeki çalışan batch iptali testinde zamanlamaya bağlı bir assertion hatasıyla sonlandı. Testin 100 ms sabit beklemesi, sahte runtime handler'ının gerçekten başladığını garanti etmiyordu. Regresyon deterministik başlangıç sinyali bekleyecek şekilde düzeltildi; odaklı test 1/1 ve dosyanın tüm testleri 14/14 geçti. Sonraki tam koşu başarılı oldu.
+
+Restart öncesi kaydedilen `npm run verify:local` sonucu:
+
+- Beş aşama geçti: `verify:ci`, tam test paketi, zorunlu benchmark, sentetik stdio MCP smoke ve sentetik config/Vault verify.
+- Ana test paketi 1.265 başarılı, 5 Windows koşullu atlama, 0 başarısız sonuçlandı.
+- Benchmark 10.148 ms sürdü; toplam süre 378.875 ms oldu.
+- Node v24.17.0 / Windows x64 kullanıldı. Sentetik config ve Vault kullanıldı; provider credential'ı aktarılmadı.
+- Koşu sonunda geçici sentetik kök temizlendi. Gerçek Vault, provider inference veya çalışan Desktop Hades işlemi bu doğrulamanın parçası değildi.
+
+### Restart sonrası canlı doğrulama
+
+- Restart öncesi yüklü şema Low alias'ını sunmuyordu. Restart sonrasında canlı katalog ve Antigravity yönlendirme tablosu `gemini_flash_3_8_low` eşlemesini gösterdi.
+- Canlı `resources/list` başarılı oldu. Process ve trusted workspace hash'leri checkout kökünün üretim fingerprint'iyle eşleşti. Rules sonucu `verified/match`, startup context durumu `unavailable` kaldı. Bu gözlem doğru workspace bağlantısını gösterir. Çalışan commit veya etkin yapılandırma için bağımsız attestation sağlamaz.
+- Tek salt-okunur Low görevi `gemini_flash_3_8_low` → `gemini-3.8-flash-low` eşleşmesini, beklenen `42` sonucunu, çıkış kodu 0, bir adapter denemesi ve sıfır retry ile doğruladı. Runtime 8.595 ms, maliyet alanı `null` idi.
+- Gemini Medium için son `rate_limited` sonucu ve Gemini High için açık canlı web kanıtı kabulü korunuyor. Yerel web regresyonları ve salt-okunur Low görevi bu iki kabulü kapsamaz.
+- `npm run codex:check` proje MCP kaydını `ready` buldu. `codex:diagnose` yerel kaydı inceler; canlı MCP kaynakları ayrıca gözlendi.
+
+DeepSeek salt-okunur pilotu, MCP alt sürecini kendisini çalıştıran Node yürütücüsüyle başlatır. Pilotun örnek görevi sentetik, sağlayıcı çağrısı canlıdır. Sağlayıcı erişimi gerektirmeyen yerel uçtan uca doğrulama için `npm run verify:local` kullanılır.
+
+### Yayın öncesi yerel doğrulama
+
+- `npm run verify:local` beş seri aşamada geçti. Ana test paketi 1.265 başarılı, 5 koşullu atlama ve 0 başarısızlık kaydetti. Benchmark 9,82 saniye sürdü. Kaynak snapshot'ı koşunun iki ucunda aynı kaldı.
+- DeepSeek salt-okunur pilotu ve iki disposable edit pilotu sentetik API yanıtlarıyla geçti. Stdio kabulü beklenen diff'i, `applied=false` durumunu ve başarılı temizliği doğruladı. Canlı sağlayıcıya istek gönderilmedi ve gerçek Vault kullanılmadı.
+- Sağlayıcı hata senaryoları `npm run drill` ile 10/10 geçti.
+
+Takip edilen dağıtım şablonundan yerel olarak üretilen mutlak çalışma dizini makineye özgüdür ve public değişiklik kapsamının dışındadır.
 
 ## 9. 2026-11-08 operatör restart sonrası kapanış kaydı
 
@@ -228,7 +260,7 @@ Bu operasyonel gözlem, önceki opt-in kapatma işleminin ardından pilot yüzey
 
 ## 10. 2026-11-11 ana checkout Hades resource doğrulaması
 
-Bu oturumda Git kökü ve çalışma dizini `C:\Users\ardam\Desktop\Yazılım_Siber\orkestrasyon-codex` ile eşleşti. İlk `resources/list` çağrısı yanlış `hades_orchestrator` sunucu kimliğiyle `unknown MCP server` hatası verdi. Tek düzeltilmiş çağrı yapılandırmadaki exact `hades-orchestrator` kimliğiyle başarılı oldu; ardından yalnız `hades://workspace/identity/v1` ve `hades://rules/attestation/v1` okundu.
+Bu oturumda Git kökü ve çalışma dizini ana checkout’un kanonik yolu ile eşleşti. İlk `resources/list` çağrısı yanlış `hades_orchestrator` sunucu kimliğiyle `unknown MCP server` hatası verdi. Tek düzeltilmiş çağrı yapılandırmadaki exact `hades-orchestrator` kimliğiyle başarılı oldu; ardından yalnız `hades://workspace/identity/v1` ve `hades://rules/attestation/v1` okundu.
 
 Identity resource'u `status=verified` döndürdü. `processCwdSha256` ve `trustedWorkspaceSha256` değerleri `dc3d26eb65bfc4ef48a71103bfb33d44b73e7a1873139d2c6d7917b97248e68b` idi; aynı oturumda kanonik Git kökünün UTF-8 SHA-256 değeri de eşleşti. Bu, Hades resource yüzeyinin doğru hedef workspace için yanıt verdiğine dair operasyonel kanıttır.
 

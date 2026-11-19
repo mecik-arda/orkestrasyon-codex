@@ -75,6 +75,8 @@ npm run runs:recent
 
 For daily use, open the repository root as a trusted local project in Codex Desktop. `npm run codex:check` inspects the local project MCP entry without writing; `npm run codex:diagnose` reports local prerequisites and managed-entry status without reading user-global Codex configuration, starting Hades, querying providers, or accessing a Vault. If the managed Hades entry needs updating, run `npm run codex:configure`; it preserves unrelated TOML settings and reports only managed-entry metadata. The updater locks and revalidates even a no-op plan. On an ambiguous post-publication cleanup or lock result, inspect the current state with `codex:check` before deciding whether another write is needed. `npm run verify:local` runs the serial local suite with synthetic configuration and Vault fixtures. After changing server code or registration, restart this project's Hades MCP server through Codex Desktop, then inspect its workspace identity and tool/resource surface. Those observations are operational checks, not attestations of the running source revision or effective configuration. `AGENTS.md` provides the project operating rules. Provider credentials stay outside the repository. The tracked `.codex/config.toml` is a path-free distribution template. Run `npm run codex:configure` from each checkout before opening or resuming Codex: it writes an absolute working-directory anchor for that checkout while retaining the portable Node command, relative server entrypoint, and workspace-relative trust root. A missing anchor or relative `cwd` requires configuration; it is not ready to launch. Keep the generated local path out of public commits. See the [startup repair report](docs/reports/CODEX_MCP_CALISMA_DIZINI_VE_ACCOUNT_READ_ONARIMI_2026-11-17.md) for the regression evidence and CLI override limitation. See the [Codex migration report](docs/reports/CODEX_GECISI_VE_OPENCODE_ROTA_DURUMU_2026-10-18.md) for route status and setup limits.
 
+To launch this checkout while the terminal is in another directory, invoke this checkout's `scripts/start-codex.ps1` by its full path. The launcher derives the project root from its own location and changes the Codex process working directory to that root; it does not register a machine-wide Hades server. Configure and trust each checkout separately before launching it.
+
 Codex Desktop Git worktrees are separate checkouts, and ignored dependencies such as `node_modules` are not shared with the main checkout. Before a worktree starts Hades MCP, run `npm ci` from that worktree root. The runtime policy's `allowedRoots` must also contain that worktree's canonical root; trusting the project in Codex does not add it to Hades' workspace allowlist. If startup still fails, inspect the MCP process error for a missing Node package and then check workspace authorization. See the [worktree startup incident report](docs/reports/CODEX_DESKTOP_MCP_WORKTREE_STARTUP_HATASI_2026-11-08.md).
 
 ## Architecture
@@ -261,6 +263,8 @@ The independent DeepSeek route uses the official `https://api.deepseek.com` API 
 
 Pilot budget ledger version 2 records money in integer nanodollars and separates legacy-unclassified accounting, usage-priced settlement and active/unknown reservations. An active or unknown reservation remains admitted against the cap after its TTL; expiry does not release possibly billed work. A valid late settlement can reconcile an unknown reservation, while invalid or replayed settlements cannot charge or release it again. Migration preserves the version 1 settled total as unclassified and carries every reservation forward; expired or unbounded legacy entries become unknown. Invalid, incompatible or limit-mismatched ledgers fail closed. Writes use a flushed temporary file and atomic rename under an OS file lock; legacy migration also fails closed when its compatibility lock is present or uncertain. These controls cover process crashes and cooperating writers, not power-loss durability of directory metadata or external writers that ignore the lock. Usage-priced amounts rely on provider-reported usage and remain estimates, not invoices.
 
+For a validated DeepSeek source review, `complete_to_api` records the bridge's observation of a successful HTTP response for a request containing the scoped source bundle. Findings still require host-validated source references before they are eligible for the orchestrator's evaluation.
+
 ### Antigravity contract
 
 The canonical executable is `%LOCALAPPDATA%\agy\bin\agy.exe` and is invoked as `agy` through PATH.
@@ -269,12 +273,13 @@ The canonical executable is `%LOCALAPPDATA%\agy\bin\agy.exe` and is invoked as `
 gemini_flash      → gemini-3.8-flash-high
 gemini_flash_3_8  → gemini-3.8-flash-high
 gemini_flash_3_8_medium → gemini-3.8-flash-medium
+gemini_flash_3_8_low → gemini-3.8-flash-low
 claude_sonnet     → claude-sonnet-4-6
 claude_opus       → claude-opus-4-6-thinking
 gpt_oss_120b      → gpt-oss-120b-medium
 ```
 
-These aliases are explicit choices for `run_antigravity_subagent`; they do not change task-profile defaults. On 2026-11-18, the installed Antigravity CLI catalog listed all three added model IDs. A bounded live read-only call succeeded once for Claude Opus 4.6 and GPT-OSS 120B; the existing Claude Sonnet route also succeeded once. Gemini 3.8 Flash Medium resolved to the requested ID but returned `rate_limited`, so its live response was not validated. Google's [model catalog](https://antigravity.google/docs/models) lists Claude 4.6 and GPT-OSS 120B for removal on 2026-11-18; keep their use opt-in and re-check the current CLI catalog and account availability before relying on them. Gemini 4 Carbon, Argon and Hydrogen were unavailable in the installed CLI catalog and are not accepted run aliases.
+These aliases are explicit choices for `run_antigravity_subagent`; they do not change task-profile defaults. The installed Antigravity CLI catalog listed Gemini 3.8 Flash High, Medium and Low, Claude Sonnet 4.6, Claude Opus 4.6 and GPT-OSS 120B on 2026-11-19. The live Hades schema exposed `gemini_flash_3_8_low` after reload on 2026-11-19. A bounded read-only task then resolved to `gemini-3.8-flash-low` and returned the expected structured result in one attempt. Gemini High's live web evidence acceptance remains open. Prior bounded calls succeeded once for Claude Sonnet 4.6, Claude Opus 4.6 and GPT-OSS 120B; Gemini 3.8 Flash Medium returned `rate_limited`, so its live response was not validated. Google's [model catalog](https://antigravity.google/docs/models) lists Claude 4.6 and GPT-OSS 120B for removal on 2026-11-18, while the local CLI catalog still listed them on 2026-11-19. Treat this difference as a current-state observation and check account/model access before relying on those routes. Gemini 4 Carbon, Argon and Hydrogen were unavailable in the installed CLI catalog and are not accepted run aliases.
 
 `gemini_pro` and `gemini_flash_3_7` are disabled for normal run calls after live access probes reported unavailable. They remain accepted only by the explicit `check_antigravity_subagent` capability-probe schema, to allow future access diagnostics; they are absent from active run aliases and task-profile fallbacks. Probe permission does not enable model execution.
 
@@ -287,6 +292,8 @@ Web-intent Antigravity calls use `stream-json` to observe the canonical web-tool
 Canonical error classes are `rate_limited`, `authentication_failure`, `permission_denied`, `timeout`, `server`, `network`, `process_exit`, `process_error` and `output_limit`; the real `exitCode` and `signal` are preserved. The provider circuit key is model-scoped for Antigravity (`antigravity:<model>`), so a transient failure in one model does not open the circuit for other Gemini models.
 
 `check_antigravity_subagent` measures `modelAccess`, `toolFreeResponse`, `workspaceRead` and `webRead` per model with opt-in `probeModels` and `probeCapabilities`, serially and without side effects. `authValid: null` means the capability was not probed; `--version` success is not counted as auth success. Permission denial is reported as `not_probed` instead of `unavailable`. The default probe timeout is 300 seconds and is configurable through `antigravity.probeTimeoutMs`.
+
+Gemini web tasks that require evidence succeed only when the same attempt reports a completed `read_url_content` call with output and supplies a valid evidence envelope for the URL recorded in that call. Accepted excerpts remain quarantined and unverified. See the [provider verification report](docs/reports/CODEX_SUBAGENT_GEMINI_DEEPSEEK_DOGRULAMA_2026-11-17.md).
 
 ### Codex contract
 
@@ -371,9 +378,9 @@ npm run codex:configure       Register Hades MCP in this local Codex project
 npm run codex:check           Inspect the local Codex MCP registration
 npm run codex:diagnose        Check managed project setup without probing providers or personal state
 npm run verify:local          Run serial tests and smoke/verify with temporary synthetic config and Vault
-npm run pilot                 DeepSeek Flash synthetic pilot
-npm run pilot:flash           DeepSeek Flash synthetic pilot
-npm run pilot:edit:deepseek   Disabled until structured patch validation is implemented
+npm run pilot                 Live DeepSeek Flash call with a synthetic task
+npm run pilot:flash           Same live DeepSeek Flash pilot
+npm run pilot:edit:deepseek   Validate an exact disposable DeepSeek preview without changing the source
 npm run accept:edit:deepseek  Re-run the separately gated disposable DeepSeek edit acceptance
 npm run smoke                 MCP tools, resources and runtime health with a temporary synthetic Vault
 npm run smoke:vault           Explicit real-Vault search/read opt-in
@@ -492,7 +499,7 @@ The architectural approach is inspired by [Avenox](https://avenox.lol/) projects
 
 Hades Orchestrator, Codex Desktop ana orkestratörünün yerel MCP sunucusu üzerinden bağımsız subagent backend’lerini çağırdığı sağlayıcıdan bağımsız bir orkestrasyon sistemidir. Çalışma zamanı bileşeni `subagent-bridge`’dir; Codex host modeli ile subagent backend’leri ayrıdır.
 
-Güncel geçiş durumu (2026-11-08): Özgün plan kapsamındaki P2/P3/P4 işlevsel kabulleri tamamlandı. P2 recovery kanıtı ayrı süreçli Windows testlerinde gerçek üretim recovery yolunu kullanır; canlı Hades recovery çağrısı değildir. Claude P1b strict görev kabulü `task_json_parse_invalid` ile başarısız oldu ve kullanıcı kararıyla ertelendi. Son GPT-6.1-Sol incelemesi yalnız kendi 10 dosyalı snapshot’ını kapsar; sonraki yerel düzeltmeler bağımsız incelenmedi ve follow-up ertelendi. Offline classifier eval’i sabit sentetik corpus’ta benign etiketli sekiz eşleşmede bulguyu azalttı; dört risk etiketli örnek bulgusuz kaldı. Bu nedenle AST varsayılanı kapalıdır; eval kaynak teslimi yetkisi oluşturmaz. Doğal kaynak inceleme kapsamı yerel preflight’ta engellidir. Son kayıtlı tam `verify:local` koşusu beş seri aşamada başarılı oldu: 95 test dosyası, 1.256 başarılı, beş Windows koşullu atlama, sıfır başarısızlık ve 18,950 saniyelik zorunlu benchmark. Sentetik smoke ve geçici config/Vault verify geçti. P6 durum belgeleri uzlaştırıldı, fakat bağımsız inceleme beklediğinden geçiş koşulsuz kapatılmış değildir.
+Geçiş durumu (2026-11-08 tarihli kayıt): Özgün plan kapsamındaki P2/P3/P4 işlevsel kabulleri tamamlandı. P2 recovery kanıtı ayrı süreçli Windows testlerinde gerçek üretim recovery yolunu kullanır; canlı Hades recovery çağrısı değildir. Claude P1b strict görev kabulü `task_json_parse_invalid` ile başarısız oldu ve kullanıcı kararıyla ertelendi. Son GPT-6.1-Sol incelemesi yalnız kendi 10 dosyalı snapshot’ını kapsar; sonraki yerel düzeltmeler bağımsız incelenmedi ve follow-up ertelendi. Offline classifier eval’i sabit sentetik corpus’ta benign etiketli sekiz eşleşmede bulguyu azalttı; dört risk etiketli örnek bulgusuz kaldı. Bu nedenle AST varsayılanı kapalıdır; eval kaynak teslimi yetkisi oluşturmaz. Doğal kaynak inceleme kapsamı yerel preflight’ta engellidir. Son kayıtlı tam `verify:local` koşusu beş seri aşamada başarılı oldu: 95 test dosyası, 1.256 başarılı, beş Windows koşullu atlama, sıfır başarısızlık ve 18,950 saniyelik zorunlu benchmark. Sentetik smoke ve geçici config/Vault verify geçti. P6 durum belgeleri uzlaştırıldı, fakat bağımsız inceleme beklediğinden geçiş koşulsuz kapatılmış değildir.
 
 ## Ne sunar
 
@@ -540,7 +547,7 @@ Runtime policy’si `~/.config/subagent-bridge/config.json`, executable ve adapt
 
 ## Doğrulanmış taban
 
-Paket hades-orchestrator 2.2.0, çalışma zamanı Node.js 20.9+ ve ESM’dir; CI Node.js 22/24 kullanır. Kanonik kayıt `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, isteğe bağlı görünüm `<workspace>/.hades/runs.jsonl` altındadır. Kaydedilen son tam `npm run verify:local` koşusu beş seri aşamada başarılı oldu; 95 test dosyasında 1.256 başarılı, beş Windows koşullu atlama ve sıfır başarısızlık; zorunlu benchmark 18,950 saniyede tamamlandı. Koşu sırasında kaynak snapshot SHA-256 `eedfb3a2c03d5df692202c5c8862dfc28b7fbc90754881ee009b428b504f2d6a` değişmedi. Sentetik smoke ve geçici config/Vault verify, sağlayıcı kimlik bilgileri aktarılmadan ve gerçek Vault'a erişilmeden geçti. Offline eval’in hedefli testleri ayrıca 16/16 geçti. Bunlar yerel doğrulama sonuçlarıdır; canlı Hades veya sağlayıcı erişimi kanıtı değildir.
+Paket hades-orchestrator 2.2.0, çalışma zamanı Node.js 20.9+ ve ESM’dir; CI Node.js 22/24 kullanır. Kanonik kayıt `%LOCALAPPDATA%\subagent-bridge\logs\metrics`, isteğe bağlı görünüm `<workspace>/.hades/runs.jsonl` altındadır. 19 Kasım yerel yayın doğrulamasında `npm run verify:local` beş seri aşamada geçti. Ana pakette 1.265 test geçti, 5 koşullu test atlandı ve başarısızlık olmadı. Benchmark 9,82 saniye sürdü. Sentetik smoke ve geçici yapılandırma/Vault doğrulaması sağlayıcı kimlik bilgileri aktarılmadan tamamlandı. [Doğrulama kaydı](docs/reports/CODEX_HADES_ENTEGRASYON_YENIDEN_DEGERLENDIRME_2026-11-07.md#yayın-öncesi-yerel-doğrulama) yerel testlerle canlı Hades gözlemlerinin kapsamını ayrı gösterir.
 
 ## Hızlı başlangıç
 
@@ -554,6 +561,8 @@ npm run runs:recent
 ```
 
 Günlük kullanım için depo kökünü Codex Desktop içinde ayrı ve güvenilen yerel proje olarak açın. `npm run codex:check` proje MCP kaydını salt okunur denetler; `npm run codex:diagnose` yerel config/entrypoint ve PATH önkoşullarını kontrol eder, kullanıcı-genel config'i, Hades'i, sağlayıcıyı veya Vault'u okumaz. Yalnız managed kayıt güncel değilse `npm run codex:configure` çalıştırın; komut diğer TOML ayarlarını koruyarak Hades kaydını günceller. Updater değişmeyen planı da kilit altında yeniden doğrular. Yayın sonrası cleanup veya kilit sonucu belirsizse yeni yazma kararı vermeden önce `codex:check` ile güncel durumu gözleyin. Yerel uçtan uca doğrulama için `npm run verify:local` kullanın; bu komut sentetik config/Vault ve credential taşımayan test ortamı kullanır. Sunucu kodu veya kaydı değiştiğinde Codex Desktop içinden bu projenin Hades MCP sunucusunu yeniden başlatın; ardından canlı workspace identity ve araç/resource yüzeyini operasyonel olarak kontrol edin. Bu gözlemler çalışan commit veya etkin config attestation'ı değildir. `AGENTS.md` proje çalışma kurallarını sağlar. Sağlayıcı kimlik bilgileri repoda tutulmaz. Takip edilen `.codex/config.toml` kişisel yol içermeyen dağıtım şablonudur. Codex oturumunu açmadan veya sürdürmeden önce her checkout kökünde `npm run codex:configure` çalıştırın: komut o checkout için mutlak çalışma dizini üretir; taşınabilir Node komutu, göreli sunucu girişi ve workspace’e göreli güven kökü korunur. Eksik veya göreli `cwd` hazır sayılmaz. Üretilen yerel yolu public commit’e eklemeyin. CLI override sınırı ve regresyon kanıtı [başlangıç onarım raporundadır](docs/reports/CODEX_MCP_CALISMA_DIZINI_VE_ACCOUNT_READ_ONARIMI_2026-11-17.md). Etkin ve emekli rotalar ile kalan kabul kapıları [Codex Desktop geçiş planında](docs/plans/CODEX_DESKTOP_UCTAN_UCA_GECIS_PLANI_2026-10-18.md) ve [uygulama raporunda](docs/reports/CODEX_DESKTOP_GECIS_UYGULAMA_DURUMU_2026-10-18.md) izlenir.
+
+Terminal başka bir dizindeyken bu checkout'u açmak için ilgili checkout'un `scripts/start-codex.ps1` dosyasını tam yoluyla çağırın. Launcher proje kökünü kendi konumundan bulur ve Codex sürecinin çalışma dizinini oraya alır; makine genelinde Hades kaydı oluşturmaz. Her checkout'u ayrı yapılandırıp güvenilir proje olarak açın.
 
 ## Mimari
 
@@ -716,6 +725,8 @@ Backup `~/.config/subagent-bridge/backups/` altında oluşturulur; rollback içi
 
 Antigravity Gemini 3.8 Flash ve Codex rotaları geçmişte doğrulanmıştır. DeepSeek Flash resmi API adapter'ında yerel stdio pilotlarını geçti; 2026-11-03 P4 canlı Hades read-only ve disposable-edit kabulleri de kendi sınırlı görevlerinde geçti. Canlı edit kaynak workspace'e terfi etmedi ve bu sonuçlar güncel Desktop Hades kaynak revision'ını veya genel edit yeteneğini kanıtlamaz. Gemini Pro ve Gemini 3.7 Flash 2026-10-14 canlı probe'larında erişilemez döndü ve normal çalıştırmadan devre dışı bırakıldı. GPT-6 Luna, GPT-6 Sol ve GPT-6 Astra doğrulanmış Codex kimlikleridir; Luna/Sol rollerinde GPT-6 sürümleri tercih edilir. Codex Luna hızlı uygulayıcı, Terra dengeli editör, Sol zor hata ayıklama ve denetim modelidir. Claude Code etkin abonelik gerektirir ve native Claude kabul fazı kapalıdır.
 
+DeepSeek kaynak incelemesinde `complete_to_api`, kapsamlı kaynak paketini içeren isteğe başarılı HTTP yanıtı alındığını kaydeder. Bulguların orkestratör değerlendirmesine girebilmesi için kaynak referanslarını da host doğrular.
+
 ### Antigravity sözleşmesi
 
 Kanonik executable `%LOCALAPPDATA%\agy\bin\agy.exe` olup PATH üzerinden `agy` çağrılır.
@@ -724,12 +735,13 @@ Kanonik executable `%LOCALAPPDATA%\agy\bin\agy.exe` olup PATH üzerinden `agy` �
 gemini_flash      → gemini-3.8-flash-high
 gemini_flash_3_8  → gemini-3.8-flash-high
 gemini_flash_3_8_medium → gemini-3.8-flash-medium
+gemini_flash_3_8_low → gemini-3.8-flash-low
 claude_sonnet     → claude-sonnet-4-6
 claude_opus       → claude-opus-4-6-thinking
 gpt_oss_120b      → gpt-oss-120b-medium
 ```
 
-Bu alias'lar `run_antigravity_subagent` için açık model seçimleridir; task-profile varsayılanlarını değiştirmez. 2026-11-18 tarihinde kurulu Antigravity CLI kataloğu eklenen üç model kimliğini de listeliyordu. Sınırlı canlı salt-okunur çağrı Claude Opus 4.6 ve GPT-OSS 120B için birer kez başarılı oldu; mevcut Claude Sonnet rotası da bir kez başarılı oldu. Gemini 3.8 Flash Medium istenen kimliğe çözümlendi ancak `rate_limited` döndürdü; canlı yanıtı doğrulanmadı. Google'ın [model kataloğu](https://antigravity.google/docs/models), Claude 4.6 ve GPT-OSS 120B için kaldırılma tarihi olarak 2026-11-18'i listeliyor. Bu modelleri varsayılan yapmayın; kullanmadan önce güncel CLI kataloğunu ve hesap erişimini kontrol edin. Gemini 4 Carbon, Argon ve Hydrogen kurulu CLI kataloğunda kullanılamıyordu ve run alias'ı olarak kabul edilmez.
+Bu alias'lar `run_antigravity_subagent` için açık model seçimleridir; task-profile varsayılanlarını değiştirmez. Kurulu Antigravity CLI kataloğu 2026-11-19 tarihinde Gemini 3.8 Flash High, Medium ve Low, Claude Sonnet 4.6, Claude Opus 4.6 ve GPT-OSS 120B modellerini listeledi. 19 Kasım 2026'da yeniden yükleme sonrasında canlı Hades şeması `gemini_flash_3_8_low` alias'ını sundu. Ardından sınırlı salt-okunur görev `gemini-3.8-flash-low` modeline çözümlendi ve beklenen yapılandırılmış sonucu tek denemede döndürdü. Gemini High için canlı web kanıtı kabulü açık. Önceki sınırlı çağrılar Claude Sonnet 4.6, Claude Opus 4.6 ve GPT-OSS 120B için birer kez başarılı oldu; Gemini 3.8 Flash Medium `rate_limited` döndürdüğünden canlı yanıtı doğrulanmadı. Google'ın [model kataloğu](https://antigravity.google/docs/models), Claude 4.6 ve GPT-OSS 120B için kaldırılma tarihi olarak 2026-11-18'i listeler; yerel CLI kataloğu ise 2026-11-19'da bu modelleri göstermeye devam etti. Bu fark güncel durum gözlemidir; modellere güvenmeden önce hesap erişimini kontrol edin. Gemini 4 Carbon, Argon ve Hydrogen kurulu CLI kataloğunda kullanılamıyordu ve run alias'ı olarak kabul edilmez.
 
 `gemini_pro` ve `gemini_flash_3_7` normal çalıştırma çağrılarında devre dışıdır. Erişim probe'larında unavailable döndüklerinden etkin run araçlarından ve task-profile fallback'lerinden çıkarılmışlardır. Gelecekteki erişim kontrolü için açıkça çağrılan `check_antigravity_subagent` probe şeması bu iki alias'ı kabul etmeye devam eder; probe edilebilir olmaları çalıştırılabilir oldukları anlamına gelmez.
 
@@ -742,6 +754,8 @@ Web niyetli Antigravity çağrıları kanonik web aracı adımını gözlemek i�
 Kanonik hata sınıfları `rate_limited`, `authentication_failure`, `permission_denied`, `timeout`, `server`, `network`, `process_exit`, `process_error` ve `output_limit`’tir; gerçek `exitCode` ve `signal` korunur. Provider circuit anahtarı Antigravity’de model bazlıdır (`antigravity:<model>`), böylece bir modelin geçici hatası diğer Gemini modellerini kapatmaz.
 
 `check_antigravity_subagent`, opt-in `probeModels` ve `probeCapabilities` ile model başına `modelAccess`, `toolFreeResponse`, `workspaceRead` ve `webRead` yeteneklerini seri ve yan etkisiz ölçer. `authValid: null` probe yapılmadığını ifade eder; `--version` başarısı auth başarısı sayılmaz. İzin reddi `unavailable` yerine `not_probed` raporlanır. Varsayılan probe zaman aşımı 300 sn’dir ve `antigravity.probeTimeoutMs` ile ayarlanır.
+
+Kanıt gerektiren Gemini web görevleri, aynı denemede çıktı üreten bir `read_url_content` olayını ve olayda kaydedilen URL ile eşleşen geçerli bir kanıt zarfını gerektirir. Kabul edilen alıntılar karantinada ve doğrulanmamış olarak kalır. Ayrıntı [sağlayıcı doğrulama raporundadır](docs/reports/CODEX_SUBAGENT_GEMINI_DEEPSEEK_DOGRULAMA_2026-11-17.md).
 
 ### Codex sözleşmesi
 
@@ -828,9 +842,9 @@ npm run codex:configure       Bu yerel Codex projesine Hades MCP kaydını kurar
 npm run codex:check           Yerel Codex MCP kaydını denetler
 npm run codex:diagnose        Provider/Vault erişimi olmadan yerel Codex proje kaydını denetler
 npm run verify:local          Sentetik config/Vault ile seri yerel uçtan uca doğrulama
-npm run pilot                 DeepSeek Flash sentetik pilotu
-npm run pilot:flash           DeepSeek Flash sentetik pilotu
-npm run pilot:edit:deepseek   Yapılandırılmış patch doğrulaması tamamlanana dek kapalı
+npm run pilot                 Sentetik görevle canlı DeepSeek Flash çağrısı
+npm run pilot:flash           Aynı canlı DeepSeek Flash pilotu
+npm run pilot:edit:deepseek   Kaynağı değiştirmeden DeepSeek önizlemesini tam içerikle doğrula
 npm run accept:edit:deepseek  Disposable DeepSeek edit kabul adımını yeniden çalıştırır
 npm run smoke                 Geçici sentetik Vault ile MCP araç, resource ve runtime health kontrolleri
 npm run smoke:vault           Gerçek Vault arama/okuma için açık opt-in

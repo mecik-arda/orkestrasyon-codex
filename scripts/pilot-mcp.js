@@ -10,7 +10,7 @@ if (model !== "deepseek_flash") {
   throw new Error("--model deepseek_flash olmalı");
 }
 const transport = new StdioClientTransport({
-  command: "C:\\nvm4w\\nodejs\\node.exe",
+  command: process.execPath,
   args: [path.join(projectRoot, "subagent-bridge", "src", "server.js")],
   cwd: workspace,
   env: {

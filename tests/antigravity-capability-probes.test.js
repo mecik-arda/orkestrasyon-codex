@@ -142,6 +142,13 @@ test("CAP-05: web-read başarısı ve izin reddi ayrı raporlanır", async () =>
   const available = await availableAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
   assert.equal(available.webRead, "available");
   assert.equal(available.failureClass, null);
+  const unobservedAdapter = createProbeAdapter("probe-web-no-tool");
+  const unobserved = await unobservedAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
+  assert.equal(unobserved.webRead, "unavailable");
+  assert.equal(unobserved.failureClass, "unclassified");
+  const wrongUrlAdapter = createProbeAdapter("probe-web-wrong-url");
+  const wrongUrl = await wrongUrlAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
+  assert.equal(wrongUrl.webRead, "unavailable");
   const deniedAdapter = createProbeAdapter("probe-web-denied");
   const denied = await deniedAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
   assert.equal(denied.webRead, "not_probed");
@@ -480,7 +487,7 @@ assert.deepEqual(fs.readFileSync(sentinelPath), sentinelBefore);
 test("CAP-MCP-01: MCP probe girdisi kapalı enum ve strict sınırlarla doğrulanır", () => {
   assert.deepEqual(antigravityProbeSchema.parse({}), { probeModels: [], probeCapabilities: [], workspaceReadTarget: "temp_workspace" });
   assert.equal(antigravityProbeSchema.safeParse({ probeModels: ["gemini_flash_3_8"], probeCapabilities: ["modelAccess"] }).success, true);
-  for (const model of ["gemini_flash_3_8_medium", "claude_opus", "gpt_oss_120b"]) {
+  for (const model of ["gemini_flash_3_8_medium", "gemini_flash_3_8_low", "claude_opus", "gpt_oss_120b"]) {
     assert.equal(antigravityProbeSchema.safeParse({ probeModels: [model], probeCapabilities: ["modelAccess"] }).success, true, model);
   }
   assert.equal(antigravityProbeSchema.safeParse({ probeModels: ["gemini_flash_3_8"], probeCapabilities: ["sandboxStartup"], workspaceReadTarget: "trusted_workspace" }).success, true);

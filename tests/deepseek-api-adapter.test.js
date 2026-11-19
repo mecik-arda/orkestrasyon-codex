@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { checkDeepSeekApi, createDeepSeekApiAdapter } from "../subagent-bridge/src/adapters/deepseek-api-adapter.js";
+import { createMcpToolHandlers } from "../subagent-bridge/src/frontends/mcp/tools.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
 import { createDeepSeekPilotBudget } from "../subagent-bridge/src/services/deepseek-pilot-budget.js";
 import { validateSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
@@ -139,6 +140,86 @@ test("DeepSeek HTTP gövdesi eksik Content-Length ile byte sınırının altınd
     assert.equal(result.metrics.usage.outputTokens, 7);
     assert.equal(validateSubagentResult(result).success, true);
   }
+});
+
+test("DeepSeek MCP kaynak incelemesi HTTP teslimini ve sonuç doğrulamasını ayrı kaydeder", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "deepseek-source-review-"));
+  const previousKey = process.env.DEEPSEEK_API_KEY;
+  process.env.DEEPSEEK_API_KEY = "test-secret-value";
+  t.after(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+    if (previousKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = previousKey;
+  });
+  const relativePath = "value.js";
+  const source = "export const score = 17;";
+  fs.writeFileSync(path.join(root, relativePath), source + "\n");
+  const configurationValue = {
+    ...configuration({ maxRetries: 0 }),
+    packageRoot: root,
+    allowedRoots: [root],
+    statePaths: { logs: path.join(root, "logs"), state: path.join(root, "state"), cache: path.join(root, "cache") },
+    reliability: { maxAttempts: 1, maxSchemaRepairAttempts: 0 }
+  };
+  let lineNumber = 1;
+  let fetchCalls = 0;
+  const deepseek = createDeepSeekApiAdapter(configurationValue, {
+    budget: createBudget().budget,
+    async fetchImplementation(url, options) {
+      fetchCalls += 1;
+      assert.ok(JSON.parse(options.body).messages.some((message) => message.content.includes(source)));
+      const reviewResult = {
+        status: "completed",
+        summary: "The score is 17.",
+        findings: [{
+          title: "Score definition",
+          evidence: "The exported score is set to 17.",
+          impact: "Consumers receive a fixed value.",
+          recommendation: "Keep the constant.",
+          confidence: "high",
+          references: [{ path: relativePath, lineStart: lineNumber, lineEnd: lineNumber }]
+        }],
+        proposed_steps: [],
+        risks: [],
+        questions: [],
+        requires_human_approval: false
+      };
+      return response(validApiPayload(JSON.stringify(reviewResult)));
+    }
+  });
+  const runtime = createBridgeRuntime({ configuration: configurationValue, adapters: { deepseek } });
+  const handler = createMcpToolHandlers({ runtime, trustedWorkspace: root, configuration: configurationValue });
+  const input = {
+    taskId: "test-source-review",
+    role: "reviewer",
+    mode: "read_only",
+    model: "deepseek_flash",
+    objective: "Identify the score definition and cite its line.",
+    workspace: ".",
+    files: [relativePath],
+    contextFiles: [],
+    skills: [],
+    acceptanceCriteria: ["Cite the source line."]
+  };
+
+  const completed = await handler.runDeepSeek(input);
+  assert.equal(completed.isError, false, JSON.stringify(completed));
+  const contract = completed.structuredContent.reviewContract;
+  assert.equal(contract.sourceScopeStatus, "complete");
+  assert.equal(contract.sourceDeliveryStatus, "complete_to_api");
+  assert.equal(contract.outputIntegrity, "complete");
+  assert.equal(contract.taskCompletion, "completed");
+  assert.equal(contract.reviewResultValidated, true);
+  assert.equal(contract.reviewEligibility, "eligible_for_orchestrator_evaluation");
+
+  lineNumber = 999;
+  const rejected = await handler.runDeepSeek(input);
+  assert.equal(rejected.isError, true, JSON.stringify(rejected));
+  assert.equal(rejected.structuredContent.failureClass, "schema_invalid");
+  assert.equal(rejected.structuredContent.reviewContract.sourceDeliveryStatus, "complete_to_api");
+  assert.equal(rejected.structuredContent.reviewContract.reviewResultValidated, false);
+  assert.equal(rejected.structuredContent.reviewContract.reviewEligibility, "unavailable");
+  assert.equal(fetchCalls, 2);
 });
 
 test("DeepSeek response body byte ceiling stops a single oversized chunk and ignores Content-Length", async () => {

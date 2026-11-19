@@ -2,6 +2,7 @@ import { createProviderEnvironment, runProcess, createExecutionHandle, killProce
 import { createAdapter } from "./agent-adapter-base.js";
 import { createFailureSubagentResult, createSuccessSubagentResult, capabilityFailureClassValues, operatingSystemErrorCodeValues } from "../schemas/core-schemas.js";
 import { prependExecutionMetadata } from "../services/execution-metadata.js";
+import { hashSourceUrl, providerWebEvidenceCarrierSchema } from "../web-evidence.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,6 +14,7 @@ const ANTIGRAVITY_MODEL_MAP = {
   gemini_flash_3_7: "gemini-3.7-flash-high",
   gemini_flash_3_8: "gemini-3.8-flash-high",
   gemini_flash_3_8_medium: "gemini-3.8-flash-medium",
+  gemini_flash_3_8_low: "gemini-3.8-flash-low",
   claude_sonnet: "claude-sonnet-4-6",
   claude_opus: "claude-opus-4-6-thinking",
   gpt_oss_120b: "gpt-oss-120b-medium"
@@ -26,7 +28,7 @@ const READ_ONLY_INSTRUCTION = `
 === READ-ONLY MODE ===
 You MUST NOT create, modify, or delete any files in the workspace.
 You MUST NOT execute any commands that change the filesystem state.
-You may only read, analyze, and report on existing files.
+Only read, analyze, and report on the resources needed for the task.
 Use only built-in workspace read tools to inspect files.
 Do not call MCP, terminal commands, or built-in write tools.
 If asked to write or modify files, decline and explain that you are in read-only mode.
@@ -569,6 +571,14 @@ function isReadUrlToolName(value) {
   return value === "read_url" || value === "read_url_content";
 }
 
+function tryHashWebSource(sourceUrl) {
+  try {
+    return hashSourceUrl(sourceUrl);
+  } catch {
+    return null;
+  }
+}
+
 export function extractAntigravityStreamTrace(stdout, stderr = "") {
   let terminalResult = null;
   let readUrlToolAvailable = null;
@@ -576,6 +586,7 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
   let readUrlSucceeded = false;
   let readUrlPermissionDenied = false;
   let readUrlFailed = false;
+  const observedSourceHashes = new Set();
   const lines = String(stdout || "").split(/\r?\n/u).filter((line) => line.trim().length > 0);
   for (const line of lines) {
     let event;
@@ -599,8 +610,13 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
     if (toolError) {
       if (readUrlErrorIsPermissionDenied(toolError)) readUrlPermissionDenied = true;
       else readUrlFailed = true;
-    } else {
+    } else if (typeof step.tool_info?.output === "string" && step.tool_info.output.trim().length > 0) {
       readUrlSucceeded = true;
+      const parameters = step.tool_info.parameters;
+      const sourceHash = tryHashWebSource(parameters?.Url ?? parameters?.url);
+      if (sourceHash) observedSourceHashes.add(sourceHash);
+    } else {
+      readUrlFailed = true;
     }
   }
   if (/(?:read_url_content|\bread_url\b)/i.test(String(stderr)) && /soft[- ]denied|permission denied|permission_denied|requires? approval|approval required|cannot prompt|auto-denied/i.test(String(stderr))) {
@@ -618,9 +634,19 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
               ? "not_invoked"
               : "not_observed";
   return {
-    resultText: terminalResult ? extractAntigravityResult(JSON.stringify(terminalResult)) : null,
-    webReadStatus
+    resultText: terminalResult && terminalResult.status !== "ERROR" ? extractAntigravityResult(JSON.stringify(terminalResult)) : null,
+    webReadStatus,
+    observedSourceHashes
   };
+}
+
+function claimedWebSourceHash(resultText) {
+  try {
+    const parsed = providerWebEvidenceCarrierSchema.safeParse(JSON.parse(resultText));
+    return parsed.success ? tryHashWebSource(parsed.data.webEvidence?.sourceUrl) : null;
+  } catch {
+    return null;
+  }
 }
 
 function mapCategoryToSubagentError(errorClass, error, backend, model, durationMs, retries, exitCode = null, signal = null, diagnostics = null) {
@@ -675,10 +701,10 @@ function probeFailureStatus(failureClass) {
   return failureClass === "permission_denied" || failureClass === "policy_violation" ? "not_probed" : "unavailable";
 }
 
-function runCapabilityProbeProcess(executable, execArgs, { workspace, model, prompt, timeoutMs }) {
+function runCapabilityProbeProcess(executable, execArgs, { workspace, model, prompt, timeoutMs, webReadTrace = false }) {
   return runProcess(executable, [
     ...execArgs,
-    "--output-format", "json",
+    "--output-format", webReadTrace ? "stream-json" : "json",
     "--model", model,
     "--add-dir", workspace,
     "--sandbox",
@@ -693,9 +719,15 @@ function runCapabilityProbeProcess(executable, execArgs, { workspace, model, pro
   });
 }
 
-function probeResponse(processResult) {
+function probeResponse(processResult, webReadTrace = false) {
   const classification = classifyAntigravityError(null, processResult.code, processResult.stdout, processResult.stderr, processResult.signal);
   if (!classification.valid) return { failureClass: classifyProbeFailure(classification.errorClass), text: "" };
+  if (webReadTrace) {
+    const trace = extractAntigravityStreamTrace(processResult.stdout, processResult.stderr);
+    if (trace.webReadStatus === "permission_denied") return { failureClass: "permission_denied", text: "" };
+    const observedExpectedSource = trace.observedSourceHashes.has(tryHashWebSource(WEB_READ_PROBE_URL));
+    return { failureClass: null, text: observedExpectedSource ? trace.resultText || "" : "" };
+  }
   return { failureClass: null, text: extractAntigravityResult(processResult.stdout) || "" };
 }
 
@@ -782,7 +814,10 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
         : (configuration?.antigravity?.probeTimeoutMs || DEFAULT_PROBE_TIMEOUT_MS);
       const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agy-capability-probe-"));
       let trustedProbeWorkspace = null;
-      const runProbe = async (prompt, probeWorkspace = workspace) => probeResponse(await runCapabilityProbeProcess(executable, execArgs, { workspace: probeWorkspace, model: resolved.model, prompt, timeoutMs: probeTimeoutMs }));
+      const runProbe = async (prompt, probeWorkspace = workspace, webReadTrace = false) => probeResponse(
+        await runCapabilityProbeProcess(executable, execArgs, { workspace: probeWorkspace, model: resolved.model, prompt, timeoutMs: probeTimeoutMs, webReadTrace }),
+        webReadTrace
+      );
       const applyOutcome = (capability, outcome, expected) => {
         if (outcome.failureClass) {
           const status = probeFailureStatus(outcome.failureClass);
@@ -843,7 +878,7 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
           }
         }
         if (requested.includes("webRead")) {
-          const outcome = await runProbe(`Use the read_url_content tool to fetch ${WEB_READ_PROBE_URL} and reply with the page heading and nothing else. The required permission action is read_url.`);
+          const outcome = await runProbe(`Use the read_url_content tool to fetch ${WEB_READ_PROBE_URL} and reply with the page heading and nothing else. The required permission action is read_url.`, workspace, true);
           applyOutcome("webRead", outcome, WEB_READ_PROBE_MARKER.test(outcome.text));
         }
       } catch (error) {
@@ -1013,7 +1048,14 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
         args.push("--mode", isReadOnly ? "plan" : "accept-edits");
 
         const prompt = prependExecutionMetadata(
-          isReadOnly ? `${READ_ONLY_INSTRUCTION}\n${WEB_EVIDENCE_OUTPUT_INSTRUCTION}\n${request.prompt}` : request.prompt,
+          isReadOnly
+            ? [
+                READ_ONLY_INSTRUCTION,
+                WEB_EVIDENCE_OUTPUT_INSTRUCTION,
+                ...(webReadTrace ? ["This task requires a successful read_url_content call before answering. If the read fails or is unavailable, do not invent an excerpt or claim to have read the source."] : []),
+                request.prompt
+              ].join("\n")
+            : request.prompt,
           { backend: "antigravity", requestedModel: request.model, resolvedModel: model.model, mode: request.mode }
         );
 
@@ -1118,6 +1160,26 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
             );
             if (webReadTrace) failure.metrics.webReadStatus = webReadStatus || "not_observed";
             return failure;
+          }
+
+          const evidenceSourceHash = webReadStatus === "used" ? claimedWebSourceHash(resultText) : null;
+          if (evidenceSourceHash && !streamTrace.observedSourceHashes.has(evidenceSourceHash)) {
+            return createFailureSubagentResult("antigravity", model.model, {
+              error: "web evidence source was not observed on this attempt",
+              reason: "web_evidence_invalid",
+              exitCode: processResult.code,
+              durationMs: Date.now() - startedAt,
+              metrics: {
+                webReadStatus,
+                diagnostics: createAttemptDiagnostics("evidence_invalid", null, {
+                  webEvidenceFailureCode: "web_source_not_observed",
+                  settingsLockWaitMs,
+                  providerExecutionMs,
+                  stdoutBytes: Buffer.byteLength(processResult.stdout, "utf8"),
+                  stderrBytes: Buffer.byteLength(processResult.stderr, "utf8")
+                })
+              }
+            });
           }
 
           return createSuccessSubagentResult("antigravity", model.model, {

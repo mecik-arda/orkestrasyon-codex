@@ -102,6 +102,20 @@ async function waitForBatch(service, batchId, statuses, timeoutMs = 8000) {
   throw new Error(`timeout waiting for batch statuses: ${statuses.join(", ")}`);
 }
 
+async function waitForSignal(signalPromise, description, timeoutMs = 8000) {
+  let timeoutHandle;
+  try {
+    await Promise.race([
+      signalPromise,
+      new Promise((resolve, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error(`timeout waiting for ${description}`)), timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
 test("V2-STATE: interrupted batches recover as unknown without releasing reservations", async (t) => {
   const { root } = createWorkspace(t);
   const registry = createParallelBatchRegistry({ stateDirectory: path.join(root, "state", "parallel-batches") });
@@ -607,6 +621,8 @@ test("V2-STATE: promotion recovery runs while holding the workspace edit lock", 
 
 test("V2-STATE: explicit cancellation stops a running batch and cancels child executions", async (t) => {
   let releaseRun = null;
+  let signalRunStarted;
+  const runStarted = new Promise((resolve) => { signalRunStarted = resolve; });
   const { service, workspace } = createFixture(t, (request) => new Promise((resolve) => {
     releaseRun = () => resolve({
       ok: true,
@@ -621,10 +637,11 @@ test("V2-STATE: explicit cancellation stops a running batch and cancels child ex
       metrics: { retries: 0, totalCostUsd: 0.01 },
       observedWorkspace: request.trustedWorkspace
     });
+    signalRunStarted();
   }));
   const prepared = await service.prepare({ objective: "x", batchMaxReservedCostUsd: 1, tasks: [readOnlyTask()] });
   const started = await service.start({ planId: prepared.planId, planHash: prepared.planHash });
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await waitForSignal(runStarted, "provider execution to start");
   const running = await service.getBatch({ batchId: started.batchId });
   assert.equal(running.summary.progress.percentage, 0);
   assert.equal(running.summary.progress.runningCount, 1);

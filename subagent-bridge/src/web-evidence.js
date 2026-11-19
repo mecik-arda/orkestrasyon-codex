@@ -169,7 +169,7 @@ function hasMalformedPercentEncoding(value) {
   return /%(?![0-9a-f]{2})/i.test(value);
 }
 
-function hashSourceUrl(sourceUrl) {
+export function hashSourceUrl(sourceUrl) {
   return crypto.createHash("sha256").update(canonicalizeSourceUrl(sourceUrl), "utf8").digest("hex");
 }
 

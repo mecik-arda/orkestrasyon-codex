@@ -1,5 +1,9 @@
 # Codex–Hades entegrasyonu: yeniden değerlendirme
 
+## 2026-11-19 — Pilota özel canlı salt okunur batch
+
+Windows pilot worktree'sinde Codex app-server, ayrı Hades runtime config ve state ile açıldı. Workspace identity'nin iki kök hash'i eşleşti ve rules resource `match` döndürdü. Batch aracı pilot kataloğunda sunuldu. Ayrı onayla aynı Hades sürecinde başlatılan tek görev bir denemede `completed` oldu, batch `result_ready` döndü ve sonuç `6 × 7 = 42` olarak doğrulandı. Kaynakta dosya değişikliği yoktu. Bu çalışma salt okunur batch kapsamındaydı. [Süreç sınırı, bütçe ve terminal kanıtı](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md#2026-11-19-canlı-salt-okunur-batch-pilotu).
+
 ## 2026-11-17 — Başlangıç onarımı ve public aktarım
 
 Yerel onarımda eski oturum için native `account/read`, `thread/resume`, Hades bağlantısı ve iki resource okuması başarılı oldu; kullanıcı normal CLI açılışını ayrıca doğruladı. Bu gözlem çalışan commit/config attestation’ı değildir. Public aktarım yalnız güncel uzak tabandaki ilgili updater, regresyon ve belgelere uygulanır; eski ayrışmış geçmişler veya kullanıcıya ait yollar aktarılmaz. `.codex`-relative `cwd=".."` varsayımı geçerli değildir. Güncel davranış ve test kanıtı [başlangıç onarım raporundadır](CODEX_MCP_CALISMA_DIZINI_VE_ACCOUNT_READ_ONARIMI_2026-11-17.md).

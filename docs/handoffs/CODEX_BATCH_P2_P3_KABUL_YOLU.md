@@ -1,4 +1,16 @@
 # Codex batch P2/P3 kabul yolu
+
+## 2026-11-19 canlı salt okunur batch pilotu
+
+Windows'ta `codex-edit-batch-pilot` worktree'si, pilota özel Hades runtime config ve state ile çalıştırıldı. Workspace identity'deki iki özet kanonik pilot köküyle eşleşti ve rules resource `match` döndürdü. `startup_context` kullanılamıyordu. Pilotun `parallelBatch.enabled` değeri açıktı. Edit ve atomik entegrasyon kapalıydı.
+
+İlk planı hazırlayan Hades süreci kapandıktan sonra farklı süreçte başlatma `plan_context_unavailable` ile reddedildi. Diskteki plan kaydı, bellekteki görev sözleşmesini geri yükleyemedi. Yeni plan hazırlandı ve planı oluşturan Hades süreci açık tutuldu. Kullanıcı yeni plan kimliği ve hash'i için ayrı onay verdikten sonra batch aynı süreçte bir kez başlatıldı.
+
+- Batch `3d5473a19cc8109473998656af0cb53b` terminal `result_ready` durumuna ulaştı. Tek görev `completed`, özet durumu `full`, sonuç `6 × 7 = 42`, hata sınıfı `null` ve değişen dosya sayısı sıfırdı. Çalışma kaydı bir adapter denemesi ve 14,7 saniye görev süresi gösterdi.
+- Görev, yalnız [aritmetik fixture](../../tests/fixtures/parallel-batch-acceptance.json) için Codex `read_only` rotasında `gpt-6.1-sol` istedi. Plan 4.096 bayt kaynak snapshot ve 4.096 bayt toplam stdout/stderr sınırı, deneme başına 60 saniye ve en çok iki adapter denemesi bildirdi.
+- Batch-local bütçe tavanı 1,00 USD idi. 0,20 USD tahmini rezerv terminal durumda `unknownReservedUsd` alanında kaldı. Ölçülmüş sağlayıcı maliyeti bilinmiyor.
+
+Bu koşu Codex app-server üzerinden canlı plan hazırlama, ayrı onay, aynı Hades sürecinde başlatma ve terminal sonucu okuma akışını doğruladı. Kapsam tek salt okunur görevdi. Edit ve kaynak entegrasyonu önceki kabul kayıtlarında ayrı ele alınır. Ortak runtime config ve sürümlü policy bu koşuda değişmedi.
 2026-11-05 güncel kabul durumu: P2/P3/P4 özgün plan kapsamındaki işlevsel kabuller tamamlandı. P2 recovery ayrı süreçli Windows testlerinde gerçek üretim recovery zinciriyle doğrulandı; bu canlı Hades recovery çağrısı değildir. Claude P1b task_json_parse_invalid ile başarısız ve ertelenmiştir. Son GPT-6.1-Sol incelemesi kendi exact 10 dosyalı snapshot’ıyla sınırlı; sonraki üç düzeltme yerel testlerle doğrulandı fakat bağımsız follow-up incelemesi yapılmadı. Güncel doğal kaynak kapsamı preflight’ta engellidir, payload teslim edilmedi. Son tam yerel doğrulama ve kapsam kaydı inceleme paketindedir; bu kayıtlar genel bağımsız denetim veya koşulsuz geçiş kapanışı değildir.
 
 

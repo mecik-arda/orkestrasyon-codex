@@ -1,5 +1,9 @@
 # Codex–Hades entegrasyonu: yeniden değerlendirme
 
+## 2026-11-22 — PR #2 çatışma uzlaştırması
+
+Başlangıç GitHub karşılaştırması main (213b12d679559f79b6c3d8ab7bd556abf9008a1a) ile codex/hades-codex-startup-fix (4eca3d2bdde65006053717bcc8c9f0434f8d85d1) arasında 9 commit ahead ve 1 commit behind gösterdi. GitHub PR #2'de README, geçiş planı, durum indeksi ve bu rapor için çatışmalar bildirdi. Çözümde daha yeni feature dalı kabul/yayın kayıtları korundu; launcher yönergelerinin feature README'sinde bulunduğu doğrulandı. Bu uzlaştırma feature dalını günceller; PR #2'yi main'e merge etmez. Kullanıcının kararı gereği hosted CI kabul kapısı değildir.
+
 ## 2026-11-21 — PR #2 yayın durumu
 
 GitHub karşılaştırması `main` dalını `213b12d679559f79b6c3d8ab7bd556abf9008a1a`, feature dalı `codex/hades-codex-startup-fix` dalını `95c807b96facdf3e424c0fd087b4ccfc49f9754a` üzerinde gösterdi. PR #2 `main` hedefiyle açık; karşılaştırmada feature dalı 8 commit ahead ve 1 commit behind idi. PR #2 içindeki değişiklikler `main`'e alınmış değildir. Kullanıcının talimatıyla hosted CI bu geçişin kabul kapısı değildir; bu kayıtta kontrol sonuçları yayın kararı için kullanılmadı. PR'ı birleştirme işlemi yapılmadı. Bu bilgi, mevcut kişisel `.codex/config.toml` değişikliğini kapsam veya commit etmez.

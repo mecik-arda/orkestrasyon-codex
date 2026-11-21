@@ -16,7 +16,7 @@ const benchmarkTimeoutMs = 60000;
 const standardStageTimeoutMs = 180000;
 const expectedPackageScripts = {
   "verify:ci": "node scripts/verify-project-ci.js",
-  test: "node --test --test-timeout=120000 tests/*.test.js && node --test --test-timeout=35000 tests/performance/memory-search.test.js",
+  test: "node --test --test-concurrency=2 --test-timeout=120000 tests/*.test.js && node --test --test-concurrency=1 --test-timeout=35000 tests/performance/memory-search.test.js",
   smoke: "node scripts/smoke-mcp.js",
   verify: "node scripts/verify-project.js",
   "verify:local": "node scripts/verify-local.js"
@@ -505,18 +505,18 @@ export function buildVerificationStagePlan(projectRoot) {
     {
       id: "test-suite",
       packageScript: "npm test",
-      command: `node --test --test-timeout=120000 tests/*.test.js (${testFiles.length} files)`,
+      command: `node --test --test-concurrency=2 --test-timeout=120000 tests/*.test.js (${testFiles.length} files)`,
       executable: node,
-      args: ["--test", "--test-timeout=120000", testReporter, "--test-reporter-destination=stdout", ...testFiles],
+      args: ["--test", "--test-concurrency=2", "--test-timeout=120000", testReporter, "--test-reporter-destination=stdout", ...testFiles],
       timeoutMs: completeStageTimeoutMs,
       testFiles
     },
     {
       id: "test-benchmark",
       packageScript: "npm test",
-      command: "node --test --test-timeout=35000 tests/performance/memory-search.test.js",
+      command: "node --test --test-concurrency=1 --test-timeout=35000 tests/performance/memory-search.test.js",
       executable: node,
-      args: ["--test", "--test-timeout=35000", testReporter, "--test-reporter-destination=stdout", "tests/performance/memory-search.test.js"],
+      args: ["--test", "--test-concurrency=1", "--test-timeout=35000", testReporter, "--test-reporter-destination=stdout", "tests/performance/memory-search.test.js"],
       timeoutMs: benchmarkTimeoutMs,
       testFiles: ["tests/performance/memory-search.test.js"]
     },

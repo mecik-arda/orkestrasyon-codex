@@ -428,6 +428,38 @@ test("CC-AC-14e: rate_limited kanonik sınıfı runtime retry ve attempt telemet
   assert.equal(result.metrics.attempts.every((attempt) => attempt.failureClass === "rate_limited"), true);
 });
 
+test("CC-RUNTIME-15: devre dışı Claude Code backend adapter çağrısından önce reddedilir", async (t) => {
+  const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-disabled-workspace-"));
+  const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "claude-disabled-state-"));
+  t.after(() => fs.rmSync(workspaceRoot, { recursive: true, force: true }));
+  t.after(() => fs.rmSync(stateRoot, { recursive: true, force: true }));
+  let adapterCalls = 0;
+  const adapter = {
+    id: "claude_code",
+    capabilities: { canRead: true, canWrite: true, supportsSandbox: false, supportsModelSelection: true },
+    async execute() {
+      adapterCalls += 1;
+      return createSuccessSubagentResult("claude_code", "sonnet", { result: "unexpected" });
+    }
+  };
+  const configuration = {
+    packageRoot: process.cwd(),
+    statePaths: {
+      logs: path.join(stateRoot, "logs"),
+      state: path.join(stateRoot, "state"),
+      cache: path.join(stateRoot, "cache")
+    },
+    observability: { maxMetricFileBytes: 65536 },
+    claude_code: { enabled: false, allowedModes: ["read_only"], defaultMode: "read_only" }
+  };
+  const runtime = createBridgeRuntime({ configuration, adapters: { claude_code: adapter }, sleep: async () => {} });
+  const result = await runtime.run({ target: "native_claude", model: "sonnet", prompt: "inspect", mode: "read_only", trustedWorkspace: workspaceRoot, caller: "test", delegationDepth: 0 });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "provider_disabled");
+  assert.equal(result.metrics.adapterAttempts, 0);
+  assert.equal(adapterCalls, 0);
+});
+
 
 test("CC-VERIFY-09: auth durum komutu JSON ciktisindan cozulur", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "claude-auth-probe-"));

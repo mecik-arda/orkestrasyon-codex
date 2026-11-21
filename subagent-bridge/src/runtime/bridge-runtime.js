@@ -835,6 +835,9 @@ export function createBridgeRuntime({ configuration, statePaths, host = {}, adap
     if (!adapter) {
       return createRuntimeFailure(route.backend, route.model, `adapter unavailable: ${route.backend}`);
     }
+    if (runtimeConfiguration[route.backend]?.enabled === false) {
+      return createRuntimeFailure(route.backend, route.model, `provider is disabled by active runtime configuration: ${route.backend}`, { reason: "provider_disabled" });
+    }
     const profile = input.profile ? runtimeConfiguration.orchestration?.taskProfiles?.[input.profile] : null;
     if (profile?.webEvidenceRequired === true && webEvidenceMode === "repair") webEvidenceMode = "strict";
     if (input.target === "profile" && (!profile || profile.mode !== input.mode)) {

@@ -1,5 +1,13 @@
 # Codex–Hades entegrasyonu: yeniden değerlendirme
 
+## 2026-11-21 — Kapalı backend dispatch kapısı
+
+Plan uyum denetiminde `enabled=false` ayarının health çıktısını `disabled` yaptığı, fakat `runInternal` dispatch yolunun aynı ayarı denetlemediği bulundu. Doğrudan `native_claude`/`claude_code` hedefi runtime üzerinden çalıştırılabilir durumdaydı; böylece kapalı işaretlenen sağlayıcı adapter'a ulaşabiliyordu. Runtime artık route çözüldükten ve adapter bulunma kontrolünden sonra, diğer dispatch hazırlıklarından önce ilgili backend için açık `enabled=false` değerini `provider_disabled` ile reddediyor. Bu, fallback'i başlatmadan önce başarısız sonuç verir; adapter deneme sayısı sıfırdır.
+
+Kullanıcının Claude Code aboneliği olmadığı kararıyla `config/agents.json` dağıtım şablonundaki `claude_code.enabled` false yapıldı. Runtime regresyonu sahte adapter'ın hiç çağrılmadığını ve `adapterAttempts=0` olduğunu doğrular; config regresyonu dağıtım varsayılanını sınar. Bu değişiklik kullanıcının kişisel `~/.config/subagent-bridge/agents.json` dosyasını veya çalışan Hades sürecini değiştirmez. Antigravity üzerinden sunulan Claude model alias'ları ayrı sağlayıcı yoludur ve bu değişiklik onları kapatmaz.
+
+Üç tam suite denemesinde farklı süreç/Git yoğun testler aralıklı başarısız oldu; ilgili testler izole çalıştırmada geçti. Bunu test dosyası eşzamanlılığının makine kaynakları üzerindeki baskısı olarak değerlendirmek makul, fakat her failure için kesin kök neden kanıtlanmadı. `npm test` ve `verify:local` test-suite aşaması artık aynı iki-dosya concurrency sınırını, seri performans benchmark'ı da concurrency 1 ayarını kullanıyor. `verify:local` bu ayarla tam geçti: verify-ci; 96 test dosyasında 1.268 başarılı, 5 koşullu atlama, 0 başarısızlık; benchmark 7.963 ms; sentetik MCP smoke; sentetik config/Vault verify. Toplam süre 470.060 ms ve kaynak snapshot'ı baştan sona aynı kaldı. Gerçek Vault veya provider kimlik bilgileri kullanılmadı. Hedefli config/runtime/verify-local testleri 101/101 geçti. Kişisel config ve çalışan Hades süreci değiştirilmedi.
+
 ## 2026-11-21 — Antigravity web izi ve tam yerel doğrulama
 
 Akış izleyicisi, yalnız `DONE` durumundaki `read_url`/`read_url_content` olaylarını görerek tamamlanmış kaynak okuması sayıyordu. Antigravity CLI `ACTIVE` olayı üretip aynı çalıştırmada tamamlanmış olay üretmezse önceki sınıflandırma `not_invoked` sonucuna düşebiliyordu. İzleyici artık `ACTIVE` olayını başlatılmış fakat tamamlanmış kanıtı gözlenmemiş durum olarak `not_observed` sınıfına alıyor; URL hash'ini veya başarı kanıtını yalnız tamamlanmış, çıktılı `DONE` olayından üretiyor. Geçmiş canlı denemelerin ham olay akışı tutulmadığından bu kusurun önceki High sonuçlarını açıklayıp açıklamadığı belirlenemiyor.

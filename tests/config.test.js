@@ -180,6 +180,7 @@ test("DeepSeek Flash canonical API kimliğine bağlıdır ve OpenCode konfigüra
   assert.equal(Object.hasOwn(policy.deepseek, "openCodeModel"), false);
   const agents = JSON.parse(fs.readFileSync(path.resolve("config/agents.json"), "utf8"));
   assert.deepEqual(Object.keys(agents.agents).sort(), ["antigravity", "claude_code", "codex"]);
+  assert.equal(agents.agents.claude_code.enabled, false);
 });
 
 test("eski v2 yapılandırması OpenCode hedeflerini bellek içinde çıkarır ve güncel şema strict kalır", (context) => {

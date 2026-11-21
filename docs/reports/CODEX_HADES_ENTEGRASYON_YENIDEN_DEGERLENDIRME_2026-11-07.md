@@ -1,5 +1,9 @@
 # Codex–Hades entegrasyonu: yeniden değerlendirme
 
+## 2026-11-21 — PR #2 yayın durumu
+
+GitHub karşılaştırması `main` dalını `213b12d679559f79b6c3d8ab7bd556abf9008a1a`, feature dalı `codex/hades-codex-startup-fix` dalını `95c807b96facdf3e424c0fd087b4ccfc49f9754a` üzerinde gösterdi. PR #2 `main` hedefiyle açık; karşılaştırmada feature dalı 8 commit ahead ve 1 commit behind idi. PR #2 içindeki değişiklikler `main`'e alınmış değildir. Kullanıcının talimatıyla hosted CI bu geçişin kabul kapısı değildir; bu kayıtta kontrol sonuçları yayın kararı için kullanılmadı. PR'ı birleştirme işlemi yapılmadı. Bu bilgi, mevcut kişisel `.codex/config.toml` değişikliğini kapsam veya commit etmez.
+
 ## 2026-11-21 — Tam plan uygulama denetimi
 
 Bu denetim, `docs/plans/CODEX_DESKTOP_UCTAN_UCA_GECIS_PLANI_2026-10-18.md` kabul maddelerini mevcut feature checkout'u, güncel rapor kayıtları ve salt-okunur canlı workspace kaynaklarıyla karşılaştırdı. Önceki canlı provider görevleri ve tam test paketi tekrarlanmadı.

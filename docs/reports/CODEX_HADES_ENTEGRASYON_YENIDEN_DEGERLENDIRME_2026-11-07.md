@@ -4,6 +4,23 @@
 
 Başlangıç GitHub karşılaştırması main (213b12d679559f79b6c3d8ab7bd556abf9008a1a) ile codex/hades-codex-startup-fix (4eca3d2bdde65006053717bcc8c9f0434f8d85d1) arasında 9 commit ahead ve 1 commit behind gösterdi. GitHub PR #2'de README, geçiş planı, durum indeksi ve bu rapor için çatışmalar bildirdi. Çözümde daha yeni feature dalı kabul/yayın kayıtları korundu; launcher yönergelerinin feature README'sinde bulunduğu doğrulandı. Bu uzlaştırma feature dalını günceller; PR #2'yi main'e merge etmez. Kullanıcının kararı gereği hosted CI kabul kapısı değildir.
 
+## 2026-11-22 — Gemini High web kabul denemesi ve açık temizlik kanıtı
+
+Feature worktree'de `gemini_flash` / `gemini-3.8-flash-high` için tek bounded, salt-okunur kamuya açık web kabul görevi çalıştırıldı. İstek yalnız IANA'nın reserved domains sayfasını `read_url_content` ile okumayı hedefliyordu; yerel dosya, kabuk, MCP veya yazma erişimi istenmedi. Host sonucu kabul koşulunu karşılamadı:
+
+- İlk adapter denemesi `web_evidence_invalid` / `web_evidence_missing` ile sonlandı; süreç exit 0 olsa da tamamlanmış web aracı kanıtı ve kanıt zarfı yoktu.
+- Host'un yapılandırılmış tek retry denemesi `timeout` ile bitti. Nihai görev `taskCompletion=partial`, `outputIntegrity=unknown`, `webReadStatus=not_invoked`; `exitCode` yok, toplam iki adapter denemesi ve bir retry olarak kaydedildi. Maliyet `null`; fatura tutarı bilinmiyor.
+- Bu nedenle Gemini High model yürütme kabulini geriye dönük değiştirmeyen ayrı `web_research` kabul kapısı başarısız/kanıtsız kaldı. Aynı web görevi tekrar edilmedi.
+- Sonraki capability tanısı `modelAccess=available`, `webRead=unavailable`, `failureClass=unclassified` döndürdü. Bu, model erişimini doğrular; web izninin neden kullanılamadığını açıklamaz ve başarılı web kanıtının yerine geçmez.
+
+**Karar:** Yeni kaynak kusuru kanıtı yok; Hades'in tamamlanmış web olayı/kanıt gereksinimi fail-closed çalıştı. Platformun web aracı/izin davranışının kök nedeni bu gözlemlerle belirlenemedi. Ek izin, global Antigravity ayarı veya araç politikası değiştirilmedi; yeni model görevi başlatılmamalı, web capability yeniden değerlendirilmesi için izin/araç engeli ayrıca çözülmelidir.
+
+### GPT-OSS probe cleanup incelemesi
+
+Kaynakta capability probe'un `finally` bloğu, probe workspace'lerini `fs.promises.rm` ile sınırlı Windows retry ayarlarıyla kaldırıyor. Herhangi bir silme reddedilirse probe `failureClass=process_error` kaydediyor; workspace-read istendiyse o capability de unavailable oluyor. Var olan testler normal/sentinel cleanup başarısını sınar. Önceki GPT-OSS `process_error` kaydı bu kaynak dalıyla tutarlıdır, ancak hangi dizinin kaldığına veya artığın hâlâ mevcut olduğuna dair tarihsel kanıt yoktur. Eski olay artık geriye dönük doğrulanamaz. Yeni bir GPT-OSS provider/probe çağrısı yapılmadı; kaynakta tekrarlanabilir bir kusur gösterilmediğinden bu turda cleanup davranışı değiştirilmedi.
+
+Bu bölüm için kaynak kodu, policy ve kişisel config değiştirilmedi; yalnız bu rapor ve README'deki güncel durum özeti belgelendi. Tam test/verify çalıştırılmadı; doküman diff'i ve whitespace kontrolü yapıldı. PR #2 birleştirilmedi; kullanıcı talimatıyla PR son adımdır.
+
 ## 2026-11-21 — PR #2 yayın durumu
 
 GitHub karşılaştırması `main` dalını `213b12d679559f79b6c3d8ab7bd556abf9008a1a`, feature dalı `codex/hades-codex-startup-fix` dalını `95c807b96facdf3e424c0fd087b4ccfc49f9754a` üzerinde gösterdi. PR #2 `main` hedefiyle açık; karşılaştırmada feature dalı 8 commit ahead ve 1 commit behind idi. PR #2 içindeki değişiklikler `main`'e alınmış değildir. Kullanıcının talimatıyla hosted CI bu geçişin kabul kapısı değildir; bu kayıtta kontrol sonuçları yayın kararı için kullanılmadı. PR'ı birleştirme işlemi yapılmadı. Bu bilgi, mevcut kişisel `.codex/config.toml` değişikliğini kapsam veya commit etmez.

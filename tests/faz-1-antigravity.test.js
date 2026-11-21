@@ -309,6 +309,9 @@ test("AG-AC-15b: JSON response alanı final sonucu döndürür ve boş yanıt re
     "architecture complete"
   );
   assert.equal(extractAntigravityResult('{"status":"SUCCESS","response":""}'), null);
+  for (const status of ["ERROR", "CANCELED", "INTERRUPTED", "INVALID"]) {
+    assert.equal(extractAntigravityResult(JSON.stringify({ status, response: "partial output" })), null, status);
+  }
 });
 
 test("AG-AC-16a: structured_output carrier tercih edilir ve boş kanıt null olur", () => {
@@ -379,6 +382,23 @@ test("AG-AC-16e: stream-json read_url eventinden yalnız izin durumunu çıkarı
   assert.equal(extractAntigravityStreamTrace(usedStream.replace("RAW_PAGE_SENTINEL", "")).webReadStatus, "failed");
   assert.equal(extractAntigravityStreamTrace(usedStream.replace('"status":"SUCCESS"', '"status":"ERROR"')).resultText, null);
 
+  const activeRead = extractAntigravityStreamTrace([
+    JSON.stringify({ event: "init", init: { tools: ["read_url_content"] } }),
+    JSON.stringify({
+      event: "step_update",
+      step_update: {
+        state: "ACTIVE",
+        step_type: "tool",
+        tool_name: "read_url_content",
+        tool_info: { parameters: { Url: "https://example.com" }, output: "UNCOMPLETED_PAGE_SENTINEL" }
+      }
+    }),
+    JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "plain" } })
+  ].join("\n"));
+  assert.equal(activeRead.webReadStatus, "not_observed");
+  assert.equal(activeRead.observedSourceHashes.size, 0);
+  assert.equal(JSON.stringify(activeRead).includes("UNCOMPLETED_PAGE_SENTINEL"), false);
+
   const internalToolNotInvoked = [
     JSON.stringify({ event: "init", init: { tools: ["read_url_content", "read_file"] } }),
     JSON.stringify({ event: "result", result: { status: "SUCCESS", response: "plain" } })
@@ -416,7 +436,7 @@ test("Antigravity web kanıtının URL'si aynı denemede açılan kaynakla eşle
     import { createBridgeRuntime } from ${JSON.stringify(runtimeUrl.href)};
     const [root, fixturePath] = process.argv.slice(1);
     const outcomes = [];
-    for (const scenario of ["web-source-match", "web-source-mismatch", "web-source-missing"]) {
+    for (const scenario of ["web-source-match", "web-source-mismatch", "web-source-missing", "web-source-interrupted"]) {
       const configuration = {
         allowedRoots: [root],
         statePaths: { state: path.join(root, "state"), logs: path.join(root, "logs"), cache: path.join(root, "cache") },
@@ -434,15 +454,18 @@ test("Antigravity web kanıtının URL'si aynı denemede açılan kaynakla eşle
     encoding: "utf8",
     timeout: 12000
   });
-  const [accepted, ...rejected] = JSON.parse(output);
+  const [accepted, mismatch, missing, interrupted] = JSON.parse(output);
   assert.equal(accepted.ok, true);
   assert.equal(accepted.webEvidence.verificationStatus, "unverified");
-  for (const result of rejected) {
+  for (const result of [mismatch, missing]) {
     assert.equal(result.ok, false);
     assert.equal(result.reason, "web_evidence_invalid");
     assert.equal(result.metrics.diagnostics.webEvidenceFailureCode, "web_source_not_observed");
     assert.equal(result.webEvidence, undefined);
   }
+  assert.equal(interrupted.ok, false);
+  assert.equal(interrupted.reason, "process_error");
+  assert.equal(interrupted.webEvidence, undefined);
   assert.doesNotMatch(output, /example\.com|example\.org|RAW_WEB_PAGE_SENTINEL/);
 });
 

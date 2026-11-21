@@ -1,4 +1,11 @@
 # Codex batch P2/P3 kabul yolu
+
+## 2026-11-19 canlı salt-okunur batch pilotu
+
+Pilota özel Hades yapılandırması ve state ile workspace kimliği eşleşti. Edit ve atomik entegrasyon kapalıydı. Planı hazırlayan süreç kapandıktan sonra farklı süreçte başlatma `plan_context_unavailable` ile reddedildi. Taze plan, ayrı kullanıcı onayıyla onu hazırlayan Hades sürecinde başlatıldı.
+
+Tek `gpt-6.1-sol` salt-okunur görevi bir adapter denemesinde `6 × 7 = 42` sonucunu verdi. Batch `result_ready`, görev `completed` ve değişen dosya sayısı sıfırdı. 0,20 USD tahmini rezerv terminal durumda bilinmeyen maliyet olarak kaldı. Daha geniş DAG, çatışma, recovery ve edit kapsamı önceki P3 kanıtlarına dayanır. [Pilotun ilk kaydı](https://github.com/mecik-arda/orkestrasyon-codex/commit/fdfff574c0d7c4925e87ac6f52ca116c4ee1ac66)
+
 2026-11-05 güncel kabul durumu: P2/P3/P4 özgün plan kapsamındaki işlevsel kabuller tamamlandı. P2 recovery ayrı süreçli Windows testlerinde gerçek üretim recovery zinciriyle doğrulandı; bu canlı Hades recovery çağrısı değildir. Claude P1b task_json_parse_invalid ile başarısız ve ertelenmiştir. Son GPT-6.1-Sol incelemesi kendi exact 10 dosyalı snapshot’ıyla sınırlı; sonraki üç düzeltme yerel testlerle doğrulandı fakat bağımsız follow-up incelemesi yapılmadı. Güncel doğal kaynak kapsamı preflight’ta engellidir, payload teslim edilmedi. Son tam yerel doğrulama ve kapsam kaydı inceleme paketindedir; bu kayıtlar genel bağımsız denetim veya koşulsuz geçiş kapanışı değildir.
 
 

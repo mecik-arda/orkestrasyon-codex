@@ -8,6 +8,7 @@ import { extractAntigravityResult } from "../subagent-bridge/src/adapters/antigr
 import { createSuccessSubagentResult, createFailureSubagentResult } from "../subagent-bridge/src/schemas/core-schemas.js";
 import { createUntrustedWebEvidenceEnvelope } from "../subagent-bridge/src/web-evidence.js";
 import { createBridgeRuntime } from "../subagent-bridge/src/runtime/bridge-runtime.js";
+import { createMcpToolHandlers } from "../subagent-bridge/src/frontends/mcp/tools.js";
 
 function createConfiguration(root, taskProfiles = {}) {
   return {
@@ -480,6 +481,36 @@ test("WP2-RUNTIME-15: yerel okumada webEvidence alani olmayan carrier null olara
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.result, "kanit yok, duz analiz");
   assert.equal(result.webEvidence, null);
+});
+
+test("direct Antigravity distinguishes tool prohibitions from explicit web requests", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "web-intent-prohibition-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configuration = createConfiguration(root);
+  configuration.orchestration.webIntentHeuristics = true;
+  const requests = [];
+  const adapter = createFakeAdapter(async (request) => {
+    requests.push(request);
+    return createSuccessSubagentResult("antigravity", request.model, {
+      result: JSON.stringify({ result: "42", webEvidence: null })
+    });
+  });
+  const runtime = createBridgeRuntime({ configuration, adapters: { antigravity: adapter }, sleep: async () => {} });
+  const handlers = createMcpToolHandlers({ runtime, trustedWorkspace: root, configuration });
+  const input = { model: "gemini_flash_3_8_medium", mode: "read_only" };
+  for (const directive of ["Do not use tools, open files, browse, or delegate.", "Do not browse the web."]) {
+    const reply = await handlers.runAntigravity({ ...input, prompt: `Tool-free acceptance task. ${directive} Compute six multiplied by seven.` });
+    assert.equal(reply.isError, false);
+    assert.equal(reply.structuredContent.result, "42");
+    assert.equal(reply.structuredContent.webEvidence, null);
+    assert.notEqual(requests.at(-1).webReadTrace, true);
+  }
+  for (const instruction of ["Use read_url_content on the stated public page.", "Read https://www.iana.org/domains/reserved."]) {
+    const reply = await handlers.runAntigravity({ ...input, prompt: `Do not browse the web. ${instruction}` });
+    assert.equal(reply.isError, true);
+    assert.equal(reply.structuredContent.reason, "web_evidence_invalid");
+    assert.equal(requests.at(-1).webReadTrace, true);
+  }
 });
 
 test("WP2-RUNTIME-12: profil strict carrier politikasi fallback istegine tasinir", async (t) => {

@@ -112,6 +112,15 @@ test("CAP-01: tool-free probe model erişimini ve araçsız yanıtı bağımsız
   assert.equal(capabilityProbeSchema.safeParse(result).success, true);
 });
 
+test("CAP-01b: tool-free probe tam yanıt ve başarılı terminal durum ister", async () => {
+  for (const [scenario, failureClass] of [["probe-ready-inexact", "unclassified"], ["probe-ready-failed", "process_error"]]) {
+    const result = await createProbeAdapter(scenario).probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["modelAccess", "toolFreeResponse"] });
+    assert.equal(result.modelAccess, "unavailable", scenario);
+    assert.equal(result.toolFreeResponse, "unavailable", scenario);
+    assert.equal(result.failureClass, failureClass, scenario);
+  }
+});
+
 test("CAP-02: auth hatası capability kaydında authentication_failure olur", async () => {
   const adapter = createProbeAdapter("probe-auth");
   const result = await adapter.probeCapabilities({ model: "gemini_flash_3_7", capabilities: ["modelAccess", "toolFreeResponse"] });
@@ -131,10 +140,11 @@ test("CAP-03: workspace-read probe marker içeriğini doğrular", async () => {
 });
 
 test("CAP-04: workspace-read beklenmeyen yanıtı workspace_read olarak sınıflandırılır", async () => {
-  const adapter = createProbeAdapter("probe-workspace-wrong");
-  const result = await adapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["workspaceRead"] });
-  assert.equal(result.workspaceRead, "unavailable");
-  assert.equal(result.failureClass, "workspace_read");
+  for (const scenario of ["probe-workspace-wrong", "probe-workspace-inexact"]) {
+    const result = await createProbeAdapter(scenario).probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["workspaceRead"] });
+    assert.equal(result.workspaceRead, "unavailable", scenario);
+    assert.equal(result.failureClass, "workspace_read", scenario);
+  }
 });
 
 test("CAP-05: web-read başarısı ve izin reddi ayrı raporlanır", async () => {

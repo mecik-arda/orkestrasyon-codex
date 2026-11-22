@@ -19,7 +19,17 @@ Feature worktree'de `gemini_flash` / `gemini-3.8-flash-high` için tek bounded, 
 
 Kaynakta capability probe'un `finally` bloğu, probe workspace'lerini `fs.promises.rm` ile sınırlı Windows retry ayarlarıyla kaldırıyor. Herhangi bir silme reddedilirse probe `failureClass=process_error` kaydediyor; workspace-read istendiyse o capability de unavailable oluyor. Var olan testler normal/sentinel cleanup başarısını sınar. Önceki GPT-OSS `process_error` kaydı bu kaynak dalıyla tutarlıdır, ancak hangi dizinin kaldığına veya artığın hâlâ mevcut olduğuna dair tarihsel kanıt yoktur. Eski olay artık geriye dönük doğrulanamaz. Yeni bir GPT-OSS provider/probe çağrısı yapılmadı; kaynakta tekrarlanabilir bir kusur gösterilmediğinden bu turda cleanup davranışı değiştirilmedi.
 
-Bu bölüm için kaynak kodu, policy ve kişisel config değiştirilmedi; yalnız bu rapor ve README'deki güncel durum özeti belgelendi. Tam test/verify çalıştırılmadı; doküman diff'i ve whitespace kontrolü yapıldı. PR #2 birleştirilmedi; kullanıcı talimatıyla PR son adımdır.
+Canlı web denemesi sırasında kaynak kodu, policy ve kişisel config değiştirilmedi; yalnız bu rapor ve README'deki güncel durum özeti belgelendi. Bu deneme anında tam test/verify çalıştırılmamıştı; sonraki birleşik-checkout doğrulaması aşağıdaki ayrı kayıtta yer alır. PR #2 birleştirilmedi; kullanıcı talimatıyla PR son adımdır.
+
+## 2026-11-22 — PR #1 kaynak uzlaştırması sonrası yerel doğrulama
+
+Uzak feature dalındaki PR #1 merge commit'i (`213b12d679559f79b6c3d8ab7bd556abf9008a1a`) ve PR #2 belge uzlaştırması yerel feature dalına alındıktan sonra `npm run verify:local`, commit `27bacebfb94aadef0b9aaf0d1e5013b44dd0c60c` üzerinde tamamlandı.
+
+- Beş aşamanın tümü geçti: `verify:ci`, test paketi, seri benchmark, sentetik stdio smoke ve sentetik config/Vault verify.
+- Tam test sonucu: 96 dosya, 1.268 başarılı, beş Windows koşullu atlama, sıfır başarısızlık. Zorunlu benchmark 9.049 ms; toplam koşu 453.860 ms sürdü.
+- Koşu `Node v24.17.0`, Windows x64 kullandı. Sentetik smoke/config ve Vault fixture'ları kullanıldı; sağlayıcı kimlik bilgileri child süreçlerine aktarılmadı.
+- Başlangıç ve bitiş kaynak snapshot'ı aynıydı (`b21809df…b4b65cb`). Başlangıç ve bitişteki kirli Git durumu yalnız çalışma ağacındaki, commit dışı checkout `cwd` ayarı değişikliğinden kaynaklandı; bu dosya commit'e dahil edilmedi.
+- Bu sonuç hosted CI değildir; kullanıcı kararıyla hosted CI ayrı kabul kapısı değildir. Canlı Gemini web kabulinin başarısız/kanıtsız ve GPT-OSS tarihsel cleanup sonucunun belirsiz olduğu durumu değiştirmez.
 
 ## 2026-11-21 — PR #2 yayın durumu
 

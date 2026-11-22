@@ -12,6 +12,8 @@ Current transition status (2026-11-22): Pull request [#1](https://github.com/mec
 
 PR #2 reconciliation (2026-11-22): the feature branch was 9 commits ahead and 1 behind main; GitHub reported documentation conflicts in the transition README, plan, status index, and integration report. The feature-side records were retained because they contain the newer acceptance and publication evidence, and the checkout-launch instructions were verified present. The PR remains open; this note does not claim that its changes have been merged into main.
 
+Latest full local validation (2026-11-22): `npm run verify:local` passed on the synchronized feature checkout. It ran `verify:ci`, 96 test files (1,268 passed, 5 Windows-conditional skips, 0 failures), the required benchmark (9,049 ms), synthetic stdio smoke, and synthetic config/Vault verification. The source snapshot stayed unchanged; provider credentials were not forwarded. This local result is not a hosted CI result.
+
 Operational note (2026-11-05): The user reported an Hades restart after the AST setting was returned to unset; the configured launch chain and workspace identity were checked. Identity does not attest the loaded source revision or active AST setting.
 
 Local P3 resilience tests cover artifact-store failure before provider dispatch, cleanup errors during worktree setup, transient result polling and a fake runtime entry before bridge termination. Live cancellation, timeout and restart-recovery observations are recorded separately. P3 normal edit-batch integration was accepted under its separate exact-diff approval; resilience tests alone would not replace that acceptance.

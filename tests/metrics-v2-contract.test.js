@@ -163,7 +163,7 @@ test("V2-12: eski v2 eligible review sonucu host result validation kanıtı olma
   assert.equal(recent.runs[0].reviewContract.reviewEligibility, "unverified");
 });
 
-test("V2-13: host tarafından doğrulanan required review durumu redacted kayıtta korunur", async (t) => {
+test("V2-13: doğrulanmış HTTP source review teslimi redacted kayıtta korunur", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "v2-13-review-contract-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const config = configuration(root);
@@ -174,6 +174,8 @@ test("V2-13: host tarafından doğrulanan required review durumu redacted kayıt
     profile: "review",
     result: baseResult({
       ok: true,
+      backend: "deepseek",
+      model: "deepseek-flash",
       error: null,
       result: "Structured review result",
       exitCode: 0,
@@ -181,7 +183,7 @@ test("V2-13: host tarafından doğrulanan required review durumu redacted kayıt
       reviewContract: {
         version: 2,
         sourceScopeStatus: "complete",
-        sourceDeliveryStatus: "complete_to_cli",
+        sourceDeliveryStatus: "complete_to_api",
         sourceManifestSha256: "b".repeat(64),
         sourceFileCount: 1,
         sourceBytes: 12,
@@ -201,6 +203,7 @@ test("V2-13: host tarafından doğrulanan required review durumu redacted kayıt
   const recent = readRecentRuns(config, { days: 7, limit: 10 });
   assert.equal(recent.runCount, 1);
   assert.equal(recent.runs[0].reviewContract.reviewResultValidated, true);
+  assert.equal(recent.runs[0].reviewContract.sourceDeliveryStatus, "complete_to_api");
   assert.equal(recent.runs[0].reviewContract.reviewEligibility, "eligible_for_orchestrator_evaluation");
 });
 

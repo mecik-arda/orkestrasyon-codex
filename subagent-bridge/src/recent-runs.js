@@ -9,6 +9,7 @@ import {
   outputSizeBucketValues,
   processSignalValues,
   providerCodeValues,
+  reviewContractDeliveryStatusValues,
   retryDecisionValues,
   retryStopReasonValues,
   taskCompletionValues,
@@ -26,7 +27,7 @@ const roleSchema = z.enum(["analyst", "researcher", "reviewer", "planner"]);
 const reviewContractV1Schema = z.object({
   version: z.literal(1),
   sourceScopeStatus: z.enum(["not_requested", "complete", "blocked"]),
-  sourceDeliveryStatus: z.enum(["not_attempted", "complete_to_cli", "failed"]),
+  sourceDeliveryStatus: z.enum(reviewContractDeliveryStatusValues),
   sourceManifestSha256: hashSchema.nullable(),
   sourceFileCount: z.number().int().nonnegative().nullable(),
   sourceBytes: z.number().int().nonnegative().max(256 * 1024).nullable(),
@@ -38,7 +39,7 @@ const reviewContractV1Schema = z.object({
 const reviewContractV2Schema = z.object({
   version: z.literal(2),
   sourceScopeStatus: z.enum(["not_requested", "complete", "blocked"]),
-  sourceDeliveryStatus: z.enum(["not_attempted", "complete_to_cli", "failed"]),
+  sourceDeliveryStatus: z.enum(reviewContractDeliveryStatusValues),
   sourceManifestSha256: hashSchema.nullable(),
   sourceFileCount: z.number().int().nonnegative().nullable(),
   sourceBytes: z.number().int().nonnegative().max(256 * 1024).nullable(),

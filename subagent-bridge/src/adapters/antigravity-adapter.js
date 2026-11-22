@@ -2,6 +2,7 @@ import { createProviderEnvironment, runProcess, createExecutionHandle, killProce
 import { createAdapter } from "./agent-adapter-base.js";
 import { createFailureSubagentResult, createSuccessSubagentResult, capabilityFailureClassValues, operatingSystemErrorCodeValues } from "../schemas/core-schemas.js";
 import { prependExecutionMetadata } from "../services/execution-metadata.js";
+import { hashSourceUrl, providerWebEvidenceCarrierSchema } from "../web-evidence.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -12,7 +13,11 @@ const ANTIGRAVITY_MODEL_MAP = {
   gemini_flash: "gemini-3.8-flash-high",
   gemini_flash_3_7: "gemini-3.7-flash-high",
   gemini_flash_3_8: "gemini-3.8-flash-high",
-  claude_sonnet: "claude-sonnet-4-6"
+  gemini_flash_3_8_medium: "gemini-3.8-flash-medium",
+  gemini_flash_3_8_low: "gemini-3.8-flash-low",
+  claude_sonnet: "claude-sonnet-4-6",
+  claude_opus: "claude-opus-4-6-thinking",
+  gpt_oss_120b: "gpt-oss-120b-medium"
 };
 const ANTIGRAVITY_DISABLED_MODEL_ALIASES = new Set(["gemini_pro", "gemini_flash_3_7"]);
 const ANTIGRAVITY_ACTIVE_MODEL_ALIASES = Object.keys(ANTIGRAVITY_MODEL_MAP).filter((alias) => !ANTIGRAVITY_DISABLED_MODEL_ALIASES.has(alias));
@@ -23,7 +28,7 @@ const READ_ONLY_INSTRUCTION = `
 === READ-ONLY MODE ===
 You MUST NOT create, modify, or delete any files in the workspace.
 You MUST NOT execute any commands that change the filesystem state.
-You may only read, analyze, and report on existing files.
+Only read, analyze, and report on the resources needed for the task.
 Use only built-in workspace read tools to inspect files.
 Do not call MCP, terminal commands, or built-in write tools.
 If asked to write or modify files, decline and explain that you are in read-only mode.
@@ -363,14 +368,13 @@ function resolveModel(alias) {
   if (!alias || typeof alias !== "string") {
     return { valid: false, error: "model alias must be a non-empty string" };
   }
-  const model = ANTIGRAVITY_MODEL_MAP[alias];
-  if (!model) {
+  if (!Object.hasOwn(ANTIGRAVITY_MODEL_MAP, alias)) {
     return {
       valid: false,
       error: `unsupported model alias: "${alias}". Supported for execution: ${ANTIGRAVITY_ACTIVE_MODEL_ALIASES.join(", ")}`
     };
   }
-  return { valid: true, model };
+  return { valid: true, model: ANTIGRAVITY_MODEL_MAP[alias] };
 }
 
 function createDisabledModelError(alias) {
@@ -531,6 +535,9 @@ function parseAntigravityResult(stdout, { unwrapNestedCarrier = true, allowWhite
 
   try {
     const parsed = JSON.parse(trimmed);
+    if (parsed && Object.hasOwn(parsed, "status") && parsed.status !== "SUCCESS") {
+      return { resultText: null, failureClass: parsed.status === "CANCELED" ? "cancelled" : "process_error" };
+    }
     if (parsed && Object.hasOwn(parsed, "structured_output")) {
       const resultText = normalizeCarrierStructuredOutput(parsed.structured_output, {
         unwrapNested: unwrapNestedCarrier,
@@ -567,6 +574,14 @@ function isReadUrlToolName(value) {
   return value === "read_url" || value === "read_url_content";
 }
 
+function tryHashWebSource(sourceUrl) {
+  try {
+    return hashSourceUrl(sourceUrl);
+  } catch {
+    return null;
+  }
+}
+
 export function extractAntigravityStreamTrace(stdout, stderr = "") {
   let terminalResult = null;
   let readUrlToolAvailable = null;
@@ -574,6 +589,7 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
   let readUrlSucceeded = false;
   let readUrlPermissionDenied = false;
   let readUrlFailed = false;
+  const observedSourceHashes = new Set();
   const lines = String(stdout || "").split(/\r?\n/u).filter((line) => line.trim().length > 0);
   for (const line of lines) {
     let event;
@@ -591,14 +607,20 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
     }
     if (event?.event !== "step_update" || event.step_update?.step_type !== "tool") continue;
     const step = event.step_update;
-    if (!isReadUrlToolName(step.tool_name || step.tool_info?.name) || step.state !== "DONE") continue;
+    if (!isReadUrlToolName(step.tool_name || step.tool_info?.name) || !["ACTIVE", "DONE"].includes(step.state)) continue;
     readUrlObserved = true;
+    if (step.state !== "DONE") continue;
     const toolError = step.tool_info?.error;
     if (toolError) {
       if (readUrlErrorIsPermissionDenied(toolError)) readUrlPermissionDenied = true;
       else readUrlFailed = true;
-    } else {
+    } else if (typeof step.tool_info?.output === "string" && step.tool_info.output.trim().length > 0) {
       readUrlSucceeded = true;
+      const parameters = step.tool_info.parameters;
+      const sourceHash = tryHashWebSource(parameters?.Url ?? parameters?.url);
+      if (sourceHash) observedSourceHashes.add(sourceHash);
+    } else {
+      readUrlFailed = true;
     }
   }
   if (/(?:read_url_content|\bread_url\b)/i.test(String(stderr)) && /soft[- ]denied|permission denied|permission_denied|requires? approval|approval required|cannot prompt|auto-denied/i.test(String(stderr))) {
@@ -610,15 +632,24 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
         ? "permission_denied"
         : readUrlObserved && readUrlFailed
           ? "failed"
+          : readUrlObserved
+            ? "not_observed"
           : readUrlToolAvailable === false
             ? "unavailable"
             : readUrlToolAvailable === true
               ? "not_invoked"
               : "not_observed";
-  return {
-    resultText: terminalResult ? extractAntigravityResult(JSON.stringify(terminalResult)) : null,
-    webReadStatus
-  };
+  const extraction = parseAntigravityResult(terminalResult ? JSON.stringify(terminalResult) : "");
+  return { ...extraction, webReadStatus, observedSourceHashes };
+}
+
+function claimedWebSourceHash(resultText) {
+  try {
+    const parsed = providerWebEvidenceCarrierSchema.safeParse(JSON.parse(resultText));
+    return parsed.success ? tryHashWebSource(parsed.data.webEvidence?.sourceUrl) : null;
+  } catch {
+    return null;
+  }
 }
 
 function mapCategoryToSubagentError(errorClass, error, backend, model, durationMs, retries, exitCode = null, signal = null, diagnostics = null) {
@@ -663,7 +694,7 @@ function mapCategoryToSubagentError(errorClass, error, backend, model, durationM
 const PROBE_CAPABILITIES = ["modelAccess", "toolFreeResponse", "workspaceRead", "webRead", "sandboxStartup"];
 const DEFAULT_PROBE_TIMEOUT_MS = 300000;
 const WEB_READ_PROBE_URL = "https://example.com";
-const WEB_READ_PROBE_MARKER = /example domain/i;
+const WEB_READ_PROBE_MARKER = /^example domain$/i;
 
 function classifyProbeFailure(errorClass) {
   return capabilityFailureClassValues.includes(errorClass) ? errorClass : "unclassified";
@@ -673,10 +704,10 @@ function probeFailureStatus(failureClass) {
   return failureClass === "permission_denied" || failureClass === "policy_violation" ? "not_probed" : "unavailable";
 }
 
-function runCapabilityProbeProcess(executable, execArgs, { workspace, model, prompt, timeoutMs }) {
+function runCapabilityProbeProcess(executable, execArgs, { workspace, model, prompt, timeoutMs, webReadTrace = false }) {
   return runProcess(executable, [
     ...execArgs,
-    "--output-format", "json",
+    "--output-format", webReadTrace ? "stream-json" : "json",
     "--model", model,
     "--add-dir", workspace,
     "--sandbox",
@@ -691,10 +722,21 @@ function runCapabilityProbeProcess(executable, execArgs, { workspace, model, pro
   });
 }
 
-function probeResponse(processResult) {
+function probeResponse(processResult, webReadTrace = false) {
   const classification = classifyAntigravityError(null, processResult.code, processResult.stdout, processResult.stderr, processResult.signal);
   if (!classification.valid) return { failureClass: classifyProbeFailure(classification.errorClass), text: "" };
-  return { failureClass: null, text: extractAntigravityResult(processResult.stdout) || "" };
+  if (webReadTrace) {
+    const trace = extractAntigravityStreamTrace(processResult.stdout, processResult.stderr);
+    if (trace.webReadStatus === "permission_denied") return { failureClass: "permission_denied", text: "" };
+    if (trace.failureClass) return { failureClass: classifyProbeFailure(trace.failureClass), text: "" };
+    const observedExpectedSource = trace.observedSourceHashes.has(tryHashWebSource(WEB_READ_PROBE_URL));
+    return { failureClass: null, text: observedExpectedSource ? trace.resultText || "" : "" };
+  }
+  const extraction = parseAntigravityResult(processResult.stdout);
+  return {
+    failureClass: extraction.failureClass ? classifyProbeFailure(extraction.failureClass) : null,
+    text: extraction.resultText || ""
+  };
 }
 
 export function createAntigravityAdapter(configuration, dependencies = {}) {
@@ -780,7 +822,10 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
         : (configuration?.antigravity?.probeTimeoutMs || DEFAULT_PROBE_TIMEOUT_MS);
       const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "agy-capability-probe-"));
       let trustedProbeWorkspace = null;
-      const runProbe = async (prompt, probeWorkspace = workspace) => probeResponse(await runCapabilityProbeProcess(executable, execArgs, { workspace: probeWorkspace, model: resolved.model, prompt, timeoutMs: probeTimeoutMs }));
+      const runProbe = async (prompt, probeWorkspace = workspace, webReadTrace = false) => probeResponse(
+        await runCapabilityProbeProcess(executable, execArgs, { workspace: probeWorkspace, model: resolved.model, prompt, timeoutMs: probeTimeoutMs, webReadTrace }),
+        webReadTrace
+      );
       const applyOutcome = (capability, outcome, expected) => {
         if (outcome.failureClass) {
           const status = probeFailureStatus(outcome.failureClass);
@@ -800,7 +845,7 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
           const outcome = await runProbe("Reply with exactly READY and nothing else.");
           for (const capability of ["modelAccess", "toolFreeResponse"]) {
             if (!requested.includes(capability)) continue;
-            applyOutcome(capability, outcome, outcome.text.includes("READY"));
+            applyOutcome(capability, outcome, outcome.text === "READY");
           }
           if (requested.includes("sandboxStartup") && outcome.failureClass === "sandbox_setup") {
             result.sandboxStartup = "unavailable";
@@ -826,9 +871,10 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
             }
           }
           if (result.workspaceRead === "not_probed") {
-            const markerPath = path.join(probeWorkspace, "probe.txt");
+            const markerFileName = "probe.txt";
+            const markerPath = path.join(probeWorkspace, markerFileName);
             fs.writeFileSync(markerPath, marker, { encoding: "utf8", flag: "wx", mode: 384 });
-            const outcome = await runProbe(`Read the file ${markerPath} and reply with its exact contents and nothing else.`, probeWorkspace);
+            const outcome = await runProbe(`Read the file ${markerFileName} in the current working directory and reply with its exact contents and nothing else.`, probeWorkspace);
             const failureClass = outcome.failureClass === "permission_denied"
               ? "workspace_read"
               : outcome.failureClass;
@@ -836,12 +882,12 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
               result.workspaceRead = probeFailureStatus(failureClass);
               recordFailure(failureClass);
             } else {
-              applyOutcome("workspaceRead", outcome, outcome.text.includes(marker));
+              applyOutcome("workspaceRead", outcome, outcome.text === marker);
             }
           }
         }
         if (requested.includes("webRead")) {
-          const outcome = await runProbe(`Use the read_url_content tool to fetch ${WEB_READ_PROBE_URL} and reply with the page heading and nothing else. The required permission action is read_url.`);
+          const outcome = await runProbe(`Use the read_url_content tool to fetch ${WEB_READ_PROBE_URL} and reply with the page heading and nothing else. The required permission action is read_url.`, workspace, true);
           applyOutcome("webRead", outcome, WEB_READ_PROBE_MARKER.test(outcome.text));
         }
       } catch (error) {
@@ -853,8 +899,14 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
           if (result[capability] === "not_probed") result[capability] = status;
         }
       } finally {
-        fs.rmSync(workspace, { recursive: true, force: true });
-        if (trustedProbeWorkspace) fs.rmSync(trustedProbeWorkspace, { recursive: true, force: true });
+        const probeDirectories = [workspace, trustedProbeWorkspace].filter(Boolean);
+        const cleanup = await Promise.allSettled(probeDirectories.map((directory) =>
+          fs.promises.rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })
+        ));
+        if (cleanup.some(({ status }) => status === "rejected")) {
+          if (requested.includes("workspaceRead")) result.workspaceRead = "unavailable";
+          recordFailure("process_error");
+        }
       }
       return result;
     },
@@ -1011,7 +1063,14 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
         args.push("--mode", isReadOnly ? "plan" : "accept-edits");
 
         const prompt = prependExecutionMetadata(
-          isReadOnly ? `${READ_ONLY_INSTRUCTION}\n${WEB_EVIDENCE_OUTPUT_INSTRUCTION}\n${request.prompt}` : request.prompt,
+          isReadOnly
+            ? [
+                READ_ONLY_INSTRUCTION,
+                WEB_EVIDENCE_OUTPUT_INSTRUCTION,
+                ...(webReadTrace ? ["This task requires a successful read_url_content call before answering. If the read fails or is unavailable, do not invent an excerpt or claim to have read the source."] : []),
+                request.prompt
+              ].join("\n")
+            : request.prompt,
           { backend: "antigravity", requestedModel: request.model, resolvedModel: model.model, mode: request.mode }
         );
 
@@ -1093,21 +1152,28 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
           }
 
           const extraction = webReadTrace
-            ? { resultText: streamTrace.resultText, failureClass: streamTrace.resultText ? null : "empty_output" }
+            ? streamTrace
             : parseAntigravityResult(processResult.stdout, {
               unwrapNestedCarrier: request.claudeSonnetAcceptancePilot !== true,
               allowWhitespaceTaskPayload: request.claudeSonnetAcceptancePilot === true
             });
           const resultText = extraction.resultText;
           if (!resultText) {
+            const terminalFailure = ["cancelled", "process_error"].includes(extraction.failureClass);
             const malformedPilotCarrier = request.claudeSonnetAcceptancePilot === true && extraction.failureClass === "output_parse_invalid";
-            const failureClass = malformedPilotCarrier ? "output_parse_invalid" : "empty_output";
+            const failureClass = terminalFailure || malformedPilotCarrier ? extraction.failureClass : "empty_output";
+            const failureMessage = {
+              cancelled: "execution cancelled",
+              process_error: "provider returned an unsuccessful terminal result",
+              output_parse_invalid: "provider returned an invalid structured carrier",
+              empty_output: "provider returned an empty result"
+            }[failureClass];
             const failure = mapCategoryToSubagentError(
               failureClass,
-              malformedPilotCarrier ? "provider returned an invalid structured carrier" : "provider returned an empty result",
+              failureMessage,
               "antigravity", model.model,
               Date.now() - startedAt, 0, processResult.code, null,
-              createAttemptDiagnostics("result_parse", malformedPilotCarrier ? null : "empty_output", {
+              createAttemptDiagnostics(terminalFailure ? failureStageForClassification(failureClass) : "result_parse", failureClass === "empty_output" ? "empty_output" : null, {
                 settingsLockWaitMs,
                 providerExecutionMs,
                 stdoutBytes: Buffer.byteLength(processResult.stdout, "utf8"),
@@ -1116,6 +1182,26 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
             );
             if (webReadTrace) failure.metrics.webReadStatus = webReadStatus || "not_observed";
             return failure;
+          }
+
+          const evidenceSourceHash = webReadStatus === "used" ? claimedWebSourceHash(resultText) : null;
+          if (evidenceSourceHash && !streamTrace.observedSourceHashes.has(evidenceSourceHash)) {
+            return createFailureSubagentResult("antigravity", model.model, {
+              error: "web evidence source was not observed on this attempt",
+              reason: "web_evidence_invalid",
+              exitCode: processResult.code,
+              durationMs: Date.now() - startedAt,
+              metrics: {
+                webReadStatus,
+                diagnostics: createAttemptDiagnostics("evidence_invalid", null, {
+                  webEvidenceFailureCode: "web_source_not_observed",
+                  settingsLockWaitMs,
+                  providerExecutionMs,
+                  stdoutBytes: Buffer.byteLength(processResult.stdout, "utf8"),
+                  stderrBytes: Buffer.byteLength(processResult.stderr, "utf8")
+                })
+              }
+            });
           }
 
           return createSuccessSubagentResult("antigravity", model.model, {

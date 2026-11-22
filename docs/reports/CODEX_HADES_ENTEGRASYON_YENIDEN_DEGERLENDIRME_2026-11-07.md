@@ -1,5 +1,86 @@
 # Codex–Hades entegrasyonu: yeniden değerlendirme
 
+## 2026-11-22 — PR #2 çatışma uzlaştırması
+
+Başlangıç GitHub karşılaştırması main (213b12d679559f79b6c3d8ab7bd556abf9008a1a) ile codex/hades-codex-startup-fix (4eca3d2bdde65006053717bcc8c9f0434f8d85d1) arasında 9 commit ahead ve 1 commit behind gösterdi. GitHub PR #2'de README, geçiş planı, durum indeksi ve bu rapor için çatışmalar bildirdi. Çözümde daha yeni feature dalı kabul/yayın kayıtları korundu; launcher yönergelerinin feature README'sinde bulunduğu doğrulandı. Bu uzlaştırma feature dalını günceller; PR #2'yi main'e merge etmez. Kullanıcının kararı gereği hosted CI kabul kapısı değildir.
+
+## 2026-11-22 — Gemini High web kabul denemesi ve açık temizlik kanıtı
+
+Feature worktree'de `gemini_flash` / `gemini-3.8-flash-high` için tek bounded, salt-okunur kamuya açık web kabul görevi çalıştırıldı. İstek yalnız IANA'nın reserved domains sayfasını `read_url_content` ile okumayı hedefliyordu; yerel dosya, kabuk, MCP veya yazma erişimi istenmedi. Host sonucu kabul koşulunu karşılamadı:
+
+- İlk adapter denemesi `web_evidence_invalid` / `web_evidence_missing` ile sonlandı; süreç exit 0 olsa da tamamlanmış web aracı kanıtı ve kanıt zarfı yoktu.
+- Host'un yapılandırılmış tek retry denemesi `timeout` ile bitti. Nihai görev `taskCompletion=partial`, `outputIntegrity=unknown`, `webReadStatus=not_invoked`; `exitCode` yok, toplam iki adapter denemesi ve bir retry olarak kaydedildi. Maliyet `null`; fatura tutarı bilinmiyor.
+- Bu nedenle Gemini High model yürütme kabulini geriye dönük değiştirmeyen ayrı `web_research` kabul kapısı başarısız/kanıtsız kaldı. Aynı web görevi tekrar edilmedi.
+- Sonraki capability tanısı `modelAccess=available`, `webRead=unavailable`, `failureClass=unclassified` döndürdü. Bu, model erişimini doğrular; web izninin neden kullanılamadığını açıklamaz ve başarılı web kanıtının yerine geçmez.
+
+**Karar:** Yeni kaynak kusuru kanıtı yok; Hades'in tamamlanmış web olayı/kanıt gereksinimi fail-closed çalıştı. Platformun web aracı/izin davranışının kök nedeni bu gözlemlerle belirlenemedi. Ek izin, global Antigravity ayarı veya araç politikası değiştirilmedi; yeni model görevi başlatılmamalı, web capability yeniden değerlendirilmesi için izin/araç engeli ayrıca çözülmelidir.
+
+### GPT-OSS probe cleanup incelemesi
+
+Kaynakta capability probe'un `finally` bloğu, probe workspace'lerini `fs.promises.rm` ile sınırlı Windows retry ayarlarıyla kaldırıyor. Herhangi bir silme reddedilirse probe `failureClass=process_error` kaydediyor; workspace-read istendiyse o capability de unavailable oluyor. Var olan testler normal/sentinel cleanup başarısını sınar. Önceki GPT-OSS `process_error` kaydı bu kaynak dalıyla tutarlıdır, ancak hangi dizinin kaldığına veya artığın hâlâ mevcut olduğuna dair tarihsel kanıt yoktur. Eski olay artık geriye dönük doğrulanamaz. Yeni bir GPT-OSS provider/probe çağrısı yapılmadı; kaynakta tekrarlanabilir bir kusur gösterilmediğinden bu turda cleanup davranışı değiştirilmedi.
+
+Canlı web denemesi sırasında kaynak kodu, policy ve kişisel config değiştirilmedi; yalnız bu rapor ve README'deki güncel durum özeti belgelendi. Bu deneme anında tam test/verify çalıştırılmamıştı; sonraki birleşik-checkout doğrulaması aşağıdaki ayrı kayıtta yer alır. PR #2 birleştirilmedi; kullanıcı talimatıyla PR son adımdır.
+
+## 2026-11-22 — PR #1 kaynak uzlaştırması sonrası yerel doğrulama
+
+Uzak feature dalındaki PR #1 merge commit'i (`213b12d679559f79b6c3d8ab7bd556abf9008a1a`) ve PR #2 belge uzlaştırması yerel feature dalına alındıktan sonra `npm run verify:local`, commit `27bacebfb94aadef0b9aaf0d1e5013b44dd0c60c` üzerinde tamamlandı.
+
+- Beş aşamanın tümü geçti: `verify:ci`, test paketi, seri benchmark, sentetik stdio smoke ve sentetik config/Vault verify.
+- Tam test sonucu: 96 dosya, 1.268 başarılı, beş Windows koşullu atlama, sıfır başarısızlık. Zorunlu benchmark 9.049 ms; toplam koşu 453.860 ms sürdü.
+- Koşu `Node v24.17.0`, Windows x64 kullandı. Sentetik smoke/config ve Vault fixture'ları kullanıldı; sağlayıcı kimlik bilgileri child süreçlerine aktarılmadı.
+- Başlangıç ve bitiş kaynak snapshot'ı aynıydı (`b21809df…b4b65cb`). Başlangıç ve bitişteki kirli Git durumu yalnız çalışma ağacındaki, commit dışı checkout `cwd` ayarı değişikliğinden kaynaklandı; bu dosya commit'e dahil edilmedi.
+- Bu sonuç hosted CI değildir; kullanıcı kararıyla hosted CI ayrı kabul kapısı değildir. Canlı Gemini web kabulinin başarısız/kanıtsız ve GPT-OSS tarihsel cleanup sonucunun belirsiz olduğu durumu değiştirmez.
+
+## 2026-11-21 — PR #2 yayın durumu
+
+GitHub karşılaştırması `main` dalını `213b12d679559f79b6c3d8ab7bd556abf9008a1a`, feature dalı `codex/hades-codex-startup-fix` dalını `95c807b96facdf3e424c0fd087b4ccfc49f9754a` üzerinde gösterdi. PR #2 `main` hedefiyle açık; karşılaştırmada feature dalı 8 commit ahead ve 1 commit behind idi. PR #2 içindeki değişiklikler `main`'e alınmış değildir. Kullanıcının talimatıyla hosted CI bu geçişin kabul kapısı değildir; bu kayıtta kontrol sonuçları yayın kararı için kullanılmadı. PR'ı birleştirme işlemi yapılmadı. Bu bilgi, mevcut kişisel `.codex/config.toml` değişikliğini kapsam veya commit etmez.
+
+## 2026-11-21 — Tam plan uygulama denetimi
+
+Bu denetim, `docs/plans/CODEX_DESKTOP_UCTAN_UCA_GECIS_PLANI_2026-10-18.md` kabul maddelerini mevcut feature checkout'u, güncel rapor kayıtları ve salt-okunur canlı workspace kaynaklarıyla karşılaştırdı. Önceki canlı provider görevleri ve tam test paketi tekrarlanmadı.
+
+- **P0 — bağlantı ve güven sınırı:** Hades `resources/list` başarılı oldu. `processCwdSha256` ve `trustedWorkspaceSha256` değerlerinin ikisi de `f876a30710252f1eb140af2b915ce9ce3252ca89aa7345ba25caf4fef1ccda61` ile mevcut worktree'nin üretim `fingerprintTrustedWorkspace` sonucu olarak hesaplanan hash ile eşleşti. Rules resource'u `verified/match`, manifest `ad960e7449e09d92747588ce8181ecedc9e6eeb9c027f2cf19a7d1ff268511db` döndürdü. `startup_context=unavailable`; bunlar çalışan kaynak revision'ı veya etkin config için host attestation değildir.
+- **P1 — Codex yürütmesi:** Önceki raporlardaki Desktop→MCP→Codex strict read-only görevleri ve redakte metrik eşleşmesi geçerlidir. Bu denetimde yeni görev çağrısı yapılmadı.
+- **P1b — seçili modeller:** Gemini 3.8 Flash High/Medium/Low ile GPT-OSS 120B için canonical kimlik ve başarılı salt-okunur görev kayıtları mevcuttur. Claude Code ve Claude model görevleri kullanıcı abonelik kararıyla bu kabul kapsamının dışındadır. Gemini High `web_research` için tamamlanmış web-tool olayı ve aynı URL'ye bağlı kanıt zarfı yoktur; bu ayrı kabiliyet geçişin özgün P1b model yürütme ölçütü değildir. GPT-OSS read-only görevi geçmişte `42`, exit 0 ve tek denemeyle tamamlanmıştır, ancak eşlik eden probe `process_error` verdiği için geçici dizin temizliği doğrulanmamıştır.
+- **P2–P5 — işlevsel geçiş:** Kontrollü edit/onay/recovery, read-only ve edit batch, doğrudan DeepSeek API kabulü ve aktif OpenCode yürütmesinin kaldırılması mevcut kabul kayıtlarında tamamlanmıştır. Bu denetimde canlı edit, batch, provider veya approval aracı çağrılmadı.
+- **P6 — işletim ve belgeler:** README, plan, indeks ve geçiş kayıtları yukarıdaki kapsam ayrımlarını yansıtacak şekilde uzlaştırıldı. Sol bağımsız incelemesi kullanıcı tarafından iptal edilmiştir ve bu hedef için kapı değildir. Kullanıcının talimatıyla hosted CI sonucu da kabul ölçütü değildir. AST classifier varsayılanı kapalı kalır.
+- **GitHub yayını:** PR #1 `213b12d679559f79b6c3d8ab7bd556abf9008a1a` ile `main`'e merge edilmiştir. Kaynak denetimi anındaki GitHub karşılaştırması feature dalını `main`'e göre altı commit ahead ve bir commit behind gösterdi; o andaki altı feature commit'i `main`'de değildi. Denetimden sonra yalnız dört durum belgesini içeren `d1187ca0e51f12c679ca1c4f96a10352ce26ee6c` commit'i oluşturulup aynı feature dalına push edildi. Kaynak kodu değişmedi; `main`'e merge yapılmadı.
+- **Yerel doğrulama:** Güncel kaynak commit'i `6b0db5fbd037488e1e8d2713c4a719cffd04cae4` için son `npm run verify:local` kaydı tüm beş aşamanın geçtiğini; 1.268 başarılı, 5 koşullu atlanan ve 0 başarısız testi; 7.963 ms benchmark'ı ve sabit kaynak snapshot'ını bildirir. Bu tam koşu bu denetimde yeniden çalıştırılmadı. Yerel kullanıcı `.codex/config.toml` değişikliği korundu; belge düzenlemesinden ayrı tutuldu.
+
+**Sonuç:** Özgün planın P0–P5 işlevsel kabulü feature checkout'unda kayıtlı kanıtla karşılanmıştır. Gemini High canlı web araştırması, GPT-OSS geçici alan temizliği, çalışan revision attestation'ı ve güncel feature değişikliklerinin `main`'e alınması ayrı kalan durumlardır. Bunlar özgün P0–P5 işlevsel kabulini geriye dönük başarısız yapmaz; bu nedenle sonuç “feature dalında plan kapsamı işlevsel olarak uygulandı” şeklindedir, “GitHub main güncel” veya “her kabiliyet canlı kabul edildi” değildir.
+
+## 2026-11-21 — Kapalı backend dispatch kapısı
+
+Plan uyum denetiminde `enabled=false` ayarının health çıktısını `disabled` yaptığı, fakat `runInternal` dispatch yolunun aynı ayarı denetlemediği bulundu. Doğrudan `native_claude`/`claude_code` hedefi runtime üzerinden çalıştırılabilir durumdaydı; böylece kapalı işaretlenen sağlayıcı adapter'a ulaşabiliyordu. Runtime artık route çözüldükten ve adapter bulunma kontrolünden sonra, diğer dispatch hazırlıklarından önce ilgili backend için açık `enabled=false` değerini `provider_disabled` ile reddediyor. Bu, fallback'i başlatmadan önce başarısız sonuç verir; adapter deneme sayısı sıfırdır.
+
+Kullanıcının Claude Code aboneliği olmadığı kararıyla `config/agents.json` dağıtım şablonundaki `claude_code.enabled` false yapıldı. Runtime regresyonu sahte adapter'ın hiç çağrılmadığını ve `adapterAttempts=0` olduğunu doğrular; config regresyonu dağıtım varsayılanını sınar. Bu değişiklik kullanıcının kişisel `~/.config/subagent-bridge/agents.json` dosyasını veya çalışan Hades sürecini değiştirmez. Antigravity üzerinden sunulan Claude model alias'ları ayrı sağlayıcı yoludur ve bu değişiklik onları kapatmaz.
+
+Üç tam suite denemesinde farklı süreç/Git yoğun testler aralıklı başarısız oldu; ilgili testler izole çalıştırmada geçti. Bunu test dosyası eşzamanlılığının makine kaynakları üzerindeki baskısı olarak değerlendirmek makul, fakat her failure için kesin kök neden kanıtlanmadı. `npm test` ve `verify:local` test-suite aşaması artık aynı iki-dosya concurrency sınırını, seri performans benchmark'ı da concurrency 1 ayarını kullanıyor. `verify:local` bu ayarla tam geçti: verify-ci; 96 test dosyasında 1.268 başarılı, 5 koşullu atlama, 0 başarısızlık; benchmark 7.963 ms; sentetik MCP smoke; sentetik config/Vault verify. Toplam süre 470.060 ms ve kaynak snapshot'ı baştan sona aynı kaldı. Gerçek Vault veya provider kimlik bilgileri kullanılmadı. Hedefli config/runtime/verify-local testleri 101/101 geçti. Kişisel config ve çalışan Hades süreci değiştirilmedi.
+
+## 2026-11-21 — Antigravity web izi ve tam yerel doğrulama
+
+Akış izleyicisi, yalnız `DONE` durumundaki `read_url`/`read_url_content` olaylarını görerek tamamlanmış kaynak okuması sayıyordu. Antigravity CLI `ACTIVE` olayı üretip aynı çalıştırmada tamamlanmış olay üretmezse önceki sınıflandırma `not_invoked` sonucuna düşebiliyordu. İzleyici artık `ACTIVE` olayını başlatılmış fakat tamamlanmış kanıtı gözlenmemiş durum olarak `not_observed` sınıfına alıyor; URL hash'ini veya başarı kanıtını yalnız tamamlanmış, çıktılı `DONE` olayından üretiyor. Geçmiş canlı denemelerin ham olay akışı tutulmadığından bu kusurun önceki High sonuçlarını açıklayıp açıklamadığı belirlenemiyor.
+
+Regresyon; `ACTIVE` olayındaki çıktı metninin sızmamasını, kaynak hash'i oluşturmamasını ve tamamlanmış kullanım sayılmamasını doğruluyor. Test ayrıca tamamlanmış web kanıtı için mevcut aynı-deneme URL bağı şartını koruyor. Odaklı Antigravity capability, adapter ve web-evidence paketi 92/92 geçti.
+
+Son `npm run verify:local`, normal izin mekanizması altında beş aşamanın tamamını geçti: `verify:ci`; 96 dosyalı tam test paketi (1.267 geçti, 5 koşullu atlama, 0 başarısız); zorunlu benchmark (11.297 ms); sentetik stdio smoke; sentetik config/Vault verify. Kaynak snapshot SHA-256 `65de853ebde05de598c5350748d680920f04864a849266c6777c9cb2bbce959a` başlangıç ve bitişte aynı kaldı. Sandboxed ilk koşuda test aşaması başarısız oldu; aynı loopback HTTP regresyonları sandbox dışında 10/10 geçti ve izinli tam koşu yeşil sonuç verdi. Gerçek Vault veya provider kullanılmadı.
+
+P1b'nin özgün kabul koşulu seçili model için erişim, gerçek canonical kimlik ve başarılı salt-okunur pilot olduğundan, Gemini High'ın yerel dosya pilotu bu model-yürütme kapısını karşılar; web-tool kullanımı bu ölçütte şart değildir. P1b, seçili Gemini High/Medium/Low modelleri için tamamlanmıştır. `web_research` profilinin istediği canlı web kanıtı ayrı kabiliyet olarak açık kalıyor: tamamlanmış web-tool izi ve aynı URL'ye bağlı kanıt zarfı gösteren başarılı canlı Hades/model sonucu yok. Yeni canlı tanı çağrısı platform auto-review kullanım sınırında çalıştırma öncesi durdu; ret aşılmadı ve istek tekrarlanmadı. Önceki High denemelerinin ham olay akışı tutulmadığından yeni sınıflandırıcının tarihsel sonuçları geriye dönük değiştirdiği iddia edilemez.
+
+GPT-OSS 120B için 21 Kasım canlı eki: `check_antigravity_subagent` `gpt_oss_120b` modelinde `modelAccess=available` ve `gpt-oss-120b-medium` canonical kimliğini bildirdi. Tek salt-okunur görev `42`, exit 0, completed, tam çıktı, bir adapter denemesi ve sıfır retry ile tamamlandı; maliyet alanı `null`. Probe cevabındaki `failureClass=process_error`, adapter kaynak akışında geçici dizin temizliğinin başarısız olduğu durumda üretilir. Temizlik başarılı doğrulanmadığından olası temp artığı hakkında olumlu iddia yoktur; bu durum model görevi sonucundan ayrıdır. Resmi model kataloğu erişim 2026-11-21 tarihinde bu model için kaldırılma tarihini 2026-11-30 olarak gösteriyordu.
+
+## 2026-11-20 — Geçiş planı kapanış kontrolü
+
+- **P0 ve P1 geçti.** Canlı Hades'in process ve trusted workspace özetleri bu checkout ile eşleşti. Model alanı verilmeden yapılan salt-okunur aritmetik görev ve açık modelle yapılan seçili fixture görevi, ayrı çağrılarda `gpt-6.1-sol` istendi ve çözümlendi. Her ikisi `42`, çıkış 0, tek adapter denemesi ve yazılmış redakte telemetri döndürdü. Fixture ve Git kapsamı korundu. Varsayılan görev 7.432 ms, fixture görevi 12.026 ms sürdü. Astra seçilmedi.
+- **P1b kısmi.** Antigravity CLI 1.5.13 ile canlı Gemini Medium, `gemini_flash_3_8_medium` → `gemini-3.8-flash-medium` olarak tek denemede `42` döndürdü. İlk denemede web kullanımını açıkça yasaklayan istem yanlışlıkla web isteği sayılmıştı. Düzeltmeden sonraki canlı sonuç 27.066 ms ve çıkış 0 verdi. Low için önceki canlı salt-okunur kabul ve High için önceki yerel dosya görevi geçerli.
+- **High canlı web kanıtı açık.** İlk High görevi 115.192 ms sonunda `timeout` verdi, web aracı çağrısı gözlenmedi. Daha kısa görev 104.978 ms'de çıkış 0 verdi ancak `webReadStatus=not_invoked` ve `web_evidence_invalid/web_evidence_missing` döndürdü. CLI çıktı şemasının yalnız tanı koşusunda çıkarılması sonucu değiştirmedi. Hades'in sıkı doğrulaması, çalışma alanı yalıtımı ve izin kuralları her koşuda korundu. Global web ask/deny kuralı veya strict araç politikası gözlenmedi ve katalogda ayrı bir web araştırma ajanı bulunmadı. Canlı kabul, aynı denemede başarılı terminal durum, tamamlanmış web aracı olayı ve o URL ile eşleşen kanıt zarfı ister. [Antigravity headless sözleşmesi](https://antigravity.google/docs/cli/headless/)
+- **P2–P5 geçti.** Kontrollü edit ve recovery, paralel batch ve DeepSeek'in doğrudan API pilotları özgün işlevsel ölçütleri karşılıyor. Aktif OpenCode yürütmesi kaldırıldı. Ayrı pilotta read-only batch, planı hazırlayan Hades sürecinde ayrı kullanıcı onayıyla başlatılıp terminal sonuca ulaştı. [Batch kabul kaydı](../handoffs/CODEX_BATCH_P2_P3_KABUL_YOLU.md#2026-11-19-canlı-salt-okunur-batch-pilotu)
+- **P6 ve dağıtım.** Güncel karar plan ve indeksle uyumlu. Önceki doğrulama paketi feature dalında, bu düzeltmeler worktree'de. Native Claude ve bağımsız Sol follow-up önceki kullanıcı kararı kapsamındadır. Açık High web kabulü nedeniyle genel geçiş kapanmadı.
+
+**Düzeltmeler ve testler.** Antigravity başarısız terminal durumlarını reddediyor ve problarda tam yanıtı doğruluyor. Workspace probu göreli fixture adını kullanıyor. Tek başına web yasağı web görevi sayılmıyor. Gerçek URL ve açık web aracı talebi kanıt istemeyi sürdürüyor. Windows probe dizini temizliğinde sınırlı tekrar uygulanıyor ve temizleme hatası ham yol yerine kapalı hata sınıfıyla sonuçlanıyor. Hedefli paket 101/101 geçti. `verify:local` beş aşamada tamamlandı: 1.267 başarılı test, 5 koşullu atlama, 0 hata ve 10,21 saniye benchmark. Test boyunca kaynak snapshot'ı sabit kaldı.
+
+Canlı Gemini koşuları kısa ömürlü Hades işlemlerinde, ek krediye geçiş kapalı ve her görev için bir denemeyle yapıldı. İstekler yalnız sentetik aritmetik veya kamuya açık IANA sayfası içerdi. Son kontrolde global Antigravity ayar dosyası başlangıçla eşleşti ve geçici state temizlendi. Codex çağrılarından önce hesabın plan kotası gözlendi, kullanılabilir ek kredi raporlanmadı. [Antigravity kredi ayarı](https://antigravity.google/docs/cli-settings) [Codex plan kullanımı](https://help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan)
+
 ## 2026-11-17 — Başlangıç onarımı ve public aktarım
 
 Yerel onarımda eski oturum için native `account/read`, `thread/resume`, Hades bağlantısı ve iki resource okuması başarılı oldu; kullanıcı normal CLI açılışını ayrıca doğruladı. Bu gözlem çalışan commit/config attestation’ı değildir. Public aktarım yalnız güncel uzak tabandaki ilgili updater, regresyon ve belgelere uygulanır; eski ayrışmış geçmişler veya kullanıcıya ait yollar aktarılmaz. `.codex`-relative `cwd=".."` varsayımı geçerli değildir. Güncel davranış ve test kanıtı [başlangıç onarım raporundadır](CODEX_MCP_CALISMA_DIZINI_VE_ACCOUNT_READ_ONARIMI_2026-11-17.md).
@@ -64,7 +145,7 @@ Doğrudan şu iki salt okunur giriş çalıştırıldı:
 
 Yapılandırılmış zincir:
 
-- Node: C:\nvm4w\nodejs\node.exe
+- Node: Yerel Windows kurulumu
 - Server: ana repository içindeki subagent-bridge\src\server.js
 - cwd: ana repository kökü
 - SUBAGENT_BRIDGE_TRUSTED_WORKSPACE: ana repository kökü
@@ -216,7 +297,39 @@ Erişim tarihi: 7 Kasım 2026.
 
 Proje config'inin varlığı tek başına etkin config yüklemesini kanıtlamaz. Bu nedenle dosya denetimi, canlı resource gözlemi, sentetik stdio kontrolü ve geçmiş kabul kanıtları bu raporda ayrı tutulmuştur.
 
+## 11. 2026-11-19 checkout başlatma ve Antigravity alias kapanış kontrolü
 
+Bu kontrol `codex/hades-codex-startup-fix` dalında, HEAD `fd2bca63ed36db1572e42979e7e3f278def5131d` üzerinde yapıldı. Başlangıç çalışma ağacı kullanıcı değişiklikleri içeriyordu; doğrulama runner'ı bunları silmeden başlangıç ve bitiş snapshot'larını karşılaştırdı. Snapshot SHA-256 `39d40b4fb5c8fc7baba09e12e617398895efbeea64d3913d383605dc9ccede73` iki uçta aynı kaldı.
+
+Codex launcher regresyonu artık launcher'ı checkout dışındaki geçici çağıran dizininden başlatıp alt sürecin `cwd` değerinin proje kökü olduğunu doğrular. Antigravity adapter ve MCP şemasına `gemini_flash_3_8_low` → `gemini-3.8-flash-low` eşlemesi eklendi; alias eşleme ve probe şema testleri güncellendi. README'de her checkout için ayrı proje yapılandırması gerektiği açıklanır. Takip edilen `.codex/config.toml` içindeki yerel mutlak cwd kullanıcı ayarıdır ve public şablon değişikliği olarak değerlendirilmemelidir.
+
+İlk tam `verify:local` koşusu `tests/parallel-batch-state.test.js` içindeki çalışan batch iptali testinde zamanlamaya bağlı bir assertion hatasıyla sonlandı. Testin 100 ms sabit beklemesi, sahte runtime handler'ının gerçekten başladığını garanti etmiyordu. Regresyon deterministik başlangıç sinyali bekleyecek şekilde düzeltildi; odaklı test 1/1 ve dosyanın tüm testleri 14/14 geçti. Sonraki tam koşu başarılı oldu.
+
+Restart öncesi kaydedilen `npm run verify:local` sonucu:
+
+- Beş aşama geçti: `verify:ci`, tam test paketi, zorunlu benchmark, sentetik stdio MCP smoke ve sentetik config/Vault verify.
+- Ana test paketi 1.265 başarılı, 5 Windows koşullu atlama, 0 başarısız sonuçlandı.
+- Benchmark 10.148 ms sürdü; toplam süre 378.875 ms oldu.
+- Node v24.17.0 / Windows x64 kullanıldı. Sentetik config ve Vault kullanıldı; provider credential'ı aktarılmadı.
+- Koşu sonunda geçici sentetik kök temizlendi. Gerçek Vault, provider inference veya çalışan Desktop Hades işlemi bu doğrulamanın parçası değildi.
+
+### Restart sonrası canlı doğrulama
+
+- Restart öncesi yüklü şema Low alias'ını sunmuyordu. Restart sonrasında canlı katalog ve Antigravity yönlendirme tablosu `gemini_flash_3_8_low` eşlemesini gösterdi.
+- Canlı `resources/list` başarılı oldu. Process ve trusted workspace hash'leri checkout kökünün üretim fingerprint'iyle eşleşti. Rules sonucu `verified/match`, startup context durumu `unavailable` kaldı. Bu gözlem doğru workspace bağlantısını gösterir. Çalışan commit veya etkin yapılandırma için bağımsız attestation sağlamaz.
+- Tek salt-okunur Low görevi `gemini_flash_3_8_low` → `gemini-3.8-flash-low` eşleşmesini, beklenen `42` sonucunu, çıkış kodu 0, bir adapter denemesi ve sıfır retry ile doğruladı. Runtime 8.595 ms, maliyet alanı `null` idi.
+- Gemini Medium için son `rate_limited` sonucu ve Gemini High için açık canlı web kanıtı kabulü korunuyor. Yerel web regresyonları ve salt-okunur Low görevi bu iki kabulü kapsamaz.
+- `npm run codex:check` proje MCP kaydını `ready` buldu. `codex:diagnose` yerel kaydı inceler; canlı MCP kaynakları ayrıca gözlendi.
+
+DeepSeek salt-okunur pilotu, MCP alt sürecini kendisini çalıştıran Node yürütücüsüyle başlatır. Pilotun örnek görevi sentetik, sağlayıcı çağrısı canlıdır. Sağlayıcı erişimi gerektirmeyen yerel uçtan uca doğrulama için `npm run verify:local` kullanılır.
+
+### Yayın öncesi yerel doğrulama
+
+- `npm run verify:local` beş seri aşamada geçti. Ana test paketi 1.265 başarılı, 5 koşullu atlama ve 0 başarısızlık kaydetti. Benchmark 9,82 saniye sürdü. Kaynak snapshot'ı koşunun iki ucunda aynı kaldı.
+- DeepSeek salt-okunur pilotu ve iki disposable edit pilotu sentetik API yanıtlarıyla geçti. Stdio kabulü beklenen diff'i, `applied=false` durumunu ve başarılı temizliği doğruladı. Canlı sağlayıcıya istek gönderilmedi ve gerçek Vault kullanılmadı.
+- Sağlayıcı hata senaryoları `npm run drill` ile 10/10 geçti.
+
+Takip edilen dağıtım şablonundan yerel olarak üretilen mutlak çalışma dizini makineye özgüdür ve public değişiklik kapsamının dışındadır.
 
 ## 9. 2026-11-08 operatör restart sonrası kapanış kaydı
 
@@ -228,7 +341,7 @@ Bu operasyonel gözlem, önceki opt-in kapatma işleminin ardından pilot yüzey
 
 ## 10. 2026-11-11 ana checkout Hades resource doğrulaması
 
-Bu oturumda Git kökü ve çalışma dizini `C:\Users\ardam\Desktop\Yazılım_Siber\orkestrasyon-codex` ile eşleşti. İlk `resources/list` çağrısı yanlış `hades_orchestrator` sunucu kimliğiyle `unknown MCP server` hatası verdi. Tek düzeltilmiş çağrı yapılandırmadaki exact `hades-orchestrator` kimliğiyle başarılı oldu; ardından yalnız `hades://workspace/identity/v1` ve `hades://rules/attestation/v1` okundu.
+Bu oturumda Git kökü ve çalışma dizini ana checkout’un kanonik yolu ile eşleşti. İlk `resources/list` çağrısı yanlış `hades_orchestrator` sunucu kimliğiyle `unknown MCP server` hatası verdi. Tek düzeltilmiş çağrı yapılandırmadaki exact `hades-orchestrator` kimliğiyle başarılı oldu; ardından yalnız `hades://workspace/identity/v1` ve `hades://rules/attestation/v1` okundu.
 
 Identity resource'u `status=verified` döndürdü. `processCwdSha256` ve `trustedWorkspaceSha256` değerleri `dc3d26eb65bfc4ef48a71103bfb33d44b73e7a1873139d2c6d7917b97248e68b` idi; aynı oturumda kanonik Git kökünün UTF-8 SHA-256 değeri de eşleşti. Bu, Hades resource yüzeyinin doğru hedef workspace için yanıt verdiğine dair operasyonel kanıttır.
 

@@ -46,6 +46,9 @@ export const webEvidenceFailureCodeValues = [
   "evidence_metadata_rejected",
   "carrier_missing_or_malformed",
   "carrier_fields_invalid",
+  "web_evidence_missing",
+  "web_read_not_observed",
+  "web_source_not_observed",
   "unclassified_evidence_rejection"
 ];
 export const providerCodeValues = [
@@ -124,7 +127,7 @@ export const capabilityFailureClassValues = [
 ];
 
 export const reviewScopeStatusValues = ["not_requested", "complete", "blocked"];
-export const reviewContractDeliveryStatusValues = ["not_attempted", "complete_to_cli", "failed"];
+export const reviewContractDeliveryStatusValues = ["not_attempted", "complete_to_cli", "complete_to_api", "failed"];
 export const reviewEligibilityValues = ["eligible_for_orchestrator_evaluation", "unverified", "unavailable"];
 export const outputIntegrityValues = ["complete", "truncated", "unknown"];
 export const taskCompletionValues = ["completed", "partial", "unavailable", "unknown"];
@@ -197,7 +200,7 @@ export const requiredSourceReviewResultSchema = z.union([
   requiredGenericSourceReviewResultSchema,
   requiredStructuredSourceReviewResultSchema
 ]);
-export const reviewSourceDeliveryStatusValues = ["complete_to_cli", "failed"];
+export const reviewSourceDeliveryStatusValues = ["complete_to_cli", "complete_to_api", "failed"];
 
 export const capabilityProbeSchema = z.object({
   modelAccess: z.enum(capabilityStatusValues),

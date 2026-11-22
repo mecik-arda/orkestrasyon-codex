@@ -201,6 +201,8 @@ test("VERIFY-LOCAL-01: aşamalar statik kontrol, tam test, benchmark, smoke ve v
   assert.deepEqual(stages.map((stage) => stage.id), ["verify-ci", "test-suite", "test-benchmark", "smoke", "verify"]);
   assert.equal(stages[1].packageScript, "npm test");
   assert.equal(stages[2].packageScript, "npm test");
+  assert.ok(stages[1].args.includes("--test-concurrency=2"));
+  assert.ok(stages[2].args.includes("--test-concurrency=1"));
   assert.ok(stages[1].args.includes("tests/verify-local.test.js"));
   assert.ok(stages[1].args.some((argument) => argument.startsWith("--test-reporter=file:///")));
   assert.ok(stages[2].args.includes("--test-reporter-destination=stdout"));

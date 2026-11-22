@@ -62,7 +62,7 @@ test("DeepSeek yapılandırılmış edit pilotu yalnız disposable kopyayı değ
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const sourcePath = path.join(root, "src", "value.txt");
   fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
-  fs.writeFileSync(sourcePath, "before\n", "utf8");
+  fs.writeFileSync(sourcePath, "before\r\n", "utf8");
   let executions = 0;
   const deepseek = createAdapter("deepseek", { canRead: true, canWrite: true, supportsSandbox: true, supportsModelSelection: true });
   deepseek.execute = async (request) => {
@@ -70,8 +70,10 @@ test("DeepSeek yapılandırılmış edit pilotu yalnız disposable kopyayı değ
     assert.equal(request.mode, "edit");
     assert.equal(request.caller, "deepseek_edit_pilot");
     assert.equal(request.maxOutputBytes, 32768);
+    assert.ok(request.prompt.split("\n").includes(JSON.stringify({ path: "src/value.txt", content: "before\r\n" })));
+    assert.match(request.prompt, /Preserve unchanged content, the existing line-ending convention/);
     return createSuccessSubagentResult("deepseek", "deepseek-flash", {
-      result: JSON.stringify({ status: "completed", summary: "Value updated", changes: [{ path: "src/value.txt", content: "after\n" }] }),
+      result: JSON.stringify({ status: "completed", summary: "Value updated", changes: [{ path: "src/value.txt", content: "after\r\n" }] }),
       durationMs: 1,
       exitCode: 0,
       metrics: { totalCostUsd: 0.0001, reservedCostUsd: 0.0002, usage: { inputTokens: 10, outputTokens: 5 } }
@@ -85,8 +87,8 @@ test("DeepSeek yapılandırılmış edit pilotu yalnız disposable kopyayı değ
   assert.equal(result.applied, false);
   assert.equal(result.cleanupCompleted, true);
   assert.deepEqual(result.filesChanged, ["src/value.txt"]);
-  assert.match(result.diff, /\+after/);
-  assert.equal(fs.readFileSync(sourcePath, "utf8"), "before\n");
+  assert.ok(result.diff.endsWith("-before\\r\\n\n+after\\r\\n"));
+  assert.equal(fs.readFileSync(sourcePath, "utf8"), "before\r\n");
   assert.equal(executions, 1);
   assert.deepEqual(fs.readdirSync(path.join(root, "cache", "deepseek-edit-pilot")), []);
 });

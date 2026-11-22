@@ -20,6 +20,7 @@ const behaviorSkipReason = powerShellProbe.status === "blocked" || powerShellPro
 
 function createLauncherFixture({ includeCodex = true, includeNode = true, includeGit = true } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex launcher ü & "));
+  const unrelatedWorkingDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "codex caller cwd "));
   const scriptsDirectory = path.join(root, "scripts");
   const serverDirectory = path.join(root, "subagent-bridge", "src");
   const binaryDirectory = path.join(root, "bin");
@@ -34,7 +35,7 @@ function createLauncherFixture({ includeCodex = true, includeNode = true, includ
   fs.writeFileSync(helperPath, [
     "const fs = require('node:fs');",
     "const names = ['DEEPSEEK_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];",
-    "fs.writeFileSync(process.env.CODEX_CAPTURE, JSON.stringify({ arguments: process.argv.slice(2), credentials: names.filter((name) => Object.hasOwn(process.env, name)) }), 'utf8');",
+    "fs.writeFileSync(process.env.CODEX_CAPTURE, JSON.stringify({ arguments: process.argv.slice(2), cwd: process.cwd(), credentials: names.filter((name) => Object.hasOwn(process.env, name)) }), 'utf8');",
     "process.exit(Number(process.env.CODEX_EXIT_CODE));",
     ""
   ].join("\n"), "utf8");
@@ -59,10 +60,10 @@ function createLauncherFixture({ includeCodex = true, includeNode = true, includ
     FAKE_CODEX_NODE: process.execPath,
     FAKE_CODEX_SCRIPT: helperPath
   };
-  return { root, binaryDirectory, capturePath, environment };
+  return { root, unrelatedWorkingDirectory, binaryDirectory, capturePath, environment };
 }
 
-function invokeLauncher(fixture, argumentsList = [], timeout = 15000) {
+function invokeLauncher(fixture, argumentsList = [], timeout = 15000, cwd = fixture.root) {
   return spawnSync(windowsPowerShellPath, [
     "-NoLogo",
     "-NoProfile",
@@ -70,7 +71,7 @@ function invokeLauncher(fixture, argumentsList = [], timeout = 15000) {
     "-File",
     path.join(fixture.root, "scripts", "start-codex.ps1"),
     ...argumentsList
-  ], { cwd: fixture.root, env: fixture.environment, encoding: "utf8", timeout, windowsHide: true });
+  ], { cwd, env: fixture.environment, encoding: "utf8", timeout, windowsHide: true });
 }
 
 function assertProcessExited(result) {
@@ -181,6 +182,7 @@ test("PowerShell timeout is distinguished and the owned process and directory ar
 test("Codex launcher preserves explicit arguments and exit code without provider credentials", { skip: behaviorSkipReason }, (context) => {
   const fixture = createLauncherFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  context.after(() => fs.rmSync(fixture.unrelatedWorkingDirectory, { recursive: true, force: true }));
   assert.equal(fixture.environment.PATH, fixture.binaryDirectory);
   assert.deepEqual(Object.keys(fixture.environment).sort(), [
     "CODEX_CAPTURE",
@@ -196,11 +198,12 @@ test("Codex launcher preserves explicit arguments and exit code without provider
     "WINDIR"
   ]);
   const argumentsList = ["--model", "gpt-6.1-sol", "--profile", "Personal Profile", "C:\\tail\\", "--", "A & B", "雪 & blue"];
-  const result = invokeLauncher(fixture, argumentsList);
+  const result = invokeLauncher(fixture, argumentsList, 15000, fixture.unrelatedWorkingDirectory);
   assertProcessExited(result);
   assert.equal(result.status, 37, "launcher did not preserve the child exit code");
   const capture = JSON.parse(fs.readFileSync(fixture.capturePath, "utf8"));
   assert.deepEqual(capture.arguments, argumentsList, "launcher changed the explicit argument vector");
+  assert.equal(capture.cwd, fixture.root, "launcher did not bind Codex to the project root from an unrelated caller directory");
   assert.deepEqual(capture.credentials, [], "fixture child inherited a provider credential variable");
 });
 
@@ -208,6 +211,7 @@ test("Codex launcher rejects command-shim arguments that PowerShell cannot round
   for (const argument of ["", 'quoted "value"', "%CODEX_CAPTURE%"]) {
     const fixture = createLauncherFixture();
     context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+    context.after(() => fs.rmSync(fixture.unrelatedWorkingDirectory, { recursive: true, force: true }));
     const result = invokeLauncher(fixture, [argument]);
     assertProcessExited(result);
     assert.notEqual(result.status, 0);
@@ -219,6 +223,7 @@ test("Codex launcher rejects command-shim arguments that PowerShell cannot round
 test("Codex launcher fails clearly when Codex CLI is missing", { skip: behaviorSkipReason }, (context) => {
   const fixture = createLauncherFixture({ includeCodex: false });
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  context.after(() => fs.rmSync(fixture.unrelatedWorkingDirectory, { recursive: true, force: true }));
   const result = invokeLauncher(fixture);
   assertProcessExited(result);
   assert.notEqual(result.status, 0);
@@ -229,6 +234,7 @@ test("Codex launcher fails clearly when Codex CLI is missing", { skip: behaviorS
 test("Codex launcher fails before launch when Node is missing", { skip: behaviorSkipReason }, (context) => {
   const fixture = createLauncherFixture({ includeNode: false });
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  context.after(() => fs.rmSync(fixture.unrelatedWorkingDirectory, { recursive: true, force: true }));
   const result = invokeLauncher(fixture);
   assertProcessExited(result);
   assert.notEqual(result.status, 0);
@@ -239,6 +245,7 @@ test("Codex launcher fails before launch when Node is missing", { skip: behavior
 test("Codex launcher fails before launch when Git is missing", { skip: behaviorSkipReason }, (context) => {
   const fixture = createLauncherFixture({ includeGit: false });
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  context.after(() => fs.rmSync(fixture.unrelatedWorkingDirectory, { recursive: true, force: true }));
   const result = invokeLauncher(fixture);
   assertProcessExited(result);
   assert.notEqual(result.status, 0);
@@ -251,12 +258,14 @@ test("Codex launcher fixtures remain isolated when two bounded launches overlap"
   const secondFixture = createLauncherFixture();
   context.after(() => fs.rmSync(firstFixture.root, { recursive: true, force: true }));
   context.after(() => fs.rmSync(secondFixture.root, { recursive: true, force: true }));
+  context.after(() => fs.rmSync(firstFixture.unrelatedWorkingDirectory, { recursive: true, force: true }));
+  context.after(() => fs.rmSync(secondFixture.unrelatedWorkingDirectory, { recursive: true, force: true }));
   const firstArguments = ["--profile", "first fixture", "--", "A & B"];
   const secondArguments = ["--profile", "second fixture", "--", "雪 path"];
   const firstRun = runCommand({
     executable: windowsPowerShellPath,
     args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", path.join(firstFixture.root, "scripts", "start-codex.ps1"), ...firstArguments],
-    cwd: firstFixture.root,
+    cwd: firstFixture.unrelatedWorkingDirectory,
     env: firstFixture.environment,
     timeoutMs: 15000,
     maxOutputBytes: 4096
@@ -264,7 +273,7 @@ test("Codex launcher fixtures remain isolated when two bounded launches overlap"
   const secondRun = runCommand({
     executable: windowsPowerShellPath,
     args: ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", path.join(secondFixture.root, "scripts", "start-codex.ps1"), ...secondArguments],
-    cwd: secondFixture.root,
+    cwd: secondFixture.unrelatedWorkingDirectory,
     env: secondFixture.environment,
     timeoutMs: 15000,
     maxOutputBytes: 4096
@@ -276,6 +285,8 @@ test("Codex launcher fixtures remain isolated when two bounded launches overlap"
   assert.equal(secondResult.exitCode, 37);
   assert.deepEqual(JSON.parse(fs.readFileSync(firstFixture.capturePath, "utf8")).arguments, firstArguments);
   assert.deepEqual(JSON.parse(fs.readFileSync(secondFixture.capturePath, "utf8")).arguments, secondArguments);
+  assert.equal(JSON.parse(fs.readFileSync(firstFixture.capturePath, "utf8")).cwd, firstFixture.root);
+  assert.equal(JSON.parse(fs.readFileSync(secondFixture.capturePath, "utf8")).cwd, secondFixture.root);
   assert.notEqual(firstFixture.capturePath, secondFixture.capturePath);
   assert.notEqual(firstFixture.binaryDirectory, secondFixture.binaryDirectory);
 });

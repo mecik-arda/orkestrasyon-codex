@@ -103,6 +103,16 @@ test("MCP-NEG-01: her public MCP şeması bilinmeyen alanı reddeder", () => {
   }
 });
 
+test("MCP-AGY-MODELS-01: yalnız etkin Antigravity aliasları run şemasından geçer", () => {
+  const base = { prompt: "Return the requested value", mode: "read_only" };
+  for (const model of ["gemini_flash_3_8_medium", "gemini_flash_3_8_low", "claude_sonnet", "claude_opus", "gpt_oss_120b"]) {
+    assert.equal(publicToolSchemas.runAntigravity.safeParse({ ...base, model }).success, true, model);
+  }
+  for (const model of ["gemini_pro", "gemini_flash_3_7", "gemini-4-argon-high", "claude-opus-4-6-thinking", "constructor"]) {
+    assert.equal(publicToolSchemas.runAntigravity.safeParse({ ...base, model }).success, false, model);
+  }
+});
+
 test("MCP-NEG-01: bilinmeyen alan gerçek MCP çağrısında runtime dispatch öncesi reddedilir", async () => {
   let runtimeCalls = 0;
   const runtime = {

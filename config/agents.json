@@ -1,7 +1,7 @@
 {
   "agents": {
     "claude_code": {
-      "enabled": true,
+      "enabled": false,
       "executable": "C:\\nvm4w\\nodejs\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe",
       "timeoutMs": 900000,
       "maxRetries": 2,

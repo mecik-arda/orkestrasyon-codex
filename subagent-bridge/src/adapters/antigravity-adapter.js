@@ -715,7 +715,7 @@ const PROBE_CAPABILITIES = ["modelAccess", "toolFreeResponse", "workspaceRead", 
 const DEFAULT_PROBE_TIMEOUT_MS = 300000;
 const WEB_READ_PROBE_URL = "https://example.com";
 const WEB_READ_PROBE_MARKER = /^example domain$/i;
-const webReadFailureOutputPattern = /(?:navigation failed|failed to (?:fetch|read|load|navigate)|unable to (?:fetch|read|load|navigate)|request failed|upstream returned an error|permission denied|access denied|timed? ?out|\bHTTP\s+[45]\d\d\b|\bstatus(?: code)?\s+[45]\d\d\b)/i;
+const webReadFailureOutputPattern = /(?:navigation failed|failed to (?:fetch|read|load|navigate)|unable to (?:fetch|read|load|navigate)|request failed|upstream returned an error|permission denied|access denied|timed? ?out|\bHTTP\s+[45]\d\d\b|\bstatus(?: code)?\s+[45]\d\d\b|\b(?:fetch|read|load|navigate|navigation|request|connection|page|website)\b.{0,80}\b(?:failed|failure|unavailable|unreachable|denied|error|timed? ?out)\b|\b(?:failed|failure|unavailable|unreachable|denied|error|timed? ?out)\b.{0,80}\b(?:fetch|read|load|navigate|navigation|request|connection|page|website)\b)/i;
 
 function classifyProbeFailure(errorClass) {
   return capabilityFailureClassValues.includes(errorClass) ? errorClass : "unclassified";

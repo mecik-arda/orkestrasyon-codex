@@ -498,7 +498,7 @@ test("direct Antigravity distinguishes tool prohibitions from explicit web reque
   const runtime = createBridgeRuntime({ configuration, adapters: { antigravity: adapter }, sleep: async () => {} });
   const handlers = createMcpToolHandlers({ runtime, trustedWorkspace: root, configuration });
   const input = { model: "gemini_flash_3_8_medium", mode: "read_only" };
-  for (const directive of ["Do not use tools, open files, browse, or delegate.", "Do not browse the web."]) {
+  for (const directive of ["Do not use tools, open files, browse, or delegate.", "Do not browse the web.", "Do not browse, open files, use tools, or delegate."]) {
     const reply = await handlers.runAntigravity({ ...input, prompt: `Tool-free acceptance task. ${directive} Compute six multiplied by seven.` });
     assert.equal(reply.isError, false);
     assert.equal(reply.structuredContent.result, "42");

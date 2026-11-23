@@ -20,7 +20,17 @@ const excerptSecretPatterns = [
 ];
 const httpUrlPattern = /https?\s*:\s*\/\s*\/\s*\S+/i;
 const webIntentPromptPattern = /https?:\/\/|\bread_url(?:_content)?\b|\bweb\b|\binternet\b|\bonline\b|\bsearch\b|\bresearch\b|\bbrowse\b|araştır|arastir|güncel|guncel|haber|fiyat|kaynak[^\s]*\s*(bul|göster|goster|ara|araştır|arastir)|\bgoogle\b|\bwebsite\b|\bsite\w*\b|\bsayfa\w*\b|çevrimiçi|cevrimici|internette|internetten|atıf|citation|today|latest/i;
-const standaloneWebProhibitionPattern = /(^|[.!?;\r\n])[ \t]*(?:do not|don['’]t|never)[ \t]+(?:(?:use tools|open files|read files|delegate)[ \t]*,[ \t]*)*(?:browse(?: (?:the )?(?:web|internet))?|(?:use|search) (?:the )?(?:web|internet)|go online)(?:[ \t]*,[ \t]*(?:or[ \t]+)?(?:use tools|open files|read files|delegate))*[ \t]*(?=$|[.!?;\r\n])/giu;
+const englishProhibitionPrefix = String.raw`(?:do not|don['’]t|never)`;
+const englishNonWebActions = String.raw`(?:use tools|open files|read files|delegate)`;
+const englishWebActions = String.raw`(?:browse(?: (?:the )?(?:web|internet|online))?|(?:use|search) (?:the )?(?:web|internet)|go online)`;
+const englishProhibitionSeparator = String.raw`(?:[ \t]*,[ \t]*(?:or[ \t]+)?|[ \t]+or[ \t]+)`;
+const englishRepeatedNegationSeparator = String.raw`(?:[ \t]*,[ \t]*(?:(?:and|or)[ \t]+)?|[ \t]+(?:and|or)[ \t]+)${englishProhibitionPrefix}[ \t]+`;
+const englishAnyProhibitedAction = String.raw`(?:${englishNonWebActions}|${englishWebActions})`;
+const standaloneEnglishWebProhibitionPattern = new RegExp(
+  String.raw`(^|[.!?;\r\n])[ \t]*${englishProhibitionPrefix}[ \t]+(?:(?:${englishNonWebActions})${englishProhibitionSeparator})*${englishWebActions}(?:(?:${englishProhibitionSeparator}${englishAnyProhibitedAction})|(?:${englishRepeatedNegationSeparator}${englishAnyProhibitedAction}))*[ \t]*(?=$|[.!?;\r\n])`,
+  "giu"
+);
+const standaloneTurkishWebProhibitionPattern = /(^|[.!?;\r\n])[ \t]*(?:(?:web(?:['’](?:de|da|den|dan)|(?:de|da|den|dan))|[İIıi]nternet(?:te|ten|de|den))[ \t]+(?:arama|araştırma|arastirma|tarama)[ \t]+(?:yapma|yapmayın)|(?:web(?:['’](?:de|da|den|dan)|(?:de|da|den|dan))|[İIıi]nternet(?:te|ten|de|den))[ \t]+(?:gezme|gezinme|gezinmeyin|gezmeyin|dolaşma|dolaşmayın))[ \t]*(?=$|[.!?;\r\n])/giu;
 const webIntentOutputPattern = /(?:^|\n)\s*(?:\[\d+\]|\d+[.)])\s*(?:kaynak|source)|kayna[ğg]a göre|according to|retrieved from|accessed on|\bdoi:|\bwww\./i;
 
 const sourceUrlHashSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -132,9 +142,15 @@ export function containsWebMarkup(value) {
 }
 
 export function detectWebIntent(prompt, resultText) {
-  const promptSuggestsWeb = typeof prompt === "string" && webIntentPromptPattern.test(prompt.replace(standaloneWebProhibitionPattern, "$1"));
+  const promptSuggestsWeb = typeof prompt === "string" && webIntentPromptPattern.test(removeStandaloneWebProhibitions(prompt));
   const outputSuggestsWeb = typeof resultText === "string" && webIntentOutputPattern.test(resultText);
   return promptSuggestsWeb || outputSuggestsWeb;
+}
+
+function removeStandaloneWebProhibitions(prompt) {
+  return prompt
+    .replace(standaloneEnglishWebProhibitionPattern, "$1")
+    .replace(standaloneTurkishWebProhibitionPattern, "$1");
 }
 
 export function containsSensitiveWebValue(value) {

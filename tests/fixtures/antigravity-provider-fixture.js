@@ -54,7 +54,7 @@ if (invocation.includes("mcp")) {
 } else if (scenario === "probe-workspace-wrong") {
   process.stdout.write(`${JSON.stringify({ response: "NOT_THE_MARKER" })}\n`);
   process.exitCode = 0;
-} else if (["probe-web", "probe-web-no-tool", "probe-web-wrong-url", "probe-web-error-output"].includes(scenario)) {
+} else if (["probe-web", "probe-web-no-tool", "probe-web-wrong-url", "probe-web-error-output", "probe-web-error-with-marker"].includes(scenario)) {
   const prompt = invocation.at(-1) || "";
   if (!prompt.includes("read_url_content")) {
     process.stderr.write("probe prompt did not name the canonical web tool\n");
@@ -69,7 +69,11 @@ if (invocation.includes("mcp")) {
         tool_info: {
           name: "read_url_content",
           parameters: { Url: scenario === "probe-web" ? "https://example.com/" : "https://example.org/" },
-          output: scenario === "probe-web-error-output" ? "Navigation failed: upstream returned an error" : "Example Domain page content"
+          output: scenario === "probe-web-error-output"
+            ? "Navigation failed: upstream returned an error"
+            : scenario === "probe-web-error-with-marker"
+              ? "The fetch is unavailable. Example Domain is the expected title."
+              : "Example Domain page content"
         }
       } });
     }

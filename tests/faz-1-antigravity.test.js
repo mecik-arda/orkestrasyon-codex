@@ -436,7 +436,7 @@ test("Antigravity web kanıtının URL'si aynı denemede açılan kaynakla eşle
     import { createBridgeRuntime } from ${JSON.stringify(runtimeUrl.href)};
     const [root, fixturePath] = process.argv.slice(1);
     const outcomes = [];
-    for (const scenario of ["web-source-match", "web-source-mismatch", "web-source-missing", "web-source-interrupted"]) {
+    for (const scenario of ["web-source-match", "web-source-mismatch", "web-source-missing", "web-source-interrupted", "web-source-content-mismatch"]) {
       const configuration = {
         allowedRoots: [root],
         statePaths: { state: path.join(root, "state"), logs: path.join(root, "logs"), cache: path.join(root, "cache") },
@@ -454,7 +454,7 @@ test("Antigravity web kanıtının URL'si aynı denemede açılan kaynakla eşle
     encoding: "utf8",
     timeout: 12000
   });
-  const [accepted, mismatch, missing, interrupted] = JSON.parse(output);
+  const [accepted, mismatch, missing, interrupted, contentMismatch] = JSON.parse(output);
   assert.equal(accepted.ok, true);
   assert.equal(accepted.webEvidence.verificationStatus, "unverified");
   for (const result of [mismatch, missing]) {
@@ -466,6 +466,10 @@ test("Antigravity web kanıtının URL'si aynı denemede açılan kaynakla eşle
   assert.equal(interrupted.ok, false);
   assert.equal(interrupted.reason, "process_error");
   assert.equal(interrupted.webEvidence, undefined);
+  assert.equal(contentMismatch.ok, false);
+  assert.equal(contentMismatch.reason, "web_evidence_invalid");
+  assert.equal(contentMismatch.metrics.diagnostics.webEvidenceFailureCode, "web_source_content_not_observed");
+  assert.equal(contentMismatch.webEvidence, undefined);
   assert.doesNotMatch(output, /example\.com|example\.org|RAW_WEB_PAGE_SENTINEL/);
 });
 

@@ -20,7 +20,7 @@ const excerptSecretPatterns = [
 ];
 const httpUrlPattern = /https?\s*:\s*\/\s*\/\s*\S+/i;
 const webIntentPromptPattern = /https?:\/\/|\bread_url(?:_content)?\b|\bweb\b|\binternet\b|\bonline\b|\bsearch\b|\bresearch\b|\bbrowse\b|araştır|arastir|güncel|guncel|haber|fiyat|kaynak[^\s]*\s*(bul|göster|goster|ara|araştır|arastir)|\bgoogle\b|\bwebsite\b|\bsite\w*\b|\bsayfa\w*\b|çevrimiçi|cevrimici|internette|internetten|atıf|citation|today|latest/i;
-const standaloneWebProhibitionPattern = /(^|[.!?;\r\n])[ \t]*(?:do not|don['’]t|never)[ \t]+(?:(?:use tools|open files|read files)[ \t]*,[ \t]*)*(?:browse(?: (?:the )?(?:web|internet))?|(?:use|search) (?:the )?(?:web|internet)|go online)(?:,[ \t]*(?:or )?delegate)?[ \t]*(?=$|[.!?;\r\n])/giu;
+const standaloneWebProhibitionPattern = /(^|[.!?;\r\n])[ \t]*(?:do not|don['’]t|never)[ \t]+(?:(?:use tools|open files|read files|delegate)[ \t]*,[ \t]*)*(?:browse(?: (?:the )?(?:web|internet))?|(?:use|search) (?:the )?(?:web|internet)|go online)(?:[ \t]*,[ \t]*(?:or[ \t]+)?(?:use tools|open files|read files|delegate))*[ \t]*(?=$|[.!?;\r\n])/giu;
 const webIntentOutputPattern = /(?:^|\n)\s*(?:\[\d+\]|\d+[.)])\s*(?:kaynak|source)|kayna[ğg]a göre|according to|retrieved from|accessed on|\bdoi:|\bwww\./i;
 
 const sourceUrlHashSchema = z.string().regex(/^[a-f0-9]{64}$/);

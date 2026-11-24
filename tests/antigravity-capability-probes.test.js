@@ -159,6 +159,12 @@ test("CAP-05: web-read başarısı ve izin reddi ayrı raporlanır", async () =>
   const wrongUrlAdapter = createProbeAdapter("probe-web-wrong-url");
   const wrongUrl = await wrongUrlAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
   assert.equal(wrongUrl.webRead, "unavailable");
+  const errorOutputAdapter = createProbeAdapter("probe-web-error-output");
+  const errorOutput = await errorOutputAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
+  assert.equal(errorOutput.webRead, "unavailable");
+  const errorMarkerAdapter = createProbeAdapter("probe-web-error-with-marker");
+  const errorMarker = await errorMarkerAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
+  assert.equal(errorMarker.webRead, "unavailable");
   const deniedAdapter = createProbeAdapter("probe-web-denied");
   const denied = await deniedAdapter.probeCapabilities({ model: "gemini_flash_3_8", capabilities: ["webRead"] });
   assert.equal(denied.webRead, "not_probed");

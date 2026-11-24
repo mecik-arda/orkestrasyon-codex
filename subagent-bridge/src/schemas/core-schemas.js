@@ -49,6 +49,7 @@ export const webEvidenceFailureCodeValues = [
   "web_evidence_missing",
   "web_read_not_observed",
   "web_source_not_observed",
+  "web_source_content_not_observed",
   "unclassified_evidence_rejection"
 ];
 export const providerCodeValues = [

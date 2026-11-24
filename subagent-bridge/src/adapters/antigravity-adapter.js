@@ -582,7 +582,7 @@ function tryHashWebSource(sourceUrl) {
   }
 }
 
-export function extractAntigravityStreamTrace(stdout, stderr = "") {
+export function extractAntigravityStreamTrace(stdout, stderr = "", { requiredSourceExcerpt = null } = {}) {
   let terminalResult = null;
   let readUrlToolAvailable = null;
   let readUrlObserved = false;
@@ -590,6 +590,8 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
   let readUrlPermissionDenied = false;
   let readUrlFailed = false;
   const observedSourceHashes = new Set();
+  const observedSourceHashesWithRequiredExcerpt = new Set();
+  const observedSourceOutputs = [];
   const lines = String(stdout || "").split(/\r?\n/u).filter((line) => line.trim().length > 0);
   for (const line of lines) {
     let event;
@@ -614,11 +616,18 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
     if (toolError) {
       if (readUrlErrorIsPermissionDenied(toolError)) readUrlPermissionDenied = true;
       else readUrlFailed = true;
-    } else if (typeof step.tool_info?.output === "string" && step.tool_info.output.trim().length > 0) {
+    } else if (typeof step.tool_info?.output === "string" && step.tool_info.output.trim().length > 0 && !webReadFailureOutputPattern.test(step.tool_info.output)) {
       readUrlSucceeded = true;
       const parameters = step.tool_info.parameters;
       const sourceHash = tryHashWebSource(parameters?.Url ?? parameters?.url);
-      if (sourceHash) observedSourceHashes.add(sourceHash);
+      if (sourceHash) {
+        observedSourceHashes.add(sourceHash);
+        observedSourceOutputs.push({ sourceHash, output: step.tool_info.output });
+        if (typeof requiredSourceExcerpt === "string" && requiredSourceExcerpt.length > 0
+          && step.tool_info.output.normalize("NFC").toLocaleLowerCase("en-US").includes(requiredSourceExcerpt.normalize("NFC").toLocaleLowerCase("en-US"))) {
+          observedSourceHashesWithRequiredExcerpt.add(sourceHash);
+        }
+      }
     } else {
       readUrlFailed = true;
     }
@@ -640,7 +649,18 @@ export function extractAntigravityStreamTrace(stdout, stderr = "") {
               ? "not_invoked"
               : "not_observed";
   const extraction = parseAntigravityResult(terminalResult ? JSON.stringify(terminalResult) : "");
-  return { ...extraction, webReadStatus, observedSourceHashes };
+  let webEvidenceContentObserved = false;
+  try {
+    const parsed = providerWebEvidenceCarrierSchema.safeParse(JSON.parse(extraction.resultText || ""));
+    if (parsed.success && parsed.data.webEvidence) {
+      const expectedSourceHash = tryHashWebSource(parsed.data.webEvidence.sourceUrl);
+      webEvidenceContentObserved = Boolean(expectedSourceHash) && observedSourceOutputs.some(({ sourceHash, output }) => sourceHash === expectedSourceHash
+        && parsed.data.webEvidence.excerpts.every((excerpt) => output.normalize("NFC").includes(excerpt.normalize("NFC"))));
+    }
+  } catch {
+    webEvidenceContentObserved = false;
+  }
+  return { ...extraction, webReadStatus, observedSourceHashes, observedSourceHashesWithRequiredExcerpt, webEvidenceContentObserved };
 }
 
 function claimedWebSourceHash(resultText) {
@@ -695,6 +715,7 @@ const PROBE_CAPABILITIES = ["modelAccess", "toolFreeResponse", "workspaceRead", 
 const DEFAULT_PROBE_TIMEOUT_MS = 300000;
 const WEB_READ_PROBE_URL = "https://example.com";
 const WEB_READ_PROBE_MARKER = /^example domain$/i;
+const webReadFailureOutputPattern = /(?:navigation failed|failed to (?:fetch|read|load|navigate)|unable to (?:fetch|read|load|navigate)|request failed|upstream returned an error|permission denied|access denied|timed? ?out|\bHTTP\s+[45]\d\d\b|\bstatus(?: code)?\s+[45]\d\d\b|\b(?:fetch|read|load|navigate|navigation|request|connection|page|website)\b.{0,80}\b(?:failed|failure|unavailable|unreachable|denied|error|timed? ?out)\b|\b(?:failed|failure|unavailable|unreachable|denied|error|timed? ?out)\b.{0,80}\b(?:fetch|read|load|navigate|navigation|request|connection|page|website)\b)/i;
 
 function classifyProbeFailure(errorClass) {
   return capabilityFailureClassValues.includes(errorClass) ? errorClass : "unclassified";
@@ -726,10 +747,12 @@ function probeResponse(processResult, webReadTrace = false) {
   const classification = classifyAntigravityError(null, processResult.code, processResult.stdout, processResult.stderr, processResult.signal);
   if (!classification.valid) return { failureClass: classifyProbeFailure(classification.errorClass), text: "" };
   if (webReadTrace) {
-    const trace = extractAntigravityStreamTrace(processResult.stdout, processResult.stderr);
+    const trace = extractAntigravityStreamTrace(processResult.stdout, processResult.stderr, { requiredSourceExcerpt: "Example Domain" });
     if (trace.webReadStatus === "permission_denied") return { failureClass: "permission_denied", text: "" };
     if (trace.failureClass) return { failureClass: classifyProbeFailure(trace.failureClass), text: "" };
-    const observedExpectedSource = trace.observedSourceHashes.has(tryHashWebSource(WEB_READ_PROBE_URL));
+    const expectedSourceHash = tryHashWebSource(WEB_READ_PROBE_URL);
+    const observedExpectedSource = trace.observedSourceHashes.has(expectedSourceHash)
+      && trace.observedSourceHashesWithRequiredExcerpt.has(expectedSourceHash);
     return { failureClass: null, text: observedExpectedSource ? trace.resultText || "" : "" };
   }
   const extraction = parseAntigravityResult(processResult.stdout);
@@ -1195,6 +1218,24 @@ export function createAntigravityAdapter(configuration, dependencies = {}) {
                 webReadStatus,
                 diagnostics: createAttemptDiagnostics("evidence_invalid", null, {
                   webEvidenceFailureCode: "web_source_not_observed",
+                  settingsLockWaitMs,
+                  providerExecutionMs,
+                  stdoutBytes: Buffer.byteLength(processResult.stdout, "utf8"),
+                  stderrBytes: Buffer.byteLength(processResult.stderr, "utf8")
+                })
+              }
+            });
+          }
+          if (webReadTrace && evidenceSourceHash && streamTrace.webEvidenceContentObserved !== true) {
+            return createFailureSubagentResult("antigravity", model.model, {
+              error: "web evidence excerpt was not observed in the fetched source",
+              reason: "web_evidence_invalid",
+              exitCode: processResult.code,
+              durationMs: Date.now() - startedAt,
+              metrics: {
+                webReadStatus,
+                diagnostics: createAttemptDiagnostics("evidence_invalid", null, {
+                  webEvidenceFailureCode: "web_source_content_not_observed",
                   settingsLockWaitMs,
                   providerExecutionMs,
                   stdoutBytes: Buffer.byteLength(processResult.stdout, "utf8"),

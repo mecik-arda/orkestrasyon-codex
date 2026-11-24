@@ -498,14 +498,14 @@ test("direct Antigravity distinguishes tool prohibitions from explicit web reque
   const runtime = createBridgeRuntime({ configuration, adapters: { antigravity: adapter }, sleep: async () => {} });
   const handlers = createMcpToolHandlers({ runtime, trustedWorkspace: root, configuration });
   const input = { model: "gemini_flash_3_8_medium", mode: "read_only" };
-  for (const directive of ["Do not use tools, open files, browse, or delegate.", "Do not browse the web."]) {
+  for (const directive of ["Do not use tools, open files, browse, or delegate.", "Do not browse the web.", "Do not browse, open files, use tools, or delegate.", "Do not browse or search the web.", "Never use tools or browse the web.", "Do not browse the web, and do not search the web.", "Do not browse the web, or do not search the web.", "Don't browse online.", "İnternette arama yapma.", "İnternetten araştırma yapmayın.", "İnternette gezinmeyin.", "Web'de gezinme."]) {
     const reply = await handlers.runAntigravity({ ...input, prompt: `Tool-free acceptance task. ${directive} Compute six multiplied by seven.` });
     assert.equal(reply.isError, false);
     assert.equal(reply.structuredContent.result, "42");
     assert.equal(reply.structuredContent.webEvidence, null);
     assert.notEqual(requests.at(-1).webReadTrace, true);
   }
-  for (const instruction of ["Use read_url_content on the stated public page.", "Read https://www.iana.org/domains/reserved."]) {
+  for (const instruction of ["Use read_url_content on the stated public page.", "Read https://www.iana.org/domains/reserved.", "Do not browse, but search the web for the official page.", "Do not browse the web, and search the web for the official policy.", "Do not browse the web; search the web for the official policy.", "Do not browse the web.\nSearch the web for the official policy.", "İnternette arama yapma, ama resmi kaynak için araştır."]) {
     const reply = await handlers.runAntigravity({ ...input, prompt: `Do not browse the web. ${instruction}` });
     assert.equal(reply.isError, true);
     assert.equal(reply.structuredContent.reason, "web_evidence_invalid");
